@@ -221,6 +221,7 @@ class OrdinaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.chat.get(tid)['error_code'],'reply_decision_required')
         self.chat=ChatEngine(self.store,self.config)
         await self.chat.retry(tid)
+        self.assertEqual(self.chat.get(tid)['error_code'],'private_reply_transport_unavailable')
         self.assertFalse(self.out.list(self.pid,self.sid,tid))
 
     def consent(self,enable):

@@ -65,6 +65,8 @@ class OrdinaryReply:
 
     def _snapshot(self, db, tid, phase='main'):
         turn, base = self.entry._binding(db,tid,phase)
+        if self.providers is None:
+            raise RuntimeErrorBase('private_reply_transport_unavailable')
         check_scope = getattr(self.providers,'check_scope',None)
         if check_scope:
             check_scope(base)
@@ -73,7 +75,8 @@ class OrdinaryReply:
         if (source_set and 'lookup_target_bundle' in source_set
                 and source_set['lookup_target_bundle']!=getattr(self.providers,'version',None)):
             raise RuntimeErrorBase('private_chat_review_version_changed')
-        if source_set and source_set.get('single_retrieval_bundle',self.providers.version)!=self.providers.version:
+        if (source_set and 'single_retrieval_bundle' in source_set
+                and source_set['single_retrieval_bundle'] != self.providers.version):
             raise RuntimeErrorBase('private_chat_review_version_changed')
         material = collect(self.entry,db,turn,base,source_set)
         if frozen and fingerprint(material)!=frozen['material_hash']:
@@ -532,8 +535,6 @@ class OrdinaryReply:
             if db.execute("""SELECT 1 FROM turns WHERE session_id=? AND rowid<(SELECT rowid FROM turns WHERE id=?)
                     AND status IN ('queued','running') AND cancelled_at IS NULL""",(turn['session_id'],tid)).fetchone():
                 return
-        if self.providers is None:
-            raise RuntimeErrorBase('private_reply_transport_unavailable')
         research=None
         if base['route']==RESEARCH:
             if not getattr(self.providers,'research',False) or not callable(getattr(self.providers,'retrieve',None)):
