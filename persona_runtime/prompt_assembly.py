@@ -154,5 +154,11 @@ def attach(manifest, turn, details, selection_record=None):
         'auxiliary_registry': AUXILIARY_ROLES,
         'material_selection': material_selection(policy,details,selection_record),
         'details_omitted': False}
+    if details.get('message_time_bindings'):
+        times = [dict(entry, message_index=raw['message_count'] - 1)
+                 if entry.get('position') == 'current_input' else entry
+                 for entry in details['message_time_bindings']]
+        manifest = dict(manifest, message_time_proof={'count':len(times), 'sha256':fingerprint(times)})
+        diagnostic['source_refs']['message_times'] = times
     diagnostic = bounded(diagnostic)
     return fit_manifest(manifest | {'prompt_assembly': diagnostic}) if diagnostic else manifest

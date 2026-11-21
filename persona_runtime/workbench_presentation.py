@@ -68,18 +68,21 @@ class WorkbenchPresentation:
                     self.journal.update(rid, lease={k:offer[k] for k in ("id","lease_id","body_hash")})
                 self.journal.update(rid,state="painting")
                 self.active.add(rid)
-                return {"id":rid,"text":body}
+                return {"id":rid,"text":body,"fragment":args["notice_id"] if kind=="notice" else offer["id"]}
             except LocalAPIError as error:
                 if str(error) in self.terminal_errors:
                     self.journal.forget(rid)
                     return None
                 raise
 
-    def decide(self, page, rid, state):
+    def decide(self, page, rid, state, reason=None):
+        from .desktop_presentation import PAINT_REASONS
+        if reason is not None and reason not in PAINT_REASONS:
+            return False
         with self.lock:
             if page != self.page or rid not in self.active or state not in ("presented","not_presented","unknown"):
                 return False
-            self.journal.update(rid,state=state)
+            self.journal.update(rid,state=state,reason=reason)
             self.active.discard(rid)
             return True
 
@@ -114,14 +117,16 @@ class WorkbenchPresentation:
         kind = scope["kind"]
         args = {k:v for k,v in scope.items() if k not in ("instance","kind")}
         state = entry["state"]
+        reason=entry.get("reason")
         if state=="painting":
+            reason="renderer_lost"
             state="unknown"
         if kind=="notice":
             if state in ("requesting","not_presented"):
-                self.client.manage("chat.notice.release",**args,presentation_id=rid)
+                self.client.manage("chat.notice.release",**args,presentation_id=rid,**({"reason":reason} if reason else {}))
                 return
             action = "chat.notice.presented" if state=="presented" else "chat.notice.unknown"
-            self.client.manage(action,**args,presentation_id=rid)
+            self.client.manage(action,**args,presentation_id=rid,**({"reason":reason} if state=="unknown" and reason else {}))
             return
         action = "expression.v2." if kind=="speech" else "expression.presentation."
         lease = entry.get("lease")
@@ -137,4 +142,6 @@ class WorkbenchPresentation:
         decision=dict(principal,lease_id=lease["lease_id"],body_hash=lease["body_hash"],receipt_id=rid,state=state,
                       webview=True,publication_id=args["publication_id"],revision=args["revision"],ordinal=args["ordinal"])
         decision["fragment_id" if kind=="speech" else "utterance_id"]=lease["id"]
+        if reason:
+            decision["reason"]=reason
         self.client.manage(action+"ack",**decision)

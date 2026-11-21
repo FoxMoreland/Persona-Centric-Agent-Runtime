@@ -52,7 +52,7 @@ class CharacterOutlet:
         return True
 
     def _register(self,db,turn,phase,kind,source_id,source_hash,body,policy,voice,context,task_id=None):
-        if (kind,phase) not in (('main_receipt','main'),('organization_receipt','search_notice'),('dialogue_reply','main'),('dialogue_reply','search_notice'),('scene_reply','main')):
+        if (kind,phase) not in (('main_receipt','main'),('organization_receipt','search_notice'),('dialogue_reply','main'),('dialogue_reply','search_notice'),('scene_reply','main'),('maibot_private_reply','main'),('maibot_private_reply','search_notice')):
             raise ExpressionAssetError('speech_source_adapter_required')
         old=db.execute('SELECT * FROM expression_speech_units WHERE source_kind=? AND source_id=?',(kind,source_id)).fetchone()
         if old:
@@ -85,6 +85,8 @@ class CharacterOutlet:
         root=db.execute('SELECT * FROM turns WHERE id=?',(unit['turn_id'],)).fetchone()
         if not root:raise ExpressionAssetError('speech_parent_missing')
         turn=dict(root)
+        if unit['source_kind']=='maibot_private_reply':
+            return self.ordinary.validate_publication(db,turn,unit)
         if unit['source_kind']=='dialogue_reply':
             return self.direct.validate_publication(db,unit)
         if unit['source_kind']=='scene_reply':

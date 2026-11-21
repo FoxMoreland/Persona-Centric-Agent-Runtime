@@ -1,12 +1,46 @@
-"""Reconcile a structure-33 desktop v2 submission using local metadata only."""
+"""Reconcile a desktop v2 submission on schemas 33 through 36 using local metadata only."""
 
 import argparse
 from contextlib import closing
 import json
+import math
 from pathlib import Path
 import sqlite3
 
 from .pcar_acceptance_check import safe_file
+
+
+def lookup_call_evidence(row):
+    """Read scalar timing and provider-reported counts without exporting tool payloads."""
+    call = {key: row[key] for key in ("step", "attempt_id", "binding", "state")}
+    usage = json.loads(row["usage_json"] or "{}") or {}
+    result = json.loads(row["result_json"] or "{}") or {}
+    provider = usage.get("usage") or usage
+    transport = usage.get("transport") or result.get("diagnostics") or usage
+    timing = {}
+    for key in ("elapsed_ms", "first_event_ms", "first_content_delta_ms"):
+        value = transport.get(key)
+        if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+            timing[key] = value
+    if timing:
+        call["timing"] = timing
+    http_status = transport.get("http_status")
+    if type(http_status) is int:
+        call["http_status"] = http_status
+    breakdown = provider.get("completion_tokens_details") or {}
+    counts = {key: value for key, value in (
+        ("prompt_tokens", provider.get("prompt_tokens")),
+        ("completion_tokens", provider.get("completion_tokens")),
+        ("reasoning_tokens", breakdown.get("reasoning_tokens")),
+    ) if type(value) is int and value >= 0}
+    if counts:
+        call["tokens"] = counts
+    tools = provider.get("server_tool_use") or {}
+    counts = {key: tools[key] for key in ("tool_search", "tool_fetch", "tool_image_search")
+              if type(tools.get(key)) is int and tools[key] >= 0}
+    if counts:
+        call["provider_tool_counts"] = counts
+    return call
 
 
 def collect(home: Path, request_id: str) -> dict:
@@ -20,8 +54,8 @@ def collect(home: Path, request_id: str) -> dict:
         db.execute("PRAGMA query_only=ON")
         db.execute("BEGIN")
         schema = db.execute("PRAGMA user_version").fetchone()[0]
-        if schema != 33:
-            raise ValueError("This report requires business schema 33.")
+        if schema not in (33,34,35,36):
+            raise ValueError("This report requires business schema 33 through 36.")
         accepted = db.execute(
             """SELECT r.id AS receipt_id, r.request_id, r.persona_id, r.session_id,
                       r.event_id, r.batch_id, r.received_at, b.state AS batch_state,
@@ -45,6 +79,55 @@ def collect(home: Path, request_id: str) -> dict:
         if not accepted or not accepted["turn_id"]:
             return report
         turn_id = accepted["turn_id"]
+        if schema>=36:
+            commit=db.execute("""SELECT attempt_id,status,json_array_length(fact_ids) AS facts,rejected,committed_at
+                FROM knowledge_study_commits WHERE turn_id=?""",(turn_id,)).fetchone()
+            reread=db.execute("""SELECT outcome,json_array_length(fact_ids) AS facts,checked_at
+                FROM knowledge_study_reads WHERE turn_id=?""",(turn_id,)).fetchone()
+            report['study_commit']=dict(commit) if commit else None
+            reasons=db.execute('SELECT value FROM knowledge_control WHERE key=?',('private.study.rejections.'+turn_id,)).fetchone()
+            report['study_rejections']=json.loads(reasons[0]) if reasons else []
+            report['study_reread']=dict(reread) if reread else None
+            report['study_timeline']=[dict(r) for r in db.execute("""SELECT event,at_epoch FROM request_activity
+                WHERE turn_id=? AND (event LIKE 'knowledge_stud%' OR event='knowledge_ready') ORDER BY seq""",(turn_id,))]
+        if schema >= 35:
+            local=db.execute("""SELECT query_hash,outcome,json_array_length(fact_ids) AS selected_facts,checked_at
+                FROM local_knowledge_reads WHERE turn_id=?""",(turn_id,)).fetchone()
+            report['local_knowledge_read']=dict(local) if local else None
+        if schema >= 34:
+            report["private_reply_attempts"] = [dict(row) for row in db.execute(
+                """SELECT a.id,a.phase,a.draft,a.state,a.started_at,a.received_at,d.id decision_id,
+                          d.execution_revision FROM private_reply_attempts a JOIN private_reply_decisions d
+                          ON d.id=a.decision_id WHERE a.turn_id=? ORDER BY a.rowid""", (turn_id,))]
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='private_reply_nodes'").fetchone():
+                report["private_decisions"] = [dict(row) for row in db.execute(
+                    """SELECT node,draft,attempt_id,state,request_hash FROM private_reply_nodes
+                       WHERE turn_id=? AND node!='handoff' ORDER BY rowid""",(turn_id,))]
+                report["private_reviews"] = [dict(row) for row in db.execute(
+                    """SELECT a.draft,r.receipt_id,r.approved,r.reason FROM private_reply_reviews r
+                       JOIN private_reply_attempts a ON a.id=r.attempt_id WHERE a.turn_id=? ORDER BY a.draft""",(turn_id,))]
+                report["private_format_reviews"] = [
+                    {"attempt_id":row[0], **json.loads(row[1])} for row in db.execute(
+                        """SELECT a.id,k.value FROM private_reply_attempts a JOIN knowledge_control k
+                           ON k.key='private.reply.format.'||a.id WHERE a.turn_id=? ORDER BY a.rowid""",(turn_id,))]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='private_lookup_calls'").fetchone():
+            from persona_runtime import public_lookup
+            trace=public_lookup.trace(db,turn_id)
+            if trace:
+                revision=trace.get('revision')
+                if revision:
+                    trace['revision']=dict(revision,documents=[{k:v for k,v in doc.items() if k!='url'}
+                                                               for doc in revision['documents']])
+                report['public_lookup']=trace
+            report['lookup_calls']=[lookup_call_evidence(r) for r in db.execute(
+                """SELECT step,attempt_id,binding,state,usage_json,result_json FROM private_lookup_calls
+                   WHERE turn_id=? AND step!='organize' ORDER BY rowid""",(turn_id,))]
+            if schema>=36:
+                report['study_attempts']=[dict(r) for r in db.execute(
+                    "SELECT attempt_id,binding,state FROM private_lookup_calls WHERE turn_id=? AND step='organize'",(turn_id,))]
+            saved=db.execute("""SELECT outcome,length(notes) notes_characters,json_array_length(sources_json) sources
+                                FROM private_lookup_records WHERE turn_id=?""",(turn_id,)).fetchone()
+            report['lookup_record']=dict(saved) if saved else None
         for row in db.execute(
             "SELECT id, status, usage_json FROM attempts WHERE turn_id=? ORDER BY rowid", (turn_id,)
         ):

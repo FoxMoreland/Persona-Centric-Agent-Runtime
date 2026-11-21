@@ -144,7 +144,10 @@ class IngressService:
     def _remember(self,conn,persona,operation_id,fingerprint,result):
         conn.execute('INSERT INTO batch_operations VALUES (?,?,?,?,?,?)',(operation_id,persona,LOCAL_USER_ID,fingerprint,encoded(result),timestamp()))
 
-    def update_policy(self,persona_id,channel,mode,expected_version,operation_id,pending_action=None,disposition_mode=None,reply_mode=None,context_mode=None,cross_session=None,character_retrieval_mode=None,expected_selected=None,conversation_policy_version=None,expression_policy_version=None,situation_observation_mode=None,companion_mode=None,delivery_source=None,buffer_quiet_ms=None,manual_confirmation=None):
+    def update_policy(self,persona_id,channel,mode,expected_version,operation_id,pending_action=None,disposition_mode=None,reply_mode=None,context_mode=None,cross_session=None,character_retrieval_mode=None,expected_selected=None,conversation_policy_version=None,expression_policy_version=None,situation_observation_mode=None,companion_mode=None,delivery_source=None,buffer_quiet_ms=None,manual_confirmation=None,message_time_version=None):
+        from .message_time import KEY as TIME_KEY, VERSION as TIME_VERSION
+        if message_time_version is not None and (channel != 'desktop' or message_time_version not in ('off', TIME_VERSION)):
+            raise RuntimeErrorBase('invalid_message_time_version')
         custom_buffer=buffer_quiet_ms is not None or manual_confirmation is not None
         if custom_buffer and channel!='desktop':raise RuntimeErrorBase('desktop_buffer_only')
         if (buffer_quiet_ms is not None and (type(buffer_quiet_ms) is not int or not 1000<=buffer_quiet_ms<=MAX_QUIET_MS)
@@ -156,7 +159,7 @@ class IngressService:
         if companion_mode=='disabled':
             if any(value is not None for value in (disposition_mode,reply_mode,context_mode,cross_session,
                     character_retrieval_mode,conversation_policy_version,expression_policy_version,situation_observation_mode,
-                    buffer_quiet_ms,manual_confirmation)):
+                    buffer_quiet_ms,manual_confirmation,message_time_version)):
                 raise RuntimeErrorBase('companion_restore_conflict')
             return self._disable_companion_policy(persona_id,channel,mode,expected_version,operation_id,
                 pending_action,expected_selected)
@@ -194,6 +197,8 @@ class IngressService:
                 from .decision_capsule import require_admission
                 require_admission(self.engine,persona_id,disposition_mode)
             value={'channel':channel,'mode':mode,'reply_mode':reply_mode,'context_mode':context_mode,'cross_session':cross_session,'expected_version':expected_version,'pending_action':pending_action}
+            if message_time_version is not None:
+                value[TIME_KEY] = message_time_version
             if requested_disposition_mode is not None:value['disposition_mode']=requested_disposition_mode
             if requested_observation_mode is not None:value['situation_observation_mode']=requested_observation_mode
             if character_retrieval_mode is not None:value['character_retrieval_mode']=character_retrieval_mode
@@ -238,6 +243,8 @@ class IngressService:
             cross_session=current['cross_session'] if cross_session is None else cross_session
             character_policy=selected_character if selected_character is not None else current['character_retrieval']
             context_changed=observation_changed or (context_mode,cross_session,character_policy)!=(current['context_mode'],current['cross_session'],current['character_retrieval'])
+            if message_time_version is not None and message_time_version != current.get(TIME_KEY, 'off'):
+                context_changed = True
             changed=mode!=current['mode'] or context_changed or reply_mode!=current['reply_mode'] or strategy_changed or disposition_mode!=current.get('disposition_mode','baseline')
             if changed and channel=='desktop' and manual_pending(conn,persona_id):
                 raise RuntimeErrorBase('manual_buffer_pending')
@@ -250,6 +257,10 @@ class IngressService:
             else:
                 vid=identifier()
                 data=json.loads(current['data_json']);data['expression']=expression_snapshot(reply_mode,vid,version=target_expression);data['context']={**data.get('context',{}),'context_mode':context_mode,'cross_session':cross_session,'character_retrieval':character_policy,'disposition_mode':disposition_mode,'situation_observation_mode':situation_observation_mode}
+                if message_time_version == TIME_VERSION:
+                    data['context'][TIME_KEY] = TIME_VERSION
+                elif message_time_version == 'off':
+                    data['context'].pop(TIME_KEY, None)
                 if selected_companion is not None:
                     from .companion import capture_restore, RESTORE_KEY
                     if 'companion' not in old_data:
@@ -379,7 +390,7 @@ class IngressService:
 
     def _receipt(self,conn,row):
         batch=self._view(conn,row['batch_id'])
-        return {'receipt_id':row['id'],'event_id':row['event_id'],'batch_id':row['batch_id'],'accepted_seq':row['accepted_seq'],'persona_id':row['persona_id'],'session_id':row['session_id'],'channel':row['channel'],'origin':batch['origin'],'turn_id':batch['turn_id'],'status':batch['status'],'batch_revision':batch['revision'],'ingress_ms':row['ingress_ms']}
+        return {'receipt_id':row['id'],'received_at':row['received_at'],'event_id':row['event_id'],'batch_id':row['batch_id'],'accepted_seq':row['accepted_seq'],'persona_id':row['persona_id'],'session_id':row['session_id'],'channel':row['channel'],'origin':batch['origin'],'turn_id':batch['turn_id'],'status':batch['status'],'batch_revision':batch['revision'],'ingress_ms':row['ingress_ms']}
 
     def lookup(self,channel,request_id):
         with self.store.connection() as conn:
@@ -388,17 +399,26 @@ class IngressService:
 
     def accept(self,value,*,desktop_ticket=None):
         started=time.perf_counter()
-        allowed={'channel','text','request_id','persona_id','session_id','bot','sender','platform_message_id','platform_time','reference','public_task','desktop_presentation','expected_input_policy'}
+        allowed={'channel','text','request_id','persona_id','session_id','bot','sender','platform_message_id','platform_time','reference','public_task','lookup_span','long_requested','desktop_presentation','expected_input_policy'}
         if not isinstance(value,dict) or set(value)-allowed:raise RuntimeErrorBase('unknown_ingress_field')
         channel=value.get('channel','desktop');text=value.get('text');rid=value.get('request_id')
         require_text(text,'text');require_text(rid,'request_id')
         if 'desktop_presentation' in value:
             from .tk_notice import CONTRACT
             if channel!='desktop' or value['desktop_presentation']!=CONTRACT:raise RuntimeErrorBase('invalid_desktop_presentation')
+        if channel=='desktop' and 'public_task' in value and 'lookup_span' not in value:
+            from .private_lookup import composer_span
+            span=composer_span(self.store,self.config,rid,value['public_task'],batch=True)
+            if span is not None:
+                value={k:v for k,v in value.items() if k!='public_task'}|{'lookup_span':span}
         if 'public_task' in value:
             from .knowledge_native import public_task
             if channel!='desktop':raise RuntimeErrorBase('native_public_task_channel_invalid')
             value={**value,'public_task':public_task(value['public_task'])}
+        if 'lookup_span' in value and (channel!='desktop' or 'public_task' in value):
+            raise RuntimeErrorBase('private_lookup_scope_changed')
+        if 'long_requested' in value and (value['long_requested'] is not True or channel!='desktop'):
+            raise RuntimeErrorBase('invalid_ingress_input')
         if channel not in ('desktop','qq') or len(text)>24000 or len(rid)>200:raise RuntimeErrorBase('invalid_ingress_input')
         if self.engine.draining:raise RuntimeErrorBase('service_draining')
         from .archive import target_spec
@@ -444,6 +464,11 @@ class IngressService:
             if channel == "desktop":
                 from .desktop_recovery import model_binding
                 policy["desktop_binding"] = model_binding(cfg)
+                from .private_reply_entry import selected
+                route = selected(conn,cfg['instance_id'],pid)
+                if route:
+                    policy["private_reply_instance"] = cfg['instance_id']
+                    policy["private_reply_route"] = route
             from .en5_replay_scope import replay_request
             replay_request(self.store.paths,conn,value,pid,sid)
             if 'desktop_presentation' in value:policy['desktop_presentation']=value['desktop_presentation']
@@ -451,7 +476,7 @@ class IngressService:
             from .tk_notice import CONTRACT as VISIBLE_DESKTOP
             if policy.get('desktop_presentation')!=VISIBLE_DESKTOP:
                 policy['context'].pop('import_style',None)
-            if SCENE_KEY in policy['context'] and policy.get('desktop_presentation')!=VISIBLE_DESKTOP:
+            if SCENE_KEY in policy['context'] and not policy.get('private_reply_instance') and policy.get('desktop_presentation')!=VISIBLE_DESKTOP:
                 raise RuntimeErrorBase('scene_workbench_required')
             frozen=snapshot(conn,pid);character=character_head(conn,pid)
             scope=digest([pid,LOCAL_USER_ID,channel,bot,peer,sid,policy,frozen['core']['id'],frozen['expression']['id'],frozen['relationship']['id'],character['id']])
@@ -489,12 +514,21 @@ class IngressService:
             if 'public_task' in value:
                 from .knowledge_native import bind_public_event
                 bind_public_event(conn,eid,pid,sid,channel,text,value['public_task'])
+            if 'lookup_span' in value:
+                from .private_lookup import bind_span
+                bind_span(conn,self.config,sid,eid,text,value['lookup_span'])
+            if value.get('long_requested'):
+                from .private_lookup import bind_long
+                bind_long(conn,self.config,eid,text)
             conn.execute('INSERT INTO raw_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(rawid,pid,LOCAL_USER_ID,eid,channel,bot,peer,value.get('platform_message_id'),value.get('platform_time'),timestamp(),'normalized_payload',2 if 'reference' in value else 1,encoded(payload),fp))
             conn.execute('INSERT INTO ingress_receipts(id,source_key,request_id,persona_id,user_id,channel,bot,peer,session_id,fingerprint,raw_event_id,event_id,batch_id,received_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(receipt,source,rid,pid,LOCAL_USER_ID,channel,bot,peer,sid,fp,rawid,eid,bid,timestamp()))
             if 'reference' in value:
                 from .archive import scope as archive_scope
                 from .references import capture
-                capture(conn,eid,archive_scope(pid,channel,bot,peer),value['reference'])
+                from .ordinary_materials import full_revision,history_access
+                full=channel=='desktop' and full_revision(self.store,conn,pid,sid,cfg['model'],'main')
+                with history_access(conn,sid,bool(full)):
+                    capture(conn,eid,archive_scope(pid,channel,bot,peer),value['reference'])
             order=conn.execute('SELECT count(*)+1 FROM input_batch_members WHERE batch_id=?',(bid,)).fetchone()[0]
             conn.execute('INSERT INTO input_batch_members VALUES (?,?,?,?,?,?)',(bid,pid,LOCAL_USER_ID,receipt,eid,order))
             if manual:
@@ -570,6 +604,9 @@ class IngressService:
             if b['channel']=='qq':conn.execute("INSERT INTO deliveries VALUES (?,'pending',?)",(tid,timestamp()))
             record(conn,tid,'accepted');record(conn,tid,'queued')
             if b['channel']=='desktop':
+                if policy.get('private_reply_instance'):
+                    from .private_reply_entry import bind, ROUTE
+                    bind(conn,tid,policy['private_reply_instance'],policy.get('private_reply_route',ROUTE))
                 from .desktop_recovery import register
                 register(conn,tid,self.config.load())
             conn.execute("UPDATE input_batches SET state='linked',revision=revision+1,updated_at=? WHERE id=?",(timestamp(),b['id']))

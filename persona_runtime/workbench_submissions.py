@@ -36,7 +36,7 @@ class WorkbenchSubmissions:
                 else:
                     from .service import RuntimeService
                     RuntimeService._persona(db,pid)
-                allowed = visible_reference(db,pid,sid,ref.get("id")) if sid and isinstance(ref,dict) else None
+                allowed = visible_reference(db,pid,sid,ref.get("id"),Store(self.config.paths)) if sid and isinstance(ref,dict) else None
             stored = dict(current,reference={"id":allowed["id"]} if allowed else None)
             if changed or (key in values and stored != values[key]):
                 values[key] = stored
@@ -126,6 +126,7 @@ class WorkbenchSubmissions:
         if result and result.get("status")=="sealed_waiting_capacity":
             state = "waiting_capacity"
         return {"id":rid, "state":state, "text":payload["text"], "draft_revision":row.get("draft_revision"),
+                "received_at":(result or {}).get("received_at"),
                 "awaiting_confirmation":(result or {}).get("status")=="awaiting_confirmation",
                 "turn_id":(result or {}).get("turn_id"), "event_id":(result or {}).get("event_id"),
                 "batch_id":(result or {}).get("batch_id")}
@@ -186,7 +187,7 @@ class WorkbenchSubmissions:
                     result = None
                 rows.append({"id":payload["request_id"], "state":state,
                              "text":payload["text"], "turn_id":(result or {}).get("turn_id"),
-                             "event_id":(result or {}).get("event_id"), "legacy":True})
+                             "event_id":(result or {}).get("event_id"), "received_at":(result or {}).get("received_at"), "legacy":True})
             return rows
 
     def acknowledge(self, pid, sid, ids):

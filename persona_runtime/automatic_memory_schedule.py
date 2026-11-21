@@ -24,15 +24,17 @@ def page(db,key,query,args,limit):
     return rows
 
 
-def scan_sessions(db,pid,settings,model):
+def scan_sessions(db,pid,settings,model,store=None):
     from .import_history import history_allowed
     sessions=page(db,'sessions/'+pid,"SELECT rowid,id FROM sessions WHERE persona_id=? AND rowid>? ORDER BY rowid LIMIT ?",(pid,),2)
     result=[]
     for ordinal,sid in sessions:
+        from .ordinary_materials import full_revision
+        full=store and full_revision(store,db,pid,sid,model,'organization')
         picks=set();moves={'sessions/'+pid:ordinal}
         for kind in ('native','imported'):
             imported=kind=='imported'
-            if imported and not (settings.get('memory_backfill',True) and model.get('encrypted_key') and history_allowed(db,sid,'memory',model)):continue
+            if imported and not (settings.get('memory_backfill',True) and model.get('encrypted_key') and (full or history_allowed(db,sid,'memory',model))):continue
             key=kind+'/'+sid
             comparison="GLOB" if imported else "NOT GLOB"
             rows=page(db,key,f"""SELECT rowid,id FROM turns WHERE session_id=? AND status='completed'
@@ -59,11 +61,13 @@ def schedule(coordinator,db,pid,settings,enabled_at,pages,force=False):
     for sid,picks,moves in pages:
         groups={}
         for key,value in moves.items():advance(db,key,value)
-        if not picks or limited and not grant(coordinator.store,db,pid,sid,model):continue
+        from .ordinary_materials import full_revision,history_access
+        full=full_revision(coordinator.store,db,pid,sid,model,'organization')
+        if not picks or limited and not full and not grant(coordinator.store,db,pid,sid,model):continue
         query="SELECT rowid AS ordinal,* FROM turns WHERE persona_id=? AND session_id=? AND status='completed' AND id IN ("+','.join('?' for _ in picks)+") ORDER BY rowid"
         for row in db.execute(query,(pid,sid,*picks)):
             t=dict(row);selected=turn_scope(db,t)
-            if limited and history_scope.imported(t):continue
+            if limited and not full and history_scope.imported(t):continue
             if selected['channel'] not in settings['channels'] or selected['channel']=='qq' and (selected['bot'],selected['peer'])!=(settings['qq']['bot'],settings['qq']['peer']):continue
             key=encoded(selected);groups.setdefault(key,[]).append(t);scopes[key]=selected
         for key,turns in groups.items():
@@ -72,7 +76,8 @@ def schedule(coordinator,db,pid,settings,enabled_at,pages,force=False):
             s=db.execute('SELECT * FROM memory_scopes WHERE scope_key=?',(key,)).fetchone()
             pending=[]
             for t in turns:
-                r=history_scope.source_group(db,selected,t,model=model)
+                with history_access(db,sid,bool(full)):
+                    r=history_scope.source_group(db,selected,t,model=model)
                 if r['status']!='found':
                     withdrawn=db.execute("""SELECT 1 FROM source_exclusions WHERE event_id IN (?,?)
                         OR event_id IN (SELECT event_id FROM input_batch_members WHERE batch_id=?) LIMIT 1""",

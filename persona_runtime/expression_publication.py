@@ -147,7 +147,7 @@ class ExpressionPublication:
                     'kind':item['kind'],'required':bool(item['required']),'delay_ms':item['delay_ms']}
 
     def acknowledge(self, persona_id, session_id, turn_id, utterance_id, lease_id, presenter_id, receipt_id, body_hash, state='presented',
-                    *,webview=False,publication_id=None,revision=None,ordinal=None):
+                    *,webview=False,publication_id=None,revision=None,ordinal=None,reason=None):
         uid=self._direct_main(turn_id)
         if uid:return self.runtime.outlet.direct.publication.acknowledge(persona_id,session_id,uid,utterance_id,lease_id,presenter_id,receipt_id,body_hash,state)
         if state not in ('presented','not_presented','unknown'):raise ExpressionAssetError('expression_receipt_state_invalid')
@@ -186,6 +186,8 @@ class ExpressionPublication:
                     if db.execute("SELECT state FROM expression_publications WHERE id=?",(publication_id,)).fetchone()[0]=="unknown":
                         self._close(db,pub,"desktop_presentation_unknown")
                     return {"state":"closed","already_applied":False}
+            from .desktop_presentation import record_paint
+            record_paint(db,receipt_id,utterance_id,state,reason)
             now=timestamp()
             db.execute('INSERT INTO expression_presentation_receipts VALUES(?,?,?,?,?,?,?)',(receipt_id,utterance_id,lease_id,presenter_id,body_hash,state,now))
             db.execute('UPDATE expression_presentation_items SET state=?,receipt_id=?,acknowledged_at=? WHERE id=?',(state,receipt_id,now,utterance_id))

@@ -177,7 +177,10 @@ def intent_binding(db, store, config, payload):
         router = None
     reference = None
     if payload.get("reference"):
-        result = resolve(db, selected, payload["reference"])
+        from .ordinary_materials import full_revision,history_access
+        full=full_revision(store,db,pid,sid,config.load()['model'],'main')
+        with history_access(db,sid,bool(full)):
+            result = resolve(db, selected, payload["reference"])
         if result["status"] != "found":
             raise RuntimeErrorBase("reference_unavailable")
         reference = binding(result)
@@ -186,8 +189,9 @@ def intent_binding(db, store, config, payload):
             from .import_history import history_allowed
             source = db.execute("SELECT session_id FROM events WHERE id=? AND persona_id=?",
                                 (event_id,pid)).fetchone()
-            if not source or not history_allowed(db,source["session_id"],"dialogue"):
-                raise RuntimeErrorBase("reference_unavailable")
+            with history_access(db,sid,bool(full)):
+                if not source or not history_allowed(db,source["session_id"],"dialogue"):
+                    raise RuntimeErrorBase("reference_unavailable")
     policy = current(db, pid, "desktop", store)
     sources = read(db, "persona.import_history." + sid)
     return fingerprint([model_binding(config.load()), router, policy, snapshot(db,pid),
@@ -228,7 +232,7 @@ def record_acceptance(db, paths, marker):
 
 def lookup_intent(db, payload):
     rid = payload["request_id"]
-    receipt = db.execute("""SELECT r.id receipt_id,r.request_id,r.event_id,r.batch_id,r.session_id,r.persona_id,
+    receipt = db.execute("""SELECT r.id receipt_id,r.received_at,r.request_id,r.event_id,r.batch_id,r.session_id,r.persona_id,
                             r.fingerprint,r.channel,b.state batch_state,t.id turn_id,t.status turn_state,
                             (b.state='interrupted_buffer' AND b.sealed_at IS NULL
                              AND json_extract(b.policy_json,'$.manual_confirmation')=1) awaiting_confirmation
@@ -250,7 +254,7 @@ def lookup_intent(db, payload):
         if fingerprint(expected) != receipt["fingerprint"]:
             raise RuntimeErrorBase("submission_conflict")
         status = "awaiting_confirmation" if receipt["awaiting_confirmation"] else receipt["batch_state"]
-        return {"receipt_id": receipt["receipt_id"], "batch_id": receipt["batch_id"], "event_id": receipt["event_id"],
+        return {"receipt_id": receipt["receipt_id"], "received_at": receipt["received_at"], "batch_id": receipt["batch_id"], "event_id": receipt["event_id"],
                 "turn_id": receipt["turn_id"], "status": receipt["turn_state"] or status}
     from .knowledge_service import read as knowledge_read
     public = knowledge_read(db, "native.public_event." + (old["event_id"] or ""), {})["data"].get("task")

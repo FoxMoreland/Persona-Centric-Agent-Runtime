@@ -188,7 +188,13 @@ class ArchiveService:
     def get(self, persona_id, channel, target, bot='', peer='', audit=False):
         if type(audit) is not bool: raise RuntimeErrorBase('invalid_audit_flag')
         with self.store.connection() as conn:
-            return resolve(conn, scope(persona_id,channel,bot,peer), target, audit)
+            result = resolve(conn, scope(persona_id,channel,bot,peer), target, audit)
+            if channel == 'desktop' and result.get('usable'):
+                from .message_time import event_times
+                events = result.get('members', []) + result.get('replies', [])
+                result['message_time_bindings'] = event_times(conn, [event['id'] for event in events],
+                                                            result.get('turn_id'))
+            return result
 
     def resolve(self, **args): return self.get(**args)
 
@@ -198,7 +204,16 @@ class ArchiveService:
             # Ingress always assigns a 36-character UUID. Reserve that exact
             # serialized width without inventing or persisting a future Event.
             selection=reference_selection('00000000-0000-0000-0000-000000000000',result)
-            chars=len(serialize_reference_block([reference_group(result)],[selection]))
+            group = reference_group(result)
+            if args.get('channel') == 'desktop' and result.get('message_time_bindings'):
+                from . import message_time
+                from .context_policy import current
+                with self.store.connection() as db:
+                    policy = current(db, args['persona_id'], 'desktop')
+                if policy.get(message_time.KEY) == message_time.VERSION:
+                    group = dict(group, members=[dict(e) for e in group['members']], replies=[dict(e) for e in group['replies']])
+                    message_time.annotate_events(group['members'] + group['replies'], result['message_time_bindings'])
+            chars=len(serialize_reference_block([group],[selection]))
             result['preview']={'reference_characters':chars,'within_reference_budget':chars<=12000,
                                'budget_scope':'single_reference_block','total_input_checked':False,
                                'assumed_input_event_id_characters':36,'creates_request':False}

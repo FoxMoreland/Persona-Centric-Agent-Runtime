@@ -20,7 +20,7 @@ from .schema_m73 import SCHEMA13, TABLES13
 from .schema_disposition import TABLES19
 from .schema_observation import TABLES20
 
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 36
 M1_TABLES = ("users", "personas", "relationships", "sessions", "events", "memories", "settings")
 M2_TABLES = M1_TABLES + ("channel_sessions", "turns", "attempts", "deliveries")
 M3_TABLES = M2_TABLES + ("request_activity", "service_notices")
@@ -168,6 +168,18 @@ class Store:
         if version != SCHEMA_VERSION:
             raise RuntimeErrorBase(f"Incompatible database schema version {version}; expected {SCHEMA_VERSION}")
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if SCHEMA_VERSION >= 36:
+            from .schema_local_knowledge import STUDY_TABLES
+            if not set(STUDY_TABLES).issubset(tables):
+                raise RuntimeErrorBase('knowledge_study_schema_incomplete')
+        if SCHEMA_VERSION >= 35:
+            from .schema_local_knowledge import TABLES as local_tables, INDEX
+            if not set((*local_tables, INDEX)).issubset(tables):
+                raise RuntimeErrorBase('local_knowledge_schema_incomplete')
+        if SCHEMA_VERSION >= 34:
+            from .schema_private_reply import TABLES as private_reply_tables
+            if not set(private_reply_tables).issubset(tables):
+                raise RuntimeErrorBase('private_reply_schema_incomplete')
         if SCHEMA_VERSION >= 33:
             from .schema_dialogue import check
             check(tables)
@@ -256,6 +268,9 @@ class Store:
                 prefix = 'before-expression-runtime' if version == 30 else prefix
                 prefix = 'before-expression-utterance' if version == 31 else prefix
                 prefix = 'before-dialogue-generation' if version == 32 else prefix
+                prefix = 'before-private-reply' if version == 33 else prefix
+                prefix = 'before-local-knowledge' if version == 34 else prefix
+                prefix = 'before-knowledge-study' if version == 35 else prefix
                 prefix = 'before-disposition' if version in (17,18) else prefix
                 if version >= 23:
                     from .character_embedding import private_directory
@@ -403,6 +418,21 @@ class Store:
             if version < 33 and SCHEMA_VERSION >= 33:
                 from .schema_dialogue import migrate as migrate_dialogue
                 migrate_dialogue(conn)
+            if version < 34 and SCHEMA_VERSION >= 34:
+                from .schema_private_reply import migrate as migrate_private_reply
+                migrate_private_reply(conn)
+            if SCHEMA_VERSION >= 34:
+                from .schema_private_reply import initialize_nodes
+                initialize_nodes(conn)
+            if version < 35 and SCHEMA_VERSION >= 35:
+                from .schema_local_knowledge import migrate as migrate_local_knowledge
+                migrate_local_knowledge(conn)
+            if version < 36 and SCHEMA_VERSION >= 36:
+                from .schema_local_knowledge import migrate_study
+                migrate_study(conn)
+            if SCHEMA_VERSION >= 36:
+                conn.execute("CREATE INDEX IF NOT EXISTS local_knowledge_predecessor ON local_knowledge_facts(previous_id) WHERE previous_id IS NOT NULL")
+                conn.execute("CREATE INDEX IF NOT EXISTS local_knowledge_document_facts ON local_knowledge_facts(document_id)")
             if SCHEMA_VERSION >= 33:
                 conn.execute("""CREATE TABLE IF NOT EXISTS organization_foreground_execution (
                     id TEXT PRIMARY KEY CHECK(id='singleton'), task_id TEXT REFERENCES organization_tasks(id),

@@ -68,10 +68,42 @@ def references_allowed(db,turn,recipient):
     return True
 
 
-def time_block(history_items):
-    """Index only retained imported bubbles. System occupies message position zero."""
+def delivery_bindings(history_items, stamps, current):
+    """Index the members that survived final history and budget filters."""
+    from itertools import groupby
+    result = []
+    position = 1
+
+    def add(events, index):
+        for member, event in enumerate(events):
+            for entry in stamps.get(event["id"], []):
+                location = {'position':'current_input'} if index is None else {'message_index':index}
+                result.append(dict(entry, event_id=event["id"], member_index=member, **location))
+
+    for item in history_items:
+        if "speech_rows" in item:
+            rows = item["speech_rows"]
+            groups = (group for _, group in groupby(rows, key=lambda e: e["role"])) if item["native_bursts"] else ([e] for e in rows)
+        else:
+            group = item["group"]
+            groups = [group["members"], group["replies"]]
+        for offset, events in enumerate(groups):
+            add(events, position + offset)
+        position += len(item["pair"])
+    add(current, None)
+    return result
+
+
+def time_block(history_items, bindings=None):
+    """Render retained time evidence. System occupies message position zero."""
     from .archive import encoded
     from .prompt_assembly import PromptBlock
+    if bindings is not None:
+        from .message_time import VERSION, wire_times
+        if bindings:
+            return PromptBlock("history_recorded_at", "\n" + encoded({"history_recorded_at":wire_times(bindings)}),
+                               "desktop", VERSION)
+        return None
     position, dates = 1, []
     for item in history_items:
         for offset, values in enumerate(item.get("source_times", [])):

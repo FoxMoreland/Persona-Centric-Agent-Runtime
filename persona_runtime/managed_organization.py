@@ -164,8 +164,8 @@ class ManagedOrganization:
             spec=payload['knowledge_processing']
             if 'native_model_route' in spec:
                 from .knowledge_native_route import model_for_task
-                model=model_for_task(db,payload['persona_id'],spec)
-            model=processing_model(model,spec)
+                model=model_for_task(db,payload['persona_id'],spec,self.engine.config)
+            model=processing_model(model,spec,config=self.engine.config)
         if payload.get('proactive'):
             from .companion import choose,GENERATION_PROFILE
             model=self.engine.config.load()['model']|{'_companion_profile':choose('minimal_im'),'_generation_profile':GENERATION_PROFILE}
@@ -237,6 +237,11 @@ class ManagedOrganization:
                    (encoded(contract['data']),contract['policy_id'],contract['task_id']))
 
     def check(self,db,task,contract,payload,check_sources=True):
+        from .ordinary_materials import memory_access
+        with memory_access(self.store,db,payload,json.loads(task['model_snapshot'])):
+            return self._check(db,task,contract,payload,check_sources)
+
+    def _check(self,db,task,contract,payload,check_sources):
         if contract['data']['cancel_requested']:raise RuntimeErrorBase('cancelled_by_user')
         if payload.get('proactive'):
             self.engine.proactive.check(db,task,payload)
@@ -263,8 +268,8 @@ class ManagedOrganization:
             spec=payload.get('knowledge_processing',{})
             if 'native_model_route' in spec:
                 from .knowledge_native_route import model_for_task
-                base=model_for_task(db,task['persona_id'],spec)
-            expected=processing_model(base,spec)
+                base=model_for_task(db,task['persona_id'],spec,self.engine.config)
+            expected=processing_model(base,spec,config=self.engine.config)
             if model_contract(model)!=model_contract(expected):raise RuntimeErrorBase('organization_model_changed')
         else:
             current_model=self.engine.model()
@@ -316,7 +321,7 @@ class ManagedOrganization:
             if has_history(db,payload) and not self.engine.model().get('encrypted_key'):
                 raise RuntimeErrorBase('history_memory_authorization_required')
             check_payload(db,payload,model,p.get('memory_automation',False))
-            if 'copy_session_revision' in (payload.get('automatic_memory') or {}):
+            if {'copy_session_revision','session_privacy_revision'} & (payload.get('automatic_memory') or {}).keys():
                 from .copy_session_memory import check_task
                 check_task(self.store,db,task,payload,model)
             else:
@@ -693,9 +698,11 @@ class ManagedOrganization:
                         client=DeepSeekNativeClient(ssl_context=client.ssl_context,progress=native_progress)
                     value=await _one(client,model,messages,'provider_native_unknown',paths=self.store.paths)
                 else:
-                    if 'copy_session_revision' in (payload.get('automatic_memory') or {}):
+                    if {'copy_session_revision','session_privacy_revision'} & (payload.get('automatic_memory') or {}).keys():
                         from .copy_session_memory import check_task
-                        with self.store.connection() as db:check_task(self.store,db,task,payload,model)
+                        from .ordinary_materials import memory_access
+                        with self.store.connection() as db, memory_access(self.store,db,payload,model):
+                            check_task(self.store,db,task,payload,model)
                     value=await _one(e.client,model|{'_json_output':task['mode'] not in ('test','proactive')},messages,'provider_timeout',paths=self.store.paths)
                 reply,usage=value;audit=receipt(reply);audit['status']='received'
                 from .generation_retry import safe_diagnostics

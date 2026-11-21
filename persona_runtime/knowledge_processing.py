@@ -85,7 +85,8 @@ class KnowledgeProcessing:
         else:
             from .knowledge_native_route import model_for_task, PERMISSION
             spec={'root_turn_id':turn['id'],'stage':stage,'input':inputs,'native_model_route':native_route}
-            guard_cloud_dispatch(self.store,turn['persona_id'],PERMISSION,model_for_task(db,turn['persona_id'],spec),db=db)
+            guard_cloud_dispatch(self.store,turn['persona_id'],PERMISSION,
+                                 model_for_task(db,turn['persona_id'],spec,self.engine.config),db=db)
         if stage=='conversation_web_decision':self.engine.routing.grant(turn['persona_id'],db=db)
         if stage in ('conversation_native','conversation_search_notice'):
             if self.native.read_policy(db,turn['persona_id'])!=inputs.get('native_policy'):

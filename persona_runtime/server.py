@@ -39,12 +39,16 @@ def health_status(config, engine, organization, ingress):
                               "version": __version__, "assist_admitted": bool(getattr(engine,"assist_admission",None)), "live_admitted": bool(getattr(engine,"live_admission",None)), "decision_capsule_version":"decision-capsule-v1", "selector_configured":bool(config.load()["character_selector"]["enabled"] and config.load()["character_selector"]["name"] and config.load()["character_selector"]["base_url"]), "shadow_audit_gap":bool(HEALTH), "capabilities":["recall_runtime_v1","companion_selective_reply_v1","companion_im_text_v1","companion_native_text_v1","companion_prompt_light_v1","companion_context_rules_workbench_v1","companion_persona_workbench_v1","companion_c2_workbench_v1","companion_workbench_v1","companion_cancel_v1","evaluation_review_v1","disposition_live_candidate_v1","situation_observation_v1","author_relationship_mapping_v2","static_disposition_v1","disposition_shadow_v1","reply_bubbles_v3","rolling_quiet_v2","reply_display_messages_v1","reply_output_contract_v1","character_selection_v1","character_retrieval_v1","reply_batch_v2","reply_rhythm_v1","session_lifecycle_v1","session_package_v1","thread_manual_v1","cognitive_context_v1","archive_search_v1","working_set_preview_v1","archive_exact_v1","input_reference_v1","durable_ingress_v2","input_batch_v1","reply_batch_v1","behavior_resolver_v1","reply_delivery_parts_v1"], "buffer_pending":ingress.unresolved_count()}
 
 
-def create_app(paths, client=None, *, assist_admission=None, live_admission=None, foreground_only=False, engine_factory=None):
+def create_app(paths, client=None, *, assist_admission=None, live_admission=None, foreground_only=False, engine_factory=None, private_chat_providers=None):
     config = ConfigStore(paths)
     config.initialize()
     store = Store(paths)
     store.initialize()
-    engine = (engine_factory or ChatEngine)(store, config, client, assist_admission=assist_admission,live_admission=live_admission)
+    if private_chat_providers is None and engine_factory is None:
+        from .ordinary_providers import registered
+        private_chat_providers = registered(config)
+    ordinary = {'private_chat_providers':private_chat_providers} if private_chat_providers is not None else {}
+    engine = (engine_factory or ChatEngine)(store, config, client, assist_admission=assist_admission,live_admission=live_admission,**ordinary)
     from .migration import migration_pending
     pending_migration=migration_pending(paths)
     if not pending_migration:engine.recover()
@@ -170,7 +174,8 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         elif value.get("channel", "desktop") != "desktop":
             raise RuntimeErrorBase("Desktop clients must use desktop channel")
         origin = {"sender": value["sender"], "bot": value["bot"]} if request["role"] == "bridge" else None
-        result = await engine.submit(value.get("channel", "desktop"), value["text"], value["request_id"], value.get("session_id"), origin=origin, persona_id=value.get("persona_id"),public_task=value.get('public_task'))
+        options={k:value[k] for k in ('lookup_span','long_requested') if k in value}
+        result = await engine.submit(value.get("channel", "desktop"), value["text"], value["request_id"], value.get("session_id"), origin=origin, persona_id=value.get("persona_id"),public_task=value.get('public_task'),**options)
         return web.json_response(result)
 
     def bridge_batch(request,value):
@@ -229,12 +234,14 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
                 row=conn.execute('SELECT * FROM turns WHERE id=?', (request.match_info['id'],)).fetchone()
                 if row is None:raise RuntimeErrorBase('Request not found')
                 accepted=dict(row)
+                from .private_reply_entry import candidate
+                private = candidate(conn,accepted['id'])
                 from .scene_policy import read
                 wait=read(conn,'desktop.network.'+row['id'])
                 offline=bool(wait and row['status']=='queued' and row['channel']=='desktop'
                              and wait['revision']==row['execution_revision'] and row['error_code'] in ('desktop_network_wait','desktop_storage_wait'))
             from .knowledge_wait import is_waiting
-            if not offline and companion_read(accepted) is None and not is_waiting(store, accepted):
+            if not private and not offline and companion_read(accepted) is None and not is_waiting(store, accepted):
                 raise RuntimeErrorBase("queue_cancellation_disabled")
         return web.json_response(await engine.cancel(request.match_info["id"]))
 
@@ -345,6 +352,12 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         service = engine.service
         if not isinstance(args, dict):
             raise RuntimeErrorBase("JSON object required")
+        if action in ('desktop.privacy.status','desktop.privacy.update','desktop.privacy.connection'):
+            from . import session_privacy
+            handler = {'desktop.privacy.status':session_privacy.status,
+                       'desktop.privacy.update':session_privacy.update,
+                       'desktop.privacy.connection':session_privacy.connection}[action]
+            return web.json_response(handler(store,config,**args))
         if action == "desktop.submission.status":
             from .desktop_recovery import lookup_intent
             if args.get("channel") != "desktop":
@@ -372,6 +385,14 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         if action == "desktop.retrieval.notes":
             from .workbench_timeline import retrieved_notes
             return web.json_response(await asyncio.to_thread(retrieved_notes,store,**args))
+        if action == "desktop.lookup.detail":
+            from .private_lookup import details
+            return web.json_response(await asyncio.to_thread(details,store,**args))
+        if action == "desktop.lookup.confirm":
+            from .private_lookup import confirm
+            applied=confirm(store,**args)
+            ingress.schedule_committed()
+            return web.json_response(applied)
         if action == "desktop.browser.show":
             from .workbench_timeline import selection
             return web.json_response(selection(store,**args))
@@ -547,6 +568,7 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
             'expression.v2.list':speech_publication.list,
             'expression.v2.status':speech_publication.status,
             'expression.v2.plan':speech_publication.plan,
+            'expression.v2.inline_main':speech_publication.confirm_inline_main,
             'expression.v2.offer':speech_publication.offer,
             'expression.v2.ack':speech_publication.acknowledge,
             'expression.v2.visible':speech_publication.visible,
@@ -778,6 +800,9 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
             await asyncio.gather(worker, return_exceptions=True)
         await engine.wait()
         await engine.scene.close()
+        ordinary_close=getattr(engine.private_reply.ordinary.providers,'close',None)
+        if ordinary_close:
+            await ordinary_close()
         await engine.observer.drain()
         await asyncio.to_thread(engine.cognitive.characters.close)
     app.on_cleanup.append(cleanup)

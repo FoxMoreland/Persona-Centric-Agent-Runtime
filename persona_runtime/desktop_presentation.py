@@ -4,6 +4,20 @@ import asyncio
 from .models import RuntimeErrorBase
 
 
+PAINT_REASONS = frozenset(('session_changed','hidden','dialog_open','detached','outside','covered',
+                           'native_covered','frame_timeout','bridge_error','renderer_lost','confirmed'))
+
+
+def record_paint(db,receipt,fragment,state,reason):
+    if reason is None:
+        return
+    if reason not in PAINT_REASONS or not receipt:
+        raise RuntimeErrorBase('presentation_reason_invalid')
+    from .archive import encoded
+    db.execute("INSERT OR IGNORE INTO knowledge_control VALUES(?,?)",
+               ('desktop.paint.'+receipt,encoded({'fragment':fragment,'state':state,'reason':reason})))
+
+
 class PresentationWakeup:
     def __init__(self):
         self.event = asyncio.Event()

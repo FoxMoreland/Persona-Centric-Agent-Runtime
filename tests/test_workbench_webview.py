@@ -66,6 +66,13 @@ class BrowserWorkbenchTests(unittest.TestCase):
         self.assertIn("window.pywebview.api.exit_workbench()", html)
         self.assertLess(html.index("window.pcarDesktop ="), html.rindex("</body>"))
 
+    def test_composer_has_a_single_send_route_for_search_decisions(self):
+        html = workbench_html()
+        self.assertIn('id="send"', html)
+        self.assertIn('id="long-reply-send"', html)
+        self.assertNotIn("public-search-send", html)
+        self.assertNotIn("sessionSearchGranted", html)
+
     def test_appearance_preference_is_loaded_before_first_paint(self):
         parent = RuntimePaths.from_environment().home / "tmp"
         parent.mkdir(parents=True, exist_ok=True)

@@ -61,7 +61,7 @@ class Outlet(unittest.IsolatedAsyncioTestCase):
             offers.append(offered)
         return offers
 
-    async def test_notice_expression_ack_precedes_search_and_only_actual_body_flows_back(self):
+    async def test_notice_expression_ack_precedes_search_and_completed_material_flows_back(self):
         turn,uid=await self.start()
         async with asyncio.timeout(5):
             while self.org.running or self.chat.locks[self.pid].locked():
@@ -79,7 +79,12 @@ class Outlet(unittest.IsolatedAsyncioTestCase):
         self.present(turn,uid);await asyncio.wait_for(self.chat.wait(),10)
         result=self.chat.get(turn['id']);self.assertEqual(result['search_notice']['text'],'我去翻翻，等下跟你说')
         self.assertEqual(len(self.provider.calls),1);self.assertEqual(len(self.main.notice_calls),1)
-        self.assertIn('我去翻翻，等下跟你说',json.dumps(self.main.calls,ensure_ascii=False))
+        from persona_runtime.knowledge_handoff import VERSION as HANDOFF
+        with self.store.connection() as db:
+            version=db.execute("""SELECT json_extract(details_json,'$.knowledge.translation.handoff_version')
+                FROM context_uses WHERE turn_id=? ORDER BY rowid DESC LIMIT 1""",(turn['id'],)).fetchone()
+        self.assertEqual(version[0],HANDOFF)
+        self.assertNotIn(result['search_notice']['text'],json.dumps(self.main.calls,ensure_ascii=False))
         self.assertNotIn('等我翻翻看，这个我想查清楚再跟你说。',json.dumps(self.main.calls,ensure_ascii=False))
         units=self.pub.list(self.pid,turn['session_id'],turn['id']);self.assertEqual({u['phase'] for u in units},{'search_notice','main'})
         main=next(u for u in units if u['phase']=='main');self.present(turn,main['id'])

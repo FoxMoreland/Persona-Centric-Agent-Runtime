@@ -68,12 +68,14 @@ class SceneRuntime:
         from .references import prepare as references
         from .tk_notice import already_presented
         ordered = {}
+        ids_by_seq = {}
         def add(event, origin, index, role):
             row = db.execute('SELECT seq,role FROM events WHERE id=? AND session_id=? AND persona_id=?',
                              (event['id'],turn['session_id'],turn['persona_id'])).fetchone()
             require(row and row['role']==('persona' if role=='assistant' else 'user')
                     and not db.execute('SELECT 1 FROM source_exclusions WHERE event_id=?',(event['id'],)).fetchone(),
                     'source_withdrawn')
+            ids_by_seq[row['seq']] = event['id']
             old = ordered.get(row['seq'])
             if old:
                 require((old['role'],old['text'])==(role,event['text']),'source_changed')
@@ -120,6 +122,13 @@ class SceneRuntime:
         for event in load_turn_input(db,turn):
             add(event,'current',5,'user')
         require(any('current' in row['origins'] for row in ordered.values()),'current_input_missing')
+        from . import message_time
+        if message_time.enabled(turn):
+            stamps = message_time.event_times(db, ids_by_seq.values())
+            for seq, item in ordered.items():
+                times = stamps[ids_by_seq[seq]]
+                if times:
+                    item['message_times'] = message_time.wire_times(times)
         return [dict(ordered[key],sequence=key) for key in sorted(ordered)]
 
     def snapshot(self, db, turn):

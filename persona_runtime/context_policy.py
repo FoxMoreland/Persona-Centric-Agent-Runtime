@@ -41,6 +41,9 @@ def values(policy):
     from .character_policy import read
     companion=json.loads(policy['data_json']).get('companion')
     extra={}
+    from .message_time import KEY as TIME_KEY, VERSION as TIME_VERSION
+    if data.get(TIME_KEY) == TIME_VERSION:
+        extra[TIME_KEY] = TIME_VERSION
     if companion is not None:
         from .companion import checked
         extra['companion']=checked(companion)
@@ -58,7 +61,16 @@ def snapshot(policy,conn=None,store=None):
         if policy['channel']=='desktop':
             from .scene_policy import KEY as SCENE_KEY, active
             enrolled=active(conn,policy['persona_id'],store)
-            if enrolled:result[SCENE_KEY]=enrolled
+            if enrolled:
+                result[SCENE_KEY]=enrolled
+                if store is not None:
+                    marker=store.paths.home/'private/ordinary-reply/registration.json'
+                    if marker.is_file() and not (marker.parent/'retired.json').is_file():
+                        from .config import ConfigStore
+                        registration=json.loads(marker.read_bytes())
+                        if (policy['persona_id'] in registration.get('conversation_bubble_personas',[])
+                                and registration.get('instance')==ConfigStore(store.paths).load()['instance_id']):
+                            result['conversation_bubbles']=1
             elif (result.get('companion') or {}).get('version')=='companion-runtime-v8' and not study:
                 from .import_style import KEY as IMPORT_KEY, snapshot as import_snapshot
                 imported=import_snapshot(conn,policy['persona_id'])

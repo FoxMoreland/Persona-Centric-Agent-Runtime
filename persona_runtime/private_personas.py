@@ -22,7 +22,8 @@ def provider_identity(model):return canonical({k:model.get(k) for k in ('base_ur
 
 DIALOGUE_PERMISSIONS = {'dialogue_understanding': 'deepseek-flash',
                        'dialogue_selection': 'deepseek-flash', 'dialogue_reply': 'deepseek-v4-pro'}
-FIXED_MODEL_PERMISSIONS = {**DIALOGUE_PERMISSIONS, 'knowledge_native': 'deepseek-flash'}
+FIXED_MODEL_PERMISSIONS = {**DIALOGUE_PERMISSIONS, 'knowledge_native': 'deepseek-flash',
+                           'knowledge_study': 'deepseek-flash', 'knowledge_notice': 'deepseek-flash'}
 
 
 def safe(path, parent=None):
@@ -161,7 +162,12 @@ class PrivatePersonas:
                 if kind=='selector':model=cfg['character_selector']
                 if kind in FIXED_MODEL_PERMISSIONS:
                     from .provider_policy import require_generation_provider
-                    model = dict(cfg['model'], name=FIXED_MODEL_PERMISSIONS[kind])
+                    if cfg.get('private_research_account')=='native_web' and kind=='knowledge_native':
+                        model=cfg['native_web_model']
+                    elif cfg.get('private_research_account')=='native_web' and kind in ('knowledge_study','knowledge_notice'):
+                        model=cfg['organization']['model']
+                    else:
+                        model = dict(cfg['model'], name=FIXED_MODEL_PERMISSIONS[kind])
                     require_generation_provider(model)
                     # Reviewed Flash requests use the bare official endpoint, even
                     # when the managed credential and the v8 Pro turn use /v1.

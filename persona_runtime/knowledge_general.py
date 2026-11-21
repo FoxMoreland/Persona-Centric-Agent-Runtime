@@ -11,8 +11,14 @@ STAGES={'conversation_web_decision','conversation_search','conversation_fetch','
 RETIRED_STAGES={'conversation_search_plan','conversation_organize'}
 OUTPUT_PROFILE='native-two-stage-output-v1'
 
-def processing_model(model,data):
+def processing_model(model,data,*,config=None):
     stage=data.get('stage')
+    if config is not None and stage in ('conversation_native','conversation_search','conversation_fetch'):
+        from .provider_policy import is_deepseek_text_relay
+        if is_deepseek_text_relay(model):
+            settings=config.load()
+            if settings.get('private_research_account')=='native_web':
+                model=settings['native_web_model']
     if stage in RETIRED_STAGES:raise RuntimeErrorBase('legacy_retrieval_frozen')
     if stage=='conversation_search_notice':
         from .knowledge_search_notice import request_model
@@ -74,7 +80,8 @@ class IndependentWebTools:
         if getattr(self,'transport',None):return await self.transport(stage,values,model)
         if urlsplit(model['base_url']).hostname!='api.deepseek.com':raise RuntimeErrorBase('search_provider_configuration_required')
         return await request(stage,values,model)
-    def accept(self,payload,raw):
+    @staticmethod
+    def accept(payload,raw):
         stage=payload['knowledge_processing']['stage'];data=_json(raw)
         if stage=='conversation_web_decision':
             from .knowledge_web_decision import parse

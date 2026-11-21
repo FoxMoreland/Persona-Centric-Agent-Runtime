@@ -184,10 +184,15 @@ class ConfigStore:
         if type(interaction["qq_wait_seconds"]) is not int or not 5 <= interaction["qq_wait_seconds"] <= 120:
             raise RuntimeErrorBase("QQ wait notice interval must be 5 to 120 seconds")
         org = value["organization"]
+        research_account = value.get('private_research_account', 'main')
+        if research_account not in ('main', 'organization', 'native_web'):
+            raise RuntimeErrorBase('invalid_private_research_account')
         if type(value.get('organization_parallel_tasks',2)) is not int or value.get('organization_parallel_tasks',2) not in (1,2):
             raise RuntimeErrorBase('invalid_organization_parallelism')
         if not isinstance(org, dict) or set(org) != set(DEFAULTS["organization"]) or any(type(org[k]) is not bool for k in ("reuse_chat", "daily_enabled")):
             raise RuntimeErrorBase("Invalid organization configuration")
+        if research_account == 'organization' and org['reuse_chat']:
+            raise RuntimeErrorBase('invalid_private_research_account')
         for field in ("hourly_limit", "daily_limit"):
             if type(org[field]) is not int or not 0 <= org[field] <= 10000:
                 raise RuntimeErrorBase("Invalid organization budget")
@@ -204,6 +209,36 @@ class ConfigStore:
         for field, low, high in (("timeout", 1, 300), ("max_tokens", 1, 32768), ("hourly_limit", 0, 10000), ("max_input_chars", 1000, 200000)):
             if type(background[field]) is not int or not low <= background[field] <= high:
                 raise RuntimeErrorBase("Invalid organization model limit")
+        if 'lookup_target_model' in value:
+            from .provider_policy import require_generation_provider
+            target = value['lookup_target_model']
+            if not isinstance(target,dict) or set(target)!=set(DEFAULTS['model']):
+                raise RuntimeErrorBase('invalid_lookup_target_model')
+            try:
+                require_generation_provider(target)
+            except ValueError:
+                raise RuntimeErrorBase('invalid_lookup_target_model') from None
+            if not isinstance(target['encrypted_key'],str) or not target['encrypted_key']:
+                raise RuntimeErrorBase('invalid_lookup_target_model')
+            for field,low,high in (('timeout',1,300),('max_tokens',1,32768),
+                                   ('hourly_limit',0,10000),('max_input_chars',1000,200000)):
+                if type(target[field]) is not int or not low<=target[field]<=high:
+                    raise RuntimeErrorBase('invalid_lookup_target_model')
+        if research_account == 'native_web' or 'native_web_model' in value:
+            from .deepseek_native_contract import official_endpoint
+            native = value.get('native_web_model')
+            try:
+                if not isinstance(native, dict) or set(native) != set(DEFAULTS['model']):
+                    raise ValueError()
+                official_endpoint(native)
+                if not isinstance(native['encrypted_key'], str) or not native['encrypted_key']:
+                    raise ValueError()
+                for field, low, high in (('timeout',1,300),('max_tokens',1,32768),
+                                         ('hourly_limit',0,10000),('max_input_chars',1000,200000)):
+                    if type(native[field]) is not int or not low <= native[field] <= high:
+                        raise ValueError()
+            except ValueError:
+                raise RuntimeErrorBase('invalid_native_web_model') from None
 
     def public(self):
         value = self.load()
@@ -212,6 +247,11 @@ class ConfigStore:
         value.pop("bridge_token")
         value["model"]["has_key"] = bool(value["model"].pop("encrypted_key"))
         value["organization"]["model"]["has_key"] = bool(value["organization"]["model"].pop("encrypted_key"))
+        if 'native_web_model' in value:
+            value['native_web_model']['has_key'] = bool(value['native_web_model'].pop('encrypted_key'))
+        if 'lookup_target_model' in value:
+            target = value['lookup_target_model']
+            target['has_key'] = bool(target.pop('encrypted_key'))
         return value
 
     def update(self, changes):
@@ -222,22 +262,29 @@ class ConfigStore:
 
     def _update(self, changes):
         value = self.load()
-        allowed = {"call_limits","organization_parallel_tasks","service_port", "napcat_port", "astrbot_port", "onebot_port", "bot_qq", "owner_qq", "model", "interaction", "organization", "character_selector", "qq_backend", "snowluma_port"}
+        allowed = {"call_limits","organization_parallel_tasks","service_port", "napcat_port", "astrbot_port", "onebot_port", "bot_qq", "owner_qq", "model", "interaction", "organization", "character_selector", "qq_backend", "snowluma_port", "private_research_account", "native_web_model"}
+        allowed.add('lookup_target_model')
         if not isinstance(changes, dict) or not set(changes) <= allowed:
             raise RuntimeErrorBase("Unknown configuration field")
         for key, change in changes.items():
-            if key == "model":
+            if key == 'lookup_target_model' and change is None:
+                value.pop(key,None)
+                continue
+            if key in ("model", "native_web_model", "lookup_target_model"):
                 if not isinstance(change, dict) or not set(change) <= {
                     "base_url", "name", "api_key", "timeout", "max_tokens", "hourly_limit", "max_input_chars"
                 }:
                     raise RuntimeErrorBase("Unknown model configuration field")
                 change = dict(change)
+                if (key == 'lookup_target_model' and key in value and 'base_url' in change
+                        and change['base_url'] != value[key]['base_url'] and not change.get('api_key')):
+                    raise RuntimeErrorBase('credential_required_for_new_endpoint')
                 if "api_key" in change:
                     key_value = change.pop("api_key")
                     if not isinstance(key_value, str):
                         raise RuntimeErrorBase("API key must be text")
-                    value["model"]["encrypted_key"] = protect(key_value) if key_value else ""
-                value["model"].update(change)
+                    change["encrypted_key"] = protect(key_value) if key_value else ""
+                value.setdefault(key, copy.deepcopy(DEFAULTS['model'])).update(change)
             elif key == "character_selector":
                 if not isinstance(change,dict) or not set(change) <= (set(SELECTOR_DEFAULTS)-{'encrypted_key'})|{'api_key'}:
                     raise RuntimeErrorBase('Unknown character selector field')

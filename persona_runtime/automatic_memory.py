@@ -14,7 +14,7 @@ def available(db):
     return bool(db.execute("SELECT 1 FROM sqlite_master WHERE name='memory_batches'").fetchone())
 
 
-def facts(db,pid,selected,model=None,*,native_session=None):
+def facts(db,pid,selected,model=None,*,native_session=None,ordinary=False):
     """Only same-Scope, currently supported memories may enter either model."""
     from .context_builders import memory_usable
     rows=[]
@@ -23,7 +23,9 @@ def facts(db,pid,selected,model=None,*,native_session=None):
         m=dict(r)
         if native_session:
             from .copy_session_memory import local_fact
-            if not local_fact(db,m['id'],pid,native_session):continue
+            from .ordinary_materials import session_access,memory_in_session
+            belongs = memory_in_session if ordinary or session_access(db,native_session) else local_fact
+            if not belongs(db,m['id'],pid,native_session):continue
         if not memory_usable(db,representative,m,for_review=True, purpose='memory' if model is not None else 'evidence', providers=model):continue
         f=db.execute('SELECT * FROM memory_facts WHERE memory_id=?',(m['id'],)).fetchone()
         if f and json.loads(f['data_json']).get('import_review_required'):continue
@@ -66,12 +68,19 @@ def validate_sources(db,payload,check_memories=True,*,model=None):
         turn=dict(row)
         r=history_scope.source_group(db,payload['scope'],turn,model=model,purpose='memory' if model is not None else 'evidence')
         if r['status']!='found' or binding(r)!=item['binding'] or r['recorded_at']!=payload['recorded_times'][item['turn_id']]:raise RuntimeErrorBase('source_expired')
-    if check_memories and dependency_hash(facts(db,payload['persona_id'],payload['scope'],model,native_session=consented_session(payload)),payload)!=payload['memory_dependency_hash']:
+    if check_memories and dependency_hash(session_facts(db,payload,model),payload)!=payload['memory_dependency_hash']:
         raise RuntimeErrorBase('automatic_memory_version_changed')
 
 
 def consented_session(payload):
-    if payload['automatic_memory'].get('copy_session_revision'):return payload['session_id']
+    meta=payload['automatic_memory']
+    if meta.get('copy_session_revision') or meta.get('session_privacy_revision') or meta.get('ordinary_session'):
+        return payload['session_id']
+
+
+def session_facts(db,payload,model=None):
+    return facts(db,payload['persona_id'],payload['scope'],model,native_session=consented_session(payload),
+                 ordinary=payload['automatic_memory'].get('ordinary_session',False))
 
 
 def invalidate(db,pid,event_ids):
@@ -157,22 +166,36 @@ class AutomaticMemory:
         return p['enabled'] and p.get('memory_automation',False)
 
     def payload(self,db,pid,sid,selected,turns,purpose='extract',previous=None):
+        from .ordinary_materials import full_revision,history_access
+        full=full_revision(self.store,db,pid,sid,self.engine.model(),'organization') if selected['channel']=='desktop' else None
+        with history_access(db,sid,full is not None):
+            return self._session_payload(db,pid,sid,selected,turns,purpose,previous,full)
+
+    def _session_payload(self,db,pid,sid,selected,turns,purpose,previous,full):
         model=self.engine.model()
         from .copy_session_memory import grant,local_fact
-        revision=grant(self.store,db,pid,sid,model)
+        from .private_reply_entry import PRIVATE_ROUTES,selected as route
+        ordinary = selected['channel']=='desktop' and route(db,self.engine.config.load()['instance_id']) in PRIVATE_ROUTES
+        revision=None if full else grant(self.store,db,pid,sid,model)
         p={'persona_id':pid,'user_id':LOCAL_USER_ID,'session_id':sid,'channel':selected['channel'],'scope':selected,
            'mode':'both','source_format':3,'rows':[],'events':[],'bindings':[],'previous':None,
-           'existing_memories':facts(db,pid,selected,model,native_session=sid if revision else None),'outdated_claims':[],'recorded_times':{},
+           'existing_memories':facts(db,pid,selected,model,native_session=sid if revision or ordinary else None,ordinary=ordinary),'outdated_claims':[],'recorded_times':{},
            'automatic_memory':{'version':VERSION,'stage':'extract','purpose':purpose,'previous_fragment':previous}}
         if revision:p['automatic_memory']['copy_session_revision']=revision
+        if ordinary:p['automatic_memory']['ordinary_session']=True
+        if full:p['automatic_memory']['session_privacy_revision']=full
         all_memories=p['existing_memories'];p['memory_state_hash']=digest(all_memories)
         for m in all_memories:
             if m.get('valid_until') and datetime.fromisoformat(m['valid_until'])<=datetime.now(timezone.utc):p['outdated_claims'].append({k:m[k] for k in ('id','text','subject','attribute')}|{'reason':'expired','valid_until':m['valid_until']})
         for r in db.execute("SELECT m.id,m.text,m.previous_id,f.subject,f.attribute FROM memories m JOIN memory_facts f ON f.memory_id=m.id WHERE m.persona_id=? AND m.status='superseded' AND f.scope_json=?",(pid,encoded(selected))):
             if revision and not local_fact(db,r['id'],pid,sid):continue
+            if ordinary:
+                from .ordinary_materials import memory_in_session
+                if not memory_in_session(db,r['id'],pid,sid):continue
             if not history_scope.allowed_memory(db,r['id'],model):continue
             if not any(normalized(m['text'])==normalized(r['text']) and m.get('subject')==r['subject'] and m.get('attribute')==r['attribute'] for m in p['existing_memories']):p['outdated_claims'].append(dict(r))
         for turn in turns[:10]:
+            if ordinary and turn['session_id']!=sid:continue
             if revision and (turn['session_id']!=sid or history_scope.imported(turn)):continue
             exact=history_scope.source_group(db,selected,turn,model=model)
             if exact['status']!='found':continue
@@ -192,7 +215,10 @@ class AutomaticMemory:
 
     def begin(self,db,payload,trigger):
         db.execute('SAVEPOINT memory_admission')
-        try:result=self._begin(db,payload,trigger)
+        from .ordinary_materials import memory_access
+        try:
+            with memory_access(self.store,db,payload,self.engine.model()):
+                result=self._begin(db,payload,trigger)
         except BaseException:
             db.execute('ROLLBACK TO memory_admission');db.execute('RELEASE memory_admission');raise
         db.execute('RELEASE memory_admission');return result
@@ -228,10 +254,16 @@ class AutomaticMemory:
         db.execute('RELEASE memory_verification_admission')
 
     def _enqueue_verification(self,db,batch):
-        data=json.loads(batch['data_json']);p=data['payload'];validate_sources(db,p,check_memories=False)
+        from .ordinary_materials import memory_access
+        data=json.loads(batch['data_json'])
+        with memory_access(self.store,db,data['payload'],self.engine.model()):
+            return self._prepare_verification(db,batch,data)
+
+    def _prepare_verification(self,db,batch,data):
+        p=data['payload'];validate_sources(db,p,check_memories=False)
         history_scope.check_payload(db,p,self.engine.model(),self.is_enabled(db,p['persona_id']))
         p=json.loads(encoded(p));p['automatic_memory']['stage']='verify';p['proposals']=data['proposals']
-        all_memories=facts(db,p['persona_id'],p['scope'],self.engine.model(),native_session=consented_session(p));p['memory_state_hash']=digest(all_memories);p['existing_memories']=select_facts(all_memories,p['events'],p['proposals'])
+        all_memories=session_facts(db,p,self.engine.model());p['memory_state_hash']=digest(all_memories);p['existing_memories']=select_facts(all_memories,p['events'],p['proposals'])
         while p['existing_memories'] and sum(len(m['content']) for m in messages(p))>self.engine.model()['max_input_chars']:p['existing_memories'].pop()
         if sum(len(m['content']) for m in messages(p))>self.engine.model()['max_input_chars']:raise RuntimeErrorBase('automatic_memory_verification_input_too_long')
         p['memory_dependency_hash']=dependency_hash(all_memories,p)
@@ -246,6 +278,11 @@ class AutomaticMemory:
 
     def published(self,db,task,payload,output):
         """Called only inside the existing owner's publication transaction."""
+        from .ordinary_materials import memory_access
+        with memory_access(self.store,db,payload,self.engine.model()):
+            return self._publish_session(db,task,payload,output)
+
+    def _publish_session(self,db,task,payload,output):
         bid=payload['automatic_memory']['batch_id'];batch=dict(db.execute('SELECT * FROM memory_batches WHERE id=?',(bid,)).fetchone());data=json.loads(batch['data_json'])
         if payload['automatic_memory']['stage']=='extract':
             data['proposals']=output
@@ -256,7 +293,7 @@ class AutomaticMemory:
     def commit(self,db,batch,payload,proposals,decisions):
         bid=batch['id'];pid=payload['persona_id'];selected=payload['scope'];now=timestamp();kept=[];quarantine=False
         items={i['id']:(kind,i) for kind in ('summary','candidates') for i in proposals[kind]}
-        live={m['id']:m for m in facts(db,pid,selected,native_session=consented_session(payload))};published_targets=set()
+        live={m['id']:m for m in session_facts(db,payload)};published_targets=set()
         collisions={}
         for d in decisions:
             if d['action'] in ('publish','revise','temporal'):
@@ -331,7 +368,7 @@ class AutomaticMemory:
             detail={'proposal':item,'decision':d,'memory_id':mid,'blocked_memory_ids':[m['id'] for m in matches] if state=='quarantined' and reason!='historical_source_not_newer' else []}
             db.execute('INSERT INTO memory_decisions VALUES(?,?,?,?,?,?,?,?,?,?)',(identifier(),pid,LOCAL_USER_ID,bid,item['id'],kind,state,reason,encoded(detail),now))
         previous=payload['automatic_memory']['previous_fragment']
-        expired=[m for m in facts(db,pid,selected,native_session=consented_session(payload)) if m.get('valid_until') and datetime.fromisoformat(m['valid_until'])<=datetime.now(timezone.utc)]
+        expired=[m for m in session_facts(db,payload) if m.get('valid_until') and datetime.fromisoformat(m['valid_until'])<=datetime.now(timezone.utc)]
         kept=[i for i in kept if not old_evidence.intersection(s['source_id'] for s in i['sources']) and not any(normalized(i['text'])==normalized(m['text']) for m in expired)]
         if previous:db.execute("UPDATE memory_fragments SET state='superseded' WHERE id=?",(previous,))
         if kept:
@@ -397,7 +434,7 @@ class AutomaticMemory:
         for policy in policies:
             pid=policy['persona_id'];settings=json.loads(policy['data_json'])
             with self.store.connection() as db:
-                pages=scan_sessions(db,pid,settings,self.engine.model())
+                pages=scan_sessions(db,pid,settings,self.engine.model(),self.store)
             with self.store.connection(write=True) as db:
                 advance(db,'personas',policy['ordinal'])
                 from .persona_management import active

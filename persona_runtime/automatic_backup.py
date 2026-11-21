@@ -327,6 +327,12 @@ class Backups:
                     live={t:db.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in info["counts"]}
             except (OSError,sqlite3.Error):pass
             result=info|{"file":entry["file"],"at":entry["at"],"live_counts":live}
+            from .knowledge_revision_restore import reconcile
+            overlay=reconcile(database,self.paths.home/"data/database/runtime.sqlite3",ConfigStore(self.paths))
+            if overlay is not None:
+                backup_manifest(database,include_empty=True)
+                result.update(knowledge_reconciliation=overlay,snapshot_database_sha256=info['database_sha256'],
+                              database_sha256=_digest(database))
             atomic_json(stage/"restore.json",result,durable=True)
             stage.rename(target)
             stage=None

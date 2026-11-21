@@ -94,8 +94,14 @@ def check_task(store, db, task, payload, model):
     from .import_memory_scope import source_group, imported
     meta=payload['automatic_memory']
     pid,sid=task['persona_id'],task['session_id']
-    rev=grant(store,db,pid,sid,model)
-    if not rev or meta.get('copy_session_revision')!=rev:raise RuntimeErrorBase('private_cloud_provider_not_authorized')
+    full=meta.get('session_privacy_revision')
+    if full:
+        from .ordinary_materials import full_revision,session_access
+        if full_revision(store,db,pid,sid,model,'organization')!=full or not session_access(db,sid):
+            raise RuntimeErrorBase('private_cloud_provider_not_authorized')
+    else:
+        rev=grant(store,db,pid,sid,model)
+        if not rev or meta.get('copy_session_revision')!=rev:raise RuntimeErrorBase('private_cloud_provider_not_authorized')
     batch=db.execute('SELECT * FROM memory_batches WHERE id=? AND persona_id=? AND session_id=?',
                      (meta.get('batch_id'),pid,sid)).fetchone()
     stage=meta.get('stage')
@@ -110,7 +116,7 @@ def check_task(store, db, task, payload, model):
     for ref in payload['bindings']:
         turn=db.execute("SELECT rowid AS ordinal,* FROM turns WHERE id=? AND persona_id=? AND session_id=? AND channel='desktop'",
                         (ref['turn_id'],pid,sid)).fetchone()
-        if not turn or imported(turn):raise RuntimeErrorBase('private_session_mismatch')
+        if not turn or imported(turn) and not full:raise RuntimeErrorBase('private_session_mismatch')
         actual=source_group(db,payload['scope'],dict(turn),model=model)
         if actual['status']!='found':raise RuntimeErrorBase('source_expired')
         for e in chronological(actual):
@@ -120,7 +126,9 @@ def check_task(store, db, task, payload, model):
     if stage=='verify' and payload.get('proposals')!=json.loads(batch['data_json']).get('proposals'):
         raise RuntimeErrorBase('private_session_mismatch')
     for m in [*payload['existing_memories'],*payload['outdated_claims']]:
-        if not local_fact(db,m['id'],pid,sid):raise RuntimeErrorBase('private_session_mismatch')
+        from .ordinary_materials import memory_in_session
+        belongs=memory_in_session if full else local_fact
+        if not belongs(db,m['id'],pid,sid):raise RuntimeErrorBase('private_session_mismatch')
 
 
 def main():

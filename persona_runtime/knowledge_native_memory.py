@@ -18,7 +18,11 @@ def state_for_source(states,source):
 
 
 def apply_states(db, pid, sources, organized):
-    states = source_states(db, pid)['data']; selected = []; changed = False
+    return apply_source_states(source_states(db,pid)['data'],sources,organized)
+
+
+def apply_source_states(states, sources, organized):
+    selected = []; changed = False
     for original in sources:
         row = deepcopy(original); state = state_for_source(states,row)
         if state.get('state') == 'withdrawn':
@@ -26,6 +30,7 @@ def apply_states(db, pid, sources, organized):
         row['state_revision'] = state.get('policy_revision',state.get('revision', 0))
         if state.get('state') == 'corrected':
             row.update(content='', summary=state['replacement'], kind='user_correction', material_kind='user_correction')
+            row.pop('qualification',None)
             changed = True
         selected.append(row)
     # A blended note cannot be surgically certified after a source correction.

@@ -973,7 +973,7 @@ class Workbench(KnowledgeUI, RuntimeUI, SelectorUI, SessionUI, ContextUI, Archiv
                 self.transcript.insert("end", "你：" + (turn["text"] or "") + "\n")
             spoken=turn.get('search_notice')
             notice_plan=next((p for p in turn.get('desktop_publications',())
-                              if p['phase']=='search_notice' and p.get('bubble_limit')), None)
+                              if p['phase']=='search_notice' and p.get('kind')=='speech'), None)
             pending=getattr(self,'pending_notice_view',None)
             if notice_plan:
                 for part in notice_plan['visible']:

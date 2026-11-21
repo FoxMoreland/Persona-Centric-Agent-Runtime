@@ -4,6 +4,7 @@ from threading import RLock
 from .config import ConfigStore
 from .corpus_files import read_supplied
 from .desktop_client import LocalClient
+from .storage import Store
 from .import_library import ImportLibrary, require
 from .tk_notice import CONTRACT
 from .models import PersonaSpec
@@ -127,6 +128,22 @@ class WorkbenchData:
     def live_snapshot(self,sid,version=None):
         return self._client.manage("chat.snapshot",session_id=sid,version=version,include_imports=False)
 
+    def live_privacy(self,pid,sid,decision=None):
+        self._require_open()
+        if not sid:
+            sid=self._client.manage("session.select",persona_id=pid,channel="desktop")["session_id"]
+            self._submissions.first_session(pid,sid)
+        if decision is None:
+            result=self._client.manage("desktop.privacy.status",persona_id=pid,session_id=sid)
+        else:
+            result=self._client.manage("desktop.privacy.update",persona_id=pid,session_id=sid,**decision)
+        return result|{"session_id":sid}
+
+    def live_connection_change(self,role,base_url,name,key,confirm=None):
+        self._require_open()
+        return self._client.manage("desktop.privacy.connection",role=role,base_url=base_url,
+                                   name=name,key=key,confirm=confirm)
+
     def live_page(self,pid,sid,version=None,before=None,after=None,anchor=None):
         return self._client.manage("desktop.timeline.snapshot",pid=pid,sid=sid,version=version,before=before,after=after,anchor=anchor)
 
@@ -146,16 +163,31 @@ class WorkbenchData:
     def live_retrieved_notes(self,pid,sid,tid):
         return self._client.manage("desktop.retrieval.notes",pid=pid,sid=sid,tid=tid)
 
+    def live_confirm_inline_main(self,pid,sid,tid,publication,revision,fragments):
+        self._require_open()
+        return self._client.manage("expression.v2.inline_main",persona_id=pid,session_id=sid,turn_id=tid,
+                                   publication_id=publication,revision=revision,fragments=fragments)
+
+    def live_reply_detail(self,pid,sid,tid,kind):
+        return self._client.manage("desktop.lookup.detail",pid=pid,sid=sid,tid=tid,kind=kind)
+
+    def live_lookup_confirm(self,pid,sid,tid,expected,op,text=None):
+        self._require_open()
+        return self._client.manage("desktop.lookup.confirm",pid=pid,sid=sid,tid=tid,expected=expected,op=op,text=text)
+
     def live_location(self,pid=None,sid=None,position=None):
         return self._submissions.location(pid,sid,position)
 
-    def live_submit(self,pid,sid,text,request_id,reference=None,draft_revision=None,public_search=False,input_policy=None):
+    def live_submit(self,pid,sid,text,request_id,reference=None,draft_revision=None,public_search=False,input_policy=None,long_requested=False):
         self._require_open()
         if public_search is not False:
+            from .private_reply_entry import selected,RESEARCH
             from .knowledge_native import public_task
             chosen=text if public_search is True else public_search
-            public=public_task({'question':chosen,'intent':'search','request_search':True})
-            if public['question'] not in text:raise ValueError('native_public_task_scope_changed')
+            with Store(self._config.paths).connection() as db:
+                research=selected(db,self._config.load()['instance_id'],pid)==RESEARCH
+            if not isinstance(chosen,str) or chosen not in text:raise ValueError('native_public_task_scope_changed')
+            if not research:public=public_task({'question':chosen,'intent':'search','request_search':True})
         first=not sid
         if not sid:
             sid=self._client.manage("session.select",persona_id=pid,channel="desktop")["session_id"]
@@ -164,9 +196,12 @@ class WorkbenchData:
                    "request_id":request_id, "desktop_presentation":CONTRACT}
         if input_policy is not None:
             payload["expected_input_policy"]=input_policy["version"]
+        if long_requested:payload['long_requested']=long_requested
         if reference is not None:
             payload["reference"] = reference
-        if public_search is not False:payload['public_task']=public
+        if public_search is not False:
+            if research:payload['lookup_span']=chosen
+            else:payload['public_task']=public
         result=self._submissions.submit(payload, draft_revision)
         if first and result["state"]=="accepted" and draft_revision:
             empty={"previous":draft_revision,"revision":request_id,"text":"","reference":None}
@@ -198,8 +233,8 @@ class WorkbenchData:
         self._require_open()
         return self._presentation.begin(page,claim_id,kind,args)
 
-    def presentation_decide(self, page, claim_id, state):
-        return self._presentation.decide(page,claim_id,state)
+    def presentation_decide(self, page, claim_id, state, reason=None):
+        return self._presentation.decide(page,claim_id,state,reason)
 
     def presentation_reconcile(self):
         return self._presentation.reconcile()

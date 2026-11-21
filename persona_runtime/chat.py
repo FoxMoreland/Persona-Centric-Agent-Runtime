@@ -43,16 +43,18 @@ def model_tls_context():
 
 
 class ChatCompletionsClient:
-    def __init__(self, *, ssl_context=None, allow_loopback_fixture=False):
+    def __init__(self, *, ssl_context=None, allow_loopback_fixture=False, allow_private_compatible_writer=False):
         self.ssl_context=ssl_context
         self.allow_loopback_fixture=allow_loopback_fixture
+        self.allow_private_compatible_writer=allow_private_compatible_writer
 
     async def route_reachable(self,model):
         """Check the configured route without sending headers, credentials or messages."""
         from urllib.parse import urlsplit
         from .network_proxy import outbound_proxy
         from .provider_policy import require_generation_provider
-        require_generation_provider(model,allow_loopback_fixture=self.allow_loopback_fixture)
+        require_generation_provider(model,allow_loopback_fixture=self.allow_loopback_fixture,
+                                    allow_private_compatible_writer=self.allow_private_compatible_writer)
         try:route=urlsplit(outbound_proxy(model['base_url']) or model['base_url'])
         except ModelError as error:
             if str(error)=='system_proxy_required':return False
@@ -71,8 +73,9 @@ class ChatCompletionsClient:
             return await DeepSeekNativeClient(ssl_context=self.ssl_context).complete(model,messages)
         if not model["base_url"] or not model["name"]:
             raise ModelError("model_not_configured")
-        from .provider_policy import require_generation_provider
-        try:require_generation_provider(model,allow_loopback_fixture=self.allow_loopback_fixture)
+        from .provider_policy import is_private_compatible_writer, require_generation_provider
+        try:require_generation_provider(model,allow_loopback_fixture=self.allow_loopback_fixture,
+                                        allow_private_compatible_writer=self.allow_private_compatible_writer)
         except ValueError as error:
             raise ModelError(str(error),diagnostics={'request_headers_sent':False,'response_headers_received':False}) from None
         headers = {"Content-Type": "application/json"}
@@ -126,7 +129,7 @@ class ChatCompletionsClient:
                                        headers=headers, json=payload, allow_redirects=False, proxy=proxy) as response:
                     transport.update(phase='reading_body', response_headers_received=True)
                     if response.status != 200:
-                        raise ModelError(f"provider_http_{response.status}", diagnostics=diagnostic())
+                        raise ModelError(f"provider_http_{response.status}", diagnostics={**diagnostic(),'http_status':response.status})
                     if payload['stream']:
                         from .chat_stream import read_stream
                         return await read_stream(response,model,diagnostic,started=started)
@@ -144,8 +147,11 @@ class ChatCompletionsClient:
                     choice=data['choices'][0]
                     text = choice["message"]["content"]
                     finish=choice.get('finish_reason')
-                    diagnostics={**diagnostic(),'finish_reason':finish if finish in ('stop','length','content_filter','tool_calls','function_call','insufficient_system_resource','aborted') else 'unknown',
+                    diagnostics={**diagnostic(),'http_status':response.status,
+                                 'finish_reason':finish if finish in ('stop','length','content_filter','tool_calls','function_call','insufficient_system_resource','aborted') else 'unknown',
                                  'output_characters':len(text) if isinstance(text,str) else 0}
+                    if self.allow_private_compatible_writer and is_private_compatible_writer(model):
+                        diagnostics['requested_model_echoed'] = data.get('model') == model['name']
                     deepseek=wire['profile']=='deepseek-chat-v1'
                     grok=is_grok47(model)
                     usage=usage_fields(data.get('usage'),deepseek=deepseek,grok=grok)
@@ -199,7 +205,7 @@ def recall(query, memories):
 
 
 class ChatEngine:
-    def __init__(self, store, config, client=None, *, assist_admission=None, live_admission=None, dialogue_pipeline=None, generation_audit_sink=None, generation_executor=None, expression_runtime=None, dialogue_generation=None):
+    def __init__(self, store, config, client=None, *, assist_admission=None, live_admission=None, dialogue_pipeline=None, generation_audit_sink=None, generation_executor=None, expression_runtime=None, dialogue_generation=None, private_reply_transport=None, private_chat_providers=None):
         self.store, self.config = store, config
         self.generation_audit_sink = generation_audit_sink
         self.generation_executor = generation_executor
@@ -224,6 +230,8 @@ class ChatEngine:
         self.observer=SituationObservationService(self)
         self.service = RuntimeService(store)
         self.desktop_owner = identifier()
+        from .private_reply_entry import PrivateReplyEntry
+        self.private_reply = PrivateReplyEntry(self, private_reply_transport, private_chat_providers)
         self.pending_settlements = set()
         self.tasks = {}
         self.preparations = set()
@@ -238,6 +246,7 @@ class ChatEngine:
         self.scene = SceneRuntime(self)
         self.scene_publication = ScenePublication(self)
         self.expression.outlet.scene = self.scene_publication
+        self.expression.outlet.ordinary = self.private_reply.ordinary
         from .desktop_presentation import PresentationWakeup
         self.presentation_wakeup = PresentationWakeup()
         self.cognitive.dialogue = SceneDialogue(store,self)
@@ -250,6 +259,7 @@ class ChatEngine:
 
     def recover(self):
         from . import desktop_recovery
+        from .private_reply_entry import candidate, recover as recover_private_reply
         from .instance import process_identity_alive
         config = self.config.load()
         with self.store.connection(write=True) as conn:
@@ -261,6 +271,8 @@ class ChatEngine:
             self.selector.recover(conn)
             self.observer.recover(conn)
             for row in pending:
+                if candidate(conn,row['id']) and recover_private_reply(conn,row):
+                    continue
                 if row["channel"] == "desktop" and desktop_recovery.can_resume(conn, row, config):
                     continue
                 record_progress(conn, row["id"], "interrupted")
@@ -362,7 +374,7 @@ class ChatEngine:
                 "AND NOT EXISTS (SELECT 1 FROM channel_sessions c WHERE c.session_id=s.id AND c.channel='qq') "
                 "ORDER BY s.created_at", (persona_id, LOCAL_USER_ID))]
 
-    async def submit(self, channel, text, request_id, session_id=None, *, test=False, origin=None, persona_id=None, test_reply_mode=None, public_task=None):
+    async def submit(self, channel, text, request_id, session_id=None, *, test=False, origin=None, persona_id=None, test_reply_mode=None, public_task=None, lookup_span=None, long_requested=False):
         from .local_repair import require_open
         require_open(self.store.paths)
         from .migration import ensure_cloud_ready
@@ -373,6 +385,14 @@ class ChatEngine:
             raise RuntimeErrorBase("service_draining")
         require_text(text, "text")
         require_text(request_id, "request_id")
+        if type(long_requested) is not bool or (lookup_span is not None or long_requested) and (test or channel!='desktop'):
+            raise RuntimeErrorBase('private_lookup_scope_changed')
+        if lookup_span is not None and public_task is not None:
+            raise RuntimeErrorBase('private_lookup_scope_changed')
+        if channel=='desktop' and not test and public_task is not None:
+            from .private_lookup import composer_span
+            approved=composer_span(self.store,self.config,request_id,public_task,batch=False)
+            if approved is not None:lookup_span,public_task=approved,None
         if public_task is not None:
             from .knowledge_native import public_task as validate_public_task
             public_task=validate_public_task(public_task)
@@ -396,6 +416,10 @@ class ChatEngine:
                 from .knowledge_service import read
                 prior_public=read(conn,'native.public_event.'+(old['user_event_id'] or ''),{})['data'].get('task')
                 if prior_public!=public_task:raise RuntimeErrorBase('submission_conflict')
+                previous_span=conn.execute("SELECT value FROM knowledge_control WHERE key=?",('private.lookup.span.'+(old['user_event_id'] or ''),)).fetchone()
+                previous_long=conn.execute("SELECT 1 FROM knowledge_control WHERE key=?",('private.lookup.long.'+(old['user_event_id'] or ''),)).fetchone()
+                if (json.loads(previous_span[0])['text'] if previous_span else None)!=lookup_span or bool(previous_long)!=long_requested:
+                    raise RuntimeErrorBase('submission_conflict')
                 if test and previous.get('reply_mode_snapshot')!=test_reply_mode:raise RuntimeErrorBase('submission_conflict')
                 if not test and (previous["text"] != text or (persona_id and previous["persona_id"] != persona_id)
                                  or (session_id and previous["session_id"] != session_id)
@@ -422,6 +446,12 @@ class ChatEngine:
                 if public_task is not None:
                     from .knowledge_native import bind_public_event
                     bind_public_event(conn,event_id,persona_id,session_id,channel,text,public_task)
+                if lookup_span is not None:
+                    from .private_lookup import bind_span
+                    bind_span(conn,self.config,session_id,event_id,text,lookup_span)
+                if long_requested:
+                    from .private_lookup import bind_long
+                    bind_long(conn,self.config,event_id,text)
             turn_id = identifier()
             model = self.config.load()["model"]
             conn.execute("INSERT INTO turns (id,source_key,persona_id,session_id,channel,user_event_id,reply_event_id,status,error_code,"
@@ -438,7 +468,11 @@ class ChatEngine:
                 from .context_policy import current as context_policy
                 accepted_context=context_policy(conn,persona_id,channel,self.store)
                 from .scene_policy import KEY as SCENE_KEY
-                if SCENE_KEY in accepted_context:raise RuntimeErrorBase('scene_workbench_required')
+                from .private_reply_entry import selected, bind
+                candidate_route = channel=='desktop' and selected(conn,self.config.load()['instance_id'],persona_id)
+                if candidate_route:
+                    bind(conn,turn_id,self.config.load()['instance_id'],candidate_route)
+                if SCENE_KEY in accepted_context and not candidate_route:raise RuntimeErrorBase('scene_workbench_required')
                 accepted_context.pop('import_style',None)
                 from .companion import freeze_auxiliary
                 auxiliary=freeze_auxiliary(self.config.load()['character_selector'],accepted_context)
@@ -640,6 +674,11 @@ class ChatEngine:
                     finish(db,scope)
 
     async def _run_turn(self,turn_id):
+        from .private_reply_entry import candidate
+        with self.store.connection() as db:
+            private = candidate(db,turn_id)
+        if private:
+            return await self.private_reply.run(turn_id)
         from .desktop_presentation import PresentationPending, wait_for_notice, clear_wait
         from .tk_notice import required
         while True:
@@ -696,6 +735,11 @@ class ChatEngine:
 
     @resume_on_limit
     async def _run_ready(self, turn_id):
+        from .private_reply_entry import candidate
+        with self.store.connection() as db:
+            private = candidate(db,turn_id)
+        if private:
+            return await self.private_reply.run(turn_id)
         from .generation_retry import ConnectionPending
         from .call_limits import CallLimitPending,QuotaShutdown,gate
         from .local_repair import RepairInProgress
@@ -1099,6 +1143,12 @@ class ChatEngine:
         if self.draining:
             raise RuntimeErrorBase("service_draining")
         from .scene_policy import frozen as scene_frozen
+        from .private_reply_entry import candidate
+        with self.store.connection() as db:
+            private = candidate(db,turn_id)
+        if private:
+            await self.private_reply.run(turn_id)
+            return self.get(turn_id)
         with self.store.connection() as conn:
             pending = conn.execute("SELECT error_code FROM turns WHERE id=?", (turn_id,)).fetchone()
             if pending and pending["error_code"] in ("desktop_settlement_pending","desktop_receipt_requires_review"):
@@ -1153,6 +1203,9 @@ class ChatEngine:
                 if study_key in accepted_context:raise RuntimeErrorBase('style_study_new_position_required')
                 from .companion import freeze_auxiliary
                 auxiliary=freeze_auxiliary(self.config.load()['character_selector'],accepted_context)
+                from .message_time import KEY as TIME_KEY
+                if TIME_KEY not in json.loads(frozen_row[0] or '{}'):
+                    accepted_context.pop(TIME_KEY, None)
                 conn.execute('UPDATE turns SET context_policy_snapshot=?,selector_model_snapshot=?,execution_revision=execution_revision+1 WHERE id=?',(json.dumps(accepted_context),json.dumps(auxiliary),turn_id))
                 if 'companion' in accepted_context:
                     from .companion import freeze_model
@@ -1166,6 +1219,9 @@ class ChatEngine:
     def resume_scene(self, turn_id):
         from .scene_voice import require
         with self.store.connection(write=True) as db:
+            from .private_reply_entry import candidate
+            if candidate(db,turn_id):
+                raise RuntimeErrorBase('private_reply_route_required')
             turn=self.scene.root(db,turn_id)
             if turn['status'] not in ('interrupted','failed'):
                 return self._view(db,turn_id)
@@ -1189,6 +1245,10 @@ class ChatEngine:
         return self.get(turn_id)
 
     async def resume_direct(self, turn_id):
+        from .private_reply_entry import candidate
+        with self.store.connection() as db:
+            if candidate(db,turn_id):
+                raise RuntimeErrorBase('private_reply_route_required')
         from .migration import ensure_cloud_ready
         ensure_cloud_ready(self.store.paths)
         if self.draining:raise RuntimeErrorBase('service_draining')
@@ -1228,6 +1288,10 @@ class ChatEngine:
         return self.get(turn_id)
 
     async def resume_expression(self, turn_id):
+        from .private_reply_entry import candidate
+        with self.store.connection() as db:
+            if candidate(db,turn_id):
+                raise RuntimeErrorBase('private_reply_route_required')
         with self.store.connection() as db:direct=self.direct.generation.enabled(db,turn_id)
         if direct:return await self.resume_direct(turn_id)
         from .expression_runtime import enabled as expression_enabled
@@ -1238,6 +1302,20 @@ class ChatEngine:
 
     async def cancel(self, turn_id):
         """New companion turns support explicit in-flight cancellation."""
+        from .private_reply_entry import candidate
+        with self.store.connection(write=True) as db:
+            if candidate(db,turn_id):
+                changed=db.execute("""UPDATE turns SET status='interrupted',cancelled_at=?,error_code='cancelled_by_user',updated_at=?
+                        WHERE id=? AND cancelled_at IS NULL AND status!='completed'""",(timestamp(),timestamp(),turn_id)).rowcount
+                if changed:
+                    record_progress(db,turn_id,'cancelled')
+                    units=db.execute("""SELECT * FROM expression_speech_units WHERE turn_id=?
+                        AND source_kind='maibot_private_reply' AND closed_at IS NULL""",(turn_id,)).fetchall()
+                    for unit in units:
+                        pub=db.execute("SELECT * FROM expression_speech_publications WHERE utterance_id=?",(unit['id'],)).fetchone()
+                        if pub:
+                            self.scene_publication.publisher._stop(db,dict(unit),pub,'cancelled_by_user')
+                return self._view(db,turn_id)
         with self.store.connection() as conn:
             raw=dict(conn.execute('SELECT * FROM turns WHERE id=?',(turn_id,)).fetchone() or {})
             if not raw:raise RuntimeErrorBase('Request not found')

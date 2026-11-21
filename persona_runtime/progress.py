@@ -7,6 +7,11 @@ EVENTS = {"knowledge_routing","knowledge_web_plan","knowledge_search_web","knowl
 
 
 EVENTS.update(('knowledge_search_notice', 'search_notice_published', 'scene_bubble_presented','desktop_publication_changed'))
+EVENTS.add('private_reply_waited')
+EVENTS.add('knowledge_waiting_scope')
+EVENTS.update(('research_assessing','research_assessed','research_preparing_notice'))
+STUDY_EVENTS=('knowledge_studying','knowledge_study_received','knowledge_study_committed','knowledge_study_insufficient','knowledge_study_read')
+EVENTS.update(STUDY_EVENTS)
 
 
 def record(conn, turn_id, event, attempt_id=None):
@@ -36,6 +41,8 @@ def progress(conn, turn):
     if phase=='queued' and rows and rows[-1]['event'] in ('character_local','character_selection','character_fallback','knowledge_routing','knowledge_web_plan','knowledge_search_web','knowledge_fetch_web','knowledge_goal','knowledge_selection','knowledge_translation','knowledge_review','knowledge_search','knowledge_refresh','knowledge_waiting_quota','knowledge_ready','knowledge_no_matches','knowledge_unavailable'):
         phase=rows[-1]['event']
     if phase=='queued' and rows and rows[-1]['event'] in ('knowledge_search_notice','search_notice_published'):
+        phase=rows[-1]['event']
+    if phase in ('queued','running') and rows and rows[-1]['event'] in STUDY_EVENTS:
         phase=rows[-1]['event']
     if phase=='queued' and rows and rows[-1]['event']=='desktop_publication_changed':
         phase='knowledge_search_notice'
