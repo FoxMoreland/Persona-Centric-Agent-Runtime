@@ -22,6 +22,18 @@ from .provider_policy import DEEPSEEK_TEXT_RELAY, is_official_deepseek
 OFFICIAL_DEEPSEEK_ROUTE = 'deepseek-official-jev-ef-v1'
 
 
+def _review_bytes(config, digest):
+    from .private_personas import safe
+
+    if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
+        raise RuntimeErrorBase('private_chat_review_version_changed')
+    root = config.paths.home / 'private/ordinary-reply'
+    raw = safe(root / (digest + '.json'), root).read_bytes()
+    if sha256(raw).hexdigest() != digest:
+        raise RuntimeErrorBase('private_chat_review_version_changed')
+    return raw
+
+
 class ReviewedPrivateChatProviders:
     """The invoking candidate must supply the hash of the exact author-reviewed bundle."""
     generation_route = None
@@ -32,6 +44,12 @@ class ReviewedPrivateChatProviders:
         if self.version!=reviewed_sha256:
             raise RuntimeErrorBase('private_chat_review_version_changed')
         document=json.loads(raw)
+        activation = document.get('formal_activation')
+        if 'formal_activation' in document:
+            if (set(document) != {'formal_activation'} or not isinstance(activation, dict)
+                    or set(activation) != {'reviewed_sha256', 'instance', 'personas', 'recipients_sha256'}):
+                raise RuntimeErrorBase('private_chat_review_scope_changed')
+            document = json.loads(_review_bytes(config, activation['reviewed_sha256']))
         has_source_assessment='source_assessment' in document
         source_assessment=document.pop('source_assessment',None)
         assessment_parent=dict(document)
@@ -46,15 +64,11 @@ class ReviewedPrivateChatProviders:
             if set(document) - {'conversation_parent','conversation_systems','conversation_mode'} or 'conversation_systems' not in document:
                 raise RuntimeErrorBase('private_chat_review_incomplete')
             parent_hash = document['conversation_parent']
-            if not isinstance(parent_hash,str) or len(parent_hash)!=64 or any(c not in '0123456789abcdef' for c in parent_hash):
-                raise RuntimeErrorBase('private_chat_review_version_changed')
             required = {'reply_system','short_answer_system','post_search_system','partwise_post_search_system'}
             systems = document['conversation_systems']
             if not isinstance(systems,dict) or set(systems)!=required or not all(isinstance(v,str) and v.strip() for v in systems.values()):
                 raise RuntimeErrorBase('private_chat_review_incomplete')
-            parent = (config.paths.home/'private/ordinary-reply'/(parent_hash+'.json')).read_bytes()
-            if sha256(parent).hexdigest()!=parent_hash:
-                raise RuntimeErrorBase('private_chat_review_version_changed')
+            parent = _review_bytes(config, parent_hash)
             self.conversation_systems = systems
             self.conversation_mode = document.get('conversation_mode')
             if self.conversation_mode is not None:
@@ -142,7 +156,7 @@ class ReviewedPrivateChatProviders:
                 or not isinstance(document.get('reply_system'),str) or not document['reply_system'].strip()):
             raise RuntimeErrorBase('private_chat_review_incomplete')
         scope=document.get('scope',{})
-        if (scope.get('instance')!=config.load()['instance_id'] or not isinstance(scope.get('personas'),list)
+        if ((activation is None and scope.get('instance')!=config.load()['instance_id']) or not isinstance(scope.get('personas'),list)
                 or not scope['personas'] or not all(isinstance(i,str) and i for i in scope['personas'])):
             raise RuntimeErrorBase('private_chat_review_scope_changed')
         self.bundle=document
@@ -168,6 +182,22 @@ class ReviewedPrivateChatProviders:
             from .single_retrieval import apply_source_assessment,SOURCE_ASSESSMENT_V2_DIGEST
             self.retrieval_spec=apply_source_assessment(source_assessment,assessment_parent,config,self.retrieval_spec)
             self.source_assessment_sha256=SOURCE_ASSESSMENT_V2_DIGEST
+        if activation is not None:
+            from .single_retrieval import activate_formal_scope
+
+            if (not self.conversation_systems or not self.egress_spec or not has_translation_range
+                    or not has_source_assessment or document.get('generation_route') != OFFICIAL_DEEPSEEK_ROUTE):
+                raise RuntimeErrorBase('private_chat_review_scope_changed')
+            self.retrieval_spec = activate_formal_scope(config, self.retrieval_spec, activation)
+            self.egress_spec = self.egress_spec | {
+                'scope': self.egress_spec['scope'] | {
+                    'instance_id': self.retrieval_spec['instance_id'],
+                    'persona_ids': self.retrieval_spec['persona_ids'],
+                },
+                'recipient': self.retrieval_spec['recipient'],
+            }
+            self.bundle = document | {'scope': {'instance': activation['instance'],
+                                               'personas': self.retrieval_spec['persona_ids']}}
         self.generation_route=document.get('generation_route')
         if 'generation_route' in document and self.generation_route!=OFFICIAL_DEEPSEEK_ROUTE:
             raise RuntimeErrorBase('private_chat_review_recipient_changed')

@@ -28,7 +28,7 @@ def load_manifest(bundle,config):
     original=baseline.read_bytes()
     if (sha256(original).hexdigest()!=spec['baseline_bundle'] or
             json.loads(original)!={k:v for k,v in bundle.items() if k not in ('retrieval_manifest','egress_manifest','translation_manifest')} or
-            config.load()['instance_id']!=spec['instance_id']):
+            bundle['scope']!={'instance':spec['instance_id'],'personas':spec['persona_ids']}):
         raise RuntimeErrorBase('private_chat_review_scope_changed')
     return spec
 
@@ -98,6 +98,44 @@ def apply_source_assessment(review, base_bundle, config, primary):
             or sha256(system.encode()).hexdigest()!=spec['files']['候选-System.txt']):
         raise RuntimeErrorBase('private_chat_review_scope_changed')
     return primary|{'phases':primary['phases']|{'assess':previous|{'system':system}}}
+
+
+def activate_formal_scope(config, reviewed, activation):
+    """Bind unchanged reviewed phases to an explicitly selected local instance."""
+    from .provider_policy import is_official_deepseek
+    from .private_personas import PrivatePersonas
+
+    cfg = config.load()
+    personas = activation['personas']
+    if (activation['instance'] != cfg['instance_id'] or not isinstance(personas, dict)
+            or set(personas) != set(reviewed['persona_ids'])
+            or any(not isinstance(pid, str) or not pid for pid in personas.values())
+            or len(set(personas.values())) != len(personas)):
+        raise RuntimeErrorBase('private_chat_review_scope_changed')
+    registry = PrivatePersonas(config.paths)
+    if any(not registry.protected(pid) for pid in personas.values()):
+        raise RuntimeErrorBase('private_chat_review_scope_changed')
+
+    models = session_privacy.configured_models(config, cfg)
+    destinations = session_privacy.recipients(config, cfg)
+    account = destinations.get('organization', {}).get('account')
+    model = models.get('organization', {})
+    recipient = reviewed['recipient']
+    if (not account or cfg['organization']['reuse_chat'] or cfg.get('private_research_account') != 'native_web'
+            or fingerprint(destinations) != activation['recipients_sha256']
+            or any(not is_official_deepseek(m) for role, m in models.items() if role != 'jev')
+            or (model.get('base_url'), model.get('name'), model.get('max_input_chars'), model.get('max_tokens'))
+            != (recipient['base_url'], recipient['model'], recipient['max_input_chars_at_review'],
+                recipient['max_output_tokens_at_review'])):
+        raise RuntimeErrorBase('private_chat_review_recipient_changed')
+    return reviewed | {
+        'instance_id': activation['instance'],
+        'persona_ids': [personas[pid] for pid in reviewed['persona_ids']],
+        'recipient': recipient | {
+            'receipt_account_fingerprint': account,
+            'recipient_set_at_review': activation['recipients_sha256'],
+        },
+    }
 
 
 def check_recipient(config,spec,base):
