@@ -87,7 +87,7 @@ def validate(db,turn,meta):
         if error or unit['source_version']!=expected[ident]['source_version'] or fingerprint(source['text'])!=expected[ident]['text_hash']:
             raise RuntimeErrorBase('recall_sources_changed')
 
-def render(items,db=None):
+def render(items,db=None,*,delivery_times=False):
     if not items:return ''
     lines=['\n本轮相关的既有资料（按其来源理解，不把人物自己的发言当作用户事实）：']
     for item in items:
@@ -95,6 +95,12 @@ def render(items,db=None):
         source_label={'user_statement':'用户当时说的话','assistant_statement':'人物当时说的话',
             'user_memory':'有来源的记忆','user_correction':'用户更正'}.get(item['source_type'],'参考材料')
         lines.append(label+'（'+source_label+'）：\n'+item['text'])
+        if db is not None and delivery_times and item['kind']=='dialogue':
+            from .message_time import event_times, wire_times
+            eid = item['source_id']
+            entries = event_times(db, [eid]).get(eid)
+            if entries:
+                lines.append(encoded({'event_id':eid, 'message_times':wire_times(entries)}))
         if db is not None and item['kind']=='memory':
             memory=db.execute('SELECT previous_id,created_at,source_event_id FROM memories WHERE id=?',(item['source_id'],)).fetchone()
             if memory:

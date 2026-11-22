@@ -9,6 +9,7 @@ EVENTS = {"knowledge_routing","knowledge_web_plan","knowledge_search_web","knowl
 EVENTS.update(('knowledge_search_notice', 'search_notice_published', 'scene_bubble_presented','desktop_publication_changed'))
 EVENTS.add('private_reply_waited')
 EVENTS.add('knowledge_waiting_scope')
+EVENTS.update(('research_assessing','research_assessed','research_preparing_notice'))
 STUDY_EVENTS=('knowledge_studying','knowledge_study_received','knowledge_study_committed','knowledge_study_insufficient','knowledge_study_read')
 EVENTS.update(STUDY_EVENTS)
 

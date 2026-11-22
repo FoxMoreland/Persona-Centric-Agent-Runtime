@@ -11,7 +11,7 @@ import zipfile
 
 SOURCE=Path(__file__).resolve().parents[1]
 SCRIPTS=('Start-Workbench.ps1','Prepare-Desktop.ps1','pcar-location.ps1','Manage-Migration.ps1',
-         'verify_m8d_migration.py','verify_m761_migration.py','dev.ps1','test.ps1','force_stop_services.py','force_stop_qq.py','build_desktop_bundle.py','pcar_acceptance_check.py','pcar_desktop_turn_evidence.py','pcar_upgrade_check.py','pcar_recall_rollback.py','pcar_recall_preflight.py','pcar_scene_voice.py','pcar_local_knowledge.py')
+         'verify_m8d_migration.py','verify_m761_migration.py','dev.ps1','test.ps1','force_stop_services.py','force_stop_qq.py','build_desktop_bundle.py','pcar_acceptance_check.py','pcar_desktop_turn_evidence.py','pcar_upgrade_check.py','pcar_recall_rollback.py','pcar_recall_preflight.py','pcar_scene_voice.py','pcar_local_knowledge.py','pcar_persona_world.py')
 ROOT_FILES=('启动PCAR.bat','README.md','AGENTS.md','AGENT_INSTALL.md','LICENSE','pyproject.toml','uv.lock','model-assets.json','source-delivery.json')
 WEBVIEW_FILES = (
     '启动PCAR-新版.bat', 'persona_runtime/workbench_web/index.html',
@@ -25,11 +25,13 @@ SCENE_TESTS=('test_portable_history.py','test_history_continuation.py','test_imp
              'test_private_reply_stage1.py','test_private_reply_stage2.py','test_private_reply_stage3.py','test_private_reply_stage4.py',
              'test_knowledge_coverage.py','test_knowledge_revisions.py','test_knowledge_study.py','test_local_knowledge.py',
              'test_semantic_knowledge.py','test_workbench_call_limits.py','test_workbench_continuity.py',
-             'test_workbench_operations.py','test_workbench_startup.py','test_workbench_webview.py')
+             'test_workbench_operations.py','test_workbench_startup.py','test_workbench_webview.py',
+             'test_openrouter_main_reply.py')
 PUBLIC_FIXTURE_SHA256={
     'v0.1':'6badfaccfed2a25626260e760f76a91b852ac7a99b2943cf4a6005e4fcbfa249',
     'v0.2':'93f4faae190d1874f7b59ee08d444705fd1e1979451859363ab0aa4a17777ec1',
     'v0.3':'f8cbebf494d6dec3e5d5cf9ccd6e68682b3a9795cb08c2c751690b329533acc3',
+    'v0.4':'f8cbebf494d6dec3e5d5cf9ccd6e68682b3a9795cb08c2c751690b329533acc3',
 }
 README_ASSETS=('ATTRIBUTION.md','provenance.json','superfish-vision.webp','superfish-vision.png',
                'superfish-vision.prompt.md','daily-life-vision.webp','daily-life-vision.png',

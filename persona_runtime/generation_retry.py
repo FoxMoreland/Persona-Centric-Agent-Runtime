@@ -47,13 +47,15 @@ def safe_diagnostics(value):
     for key in ('phase','transport_profile','response_format','thinking','reasoning_effort','finish_reason','generation_version','timeout_policy','output_limit','network_route','native_terminal','native_protocol','upstream_error_code'):
         item=value.get(key)
         if isinstance(item,str) and re.fullmatch(r'[a-z0-9_-]{1,64}',item):result[key]=item
-    for key in ('timeout_seconds','elapsed_ms','output_characters','http_status','stream_events','first_event_ms','first_content_delta_ms'):
+    for key in ('timeout_seconds','elapsed_ms','connection_ms','output_characters','http_status','stream_events','first_event_ms','first_content_delta_ms','retry_not_before_epoch'):
         item=value.get(key)
         if type(item) in (int,float) and item>=0:result[key]=item
     for key in ('request_headers_sent','response_headers_received','reasoning_present','stream','stream_complete','effect_unknown','provider_terminal_error'):
         if type(value.get(key)) is bool:result[key]=value[key]
     from .provider_compat import response_metadata
-    result.update(response_metadata({'model':value.get('response_model'),'system_fingerprint':value.get('system_fingerprint')},grok=True))
+    result.update(response_metadata({'model':value.get('response_model'),'system_fingerprint':value.get('system_fingerprint'),
+                                     'provider':value.get('response_provider'),'id':value.get('openrouter_generation_id')},grok=True,
+                                    openrouter=value.get('transport_profile')=='openrouter-hydrogen-v1'))
     return result
 
 
@@ -288,7 +290,8 @@ async def audited_complete(client, model, messages, *, validate, save, before_at
                 wait.audit=aggregate(state);wait.meter=meter
                 raise wait from None
             save(aggregate(state))
-            if interrupted or not isinstance(error,Exception) or not retryable(error):
+            from .desktop_turn_retry import manual_terminal
+            if interrupted or not isinstance(error,Exception) or not retryable(error) or manual_terminal(error):
                 if isinstance(error,Exception):
                     error.usage=aggregate(state);error.diagnostics=row['diagnostics']
                     error.output_validation=validation;error.output_fingerprint=row.get('output_fingerprint')

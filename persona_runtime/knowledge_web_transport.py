@@ -24,6 +24,11 @@ async def request(stage,args,model):
         nonlocal sent
         sent=True
     trace=aiohttp.TraceConfig();trace.on_request_headers_sent.append(headers_sent)
+    def timing():
+        return round((time.monotonic()-started)*1000,3)
+    def diagnostics():
+        return {'request_headers_sent':sent,'http_status':status,'read_only_tool':True,
+                'network_route':'system_proxy','elapsed_ms':timing()}
     try:
         timeout=aiohttp.ClientTimeout(total=max(.001,model['timeout']-(time.monotonic()-started)))
         async with aiohttp.ClientSession(timeout=timeout,connector=aiohttp.TCPConnector(ssl=model_tls_context()),trust_env=False,trace_configs=[trace]) as client:
@@ -38,7 +43,7 @@ async def request(stage,args,model):
                 if status!=200:
                     error=ModelError('web_http_'+str(status),usage={'tool':stage,'http_status':status,'billable':False,
                         'estimated_amount_cny':'0','currency':'CNY','price_version':'deepseek-cny-2026-11-15','network_route':'system_proxy'},
-                        diagnostics={'request_headers_sent':sent,'http_status':status,'read_only_tool':True,'network_route':'system_proxy'})
+                        diagnostics=diagnostics())
                     error.tool_response=body
                     raise error
                 data=json.loads(body)
@@ -47,14 +52,13 @@ async def request(stage,args,model):
                     'estimated_amount_cny':str(Decimal('0.005') if billable else Decimal('0')),
                     'currency':'CNY','price_version':'deepseek-cny-2026-11-15',
                     'network_route':'system_proxy','pricing_source':'https://api-docs.deepseek.com/zh-cn/quick_start/pricing/',
-                    'amount_is_estimate':True,'elapsed_ms':round((time.monotonic()-started)*1000,3)}
-                return ModelCompletion(body,usage,{'request_headers_sent':sent,'http_status':200,'read_only_tool':True,'network_route':'system_proxy'})
+                    'amount_is_estimate':True,'elapsed_ms':timing()}
+                return ModelCompletion(body,usage,diagnostics())
     except ModelError:raise
     except (aiohttp.ClientError,TimeoutError):
         if not sent and status is None:
             raise ModelError('provider_network_error',diagnostics={'request_headers_sent':False,
-                             'response_headers_received':False,'network_route':'system_proxy'}) from None
-        raise ModelError('web_transport_unconfirmed',diagnostics={'request_headers_sent':sent,'http_status':status,
-                         'read_only_tool':True,'network_route':'system_proxy'}) from None
+                             'response_headers_received':False,'network_route':'system_proxy','elapsed_ms':timing()}) from None
+        raise ModelError('web_transport_unconfirmed',diagnostics=diagnostics()) from None
     except (ValueError,UnicodeError):
-        raise ModelError('web_transport_unconfirmed',diagnostics={'request_headers_sent':sent,'http_status':status,'read_only_tool':True,'network_route':'system_proxy'}) from None
+        raise ModelError('web_transport_unconfirmed',diagnostics=diagnostics()) from None

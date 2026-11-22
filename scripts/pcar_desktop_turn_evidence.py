@@ -3,10 +3,44 @@
 import argparse
 from contextlib import closing
 import json
+import math
 from pathlib import Path
 import sqlite3
 
 from .pcar_acceptance_check import safe_file
+
+
+def lookup_call_evidence(row):
+    """Read scalar timing and provider-reported counts without exporting tool payloads."""
+    call = {key: row[key] for key in ("step", "attempt_id", "binding", "state")}
+    usage = json.loads(row["usage_json"] or "{}") or {}
+    result = json.loads(row["result_json"] or "{}") or {}
+    provider = usage.get("usage") or usage
+    transport = usage.get("transport") or result.get("diagnostics") or usage
+    timing = {}
+    for key in ("elapsed_ms", "first_event_ms", "first_content_delta_ms"):
+        value = transport.get(key)
+        if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+            timing[key] = value
+    if timing:
+        call["timing"] = timing
+    http_status = transport.get("http_status")
+    if type(http_status) is int:
+        call["http_status"] = http_status
+    breakdown = provider.get("completion_tokens_details") or {}
+    counts = {key: value for key, value in (
+        ("prompt_tokens", provider.get("prompt_tokens")),
+        ("completion_tokens", provider.get("completion_tokens")),
+        ("reasoning_tokens", breakdown.get("reasoning_tokens")),
+    ) if type(value) is int and value >= 0}
+    if counts:
+        call["tokens"] = counts
+    tools = provider.get("server_tool_use") or {}
+    counts = {key: tools[key] for key in ("tool_search", "tool_fetch", "tool_image_search")
+              if type(tools.get(key)) is int and tools[key] >= 0}
+    if counts:
+        call["provider_tool_counts"] = counts
+    return call
 
 
 def collect(home: Path, request_id: str) -> dict:
@@ -77,8 +111,17 @@ def collect(home: Path, request_id: str) -> dict:
                         """SELECT a.id,k.value FROM private_reply_attempts a JOIN knowledge_control k
                            ON k.key='private.reply.format.'||a.id WHERE a.turn_id=? ORDER BY a.rowid""",(turn_id,))]
         if db.execute("SELECT 1 FROM sqlite_master WHERE name='private_lookup_calls'").fetchone():
-            report['lookup_calls']=[dict(r) for r in db.execute(
-                "SELECT step,attempt_id,binding,state FROM private_lookup_calls WHERE turn_id=? AND step!='organize' ORDER BY rowid",(turn_id,))]
+            from persona_runtime import public_lookup
+            trace=public_lookup.trace(db,turn_id)
+            if trace:
+                revision=trace.get('revision')
+                if revision:
+                    trace['revision']=dict(revision,documents=[{k:v for k,v in doc.items() if k!='url'}
+                                                               for doc in revision['documents']])
+                report['public_lookup']=trace
+            report['lookup_calls']=[lookup_call_evidence(r) for r in db.execute(
+                """SELECT step,attempt_id,binding,state,usage_json,result_json FROM private_lookup_calls
+                   WHERE turn_id=? AND step!='organize' ORDER BY rowid""",(turn_id,))]
             if schema>=36:
                 report['study_attempts']=[dict(r) for r in db.execute(
                     "SELECT attempt_id,binding,state FROM private_lookup_calls WHERE turn_id=? AND step='organize'",(turn_id,))]

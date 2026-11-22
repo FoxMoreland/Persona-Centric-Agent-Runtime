@@ -124,11 +124,11 @@ class Coverage(unittest.IsolatedAsyncioTestCase):
         with self.store.connection() as db:
             self.assertEqual(db.execute('SELECT outcome FROM local_knowledge_reads WHERE turn_id=?',(again,)).fetchone()[0],'insufficient')
 
-    async def test_same_scope_contradiction_rejects_both_receipts(self):
+    async def test_same_page_wrong_attribute_cannot_displace_the_requested_excerpt(self):
         self.needed=['A1']
         self.records=lambda s:[fact(s,'701',0,'A1 701。'),fact(s,'702',0,'B2 702。')]
         tid=await self.cold('帮我查一下K44 A1');self.show(tid,'main')
-        self.assertFalse(self.providers.bodies[-1][1]['research']['facts'])
+        self.assertEqual([f['text'] for f in self.providers.bodies[-1][1]['research']['facts']],['A1 701。'])
 
     async def test_crop_cannot_hide_the_preceding_negation(self):
         self.needed=['A1']
@@ -339,7 +339,10 @@ class Coverage(unittest.IsolatedAsyncioTestCase):
         self.sources[0]['content']=''.join('K44 A1 '+x+'。' for x in values)
         self.records=lambda s:[fact(s,x,0,'K44 A1 '+x+'。',predicate='日期时间',state='observed') for x in values]
         tid=await self.cold('帮我查一下K44 A1');self.show(tid,'main')
-        self.assertFalse(self.providers.bodies[-1][1]['research']['facts'])
+        facts=self.providers.bodies[-1][1]['research']['facts']
+        self.assertEqual({f['value'] for f in facts},set(values[:2]))
+        self.assertEqual(len({f['revision_id'] for f in facts}),2)
+        self.assertEqual(len({tuple(f['span']) for f in facts}),2)
 
     async def test_confirmed_http_failure_preserves_the_successful_search_sources(self):
         from persona_runtime.chat import ModelError

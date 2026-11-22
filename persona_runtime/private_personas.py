@@ -24,6 +24,7 @@ DIALOGUE_PERMISSIONS = {'dialogue_understanding': 'deepseek-flash',
                        'dialogue_selection': 'deepseek-flash', 'dialogue_reply': 'deepseek-v4-pro'}
 FIXED_MODEL_PERMISSIONS = {**DIALOGUE_PERMISSIONS, 'knowledge_native': 'deepseek-flash',
                            'knowledge_study': 'deepseek-flash', 'knowledge_notice': 'deepseek-flash'}
+OPENROUTER_WRITER_PERMISSION = 'openrouter_writer'
 
 
 def safe(path, parent=None):
@@ -141,7 +142,8 @@ class PrivatePersonas:
         from .config import ConfigStore
         from .persona_management import active
         if not operation_id:raise RuntimeErrorBase('operation_id_required')
-        if kind not in ('main','organization','proactive','knowledge_router','selector','expression','expression_learning') and kind not in FIXED_MODEL_PERMISSIONS:raise RuntimeErrorBase('private_permission_kind_invalid')
+        if kind not in ('main','organization','proactive','knowledge_router','selector','expression','expression_learning',
+                        OPENROUTER_WRITER_PERMISSION) and kind not in FIXED_MODEL_PERMISSIONS:raise RuntimeErrorBase('private_permission_kind_invalid')
         self.root.mkdir(parents=True,exist_ok=True)
         lock=InstanceLock(self.root/'registry.lock')
         try:
@@ -151,7 +153,8 @@ class PrivatePersonas:
                 policy=self.record_for_persona(persona_id,db=db)
                 if policy is None:
                     policy=self.acceptance_copy_policy(persona_id)
-                    if policy is not None and kind not in ('main','knowledge_router','expression','expression_learning') and kind not in FIXED_MODEL_PERMISSIONS:
+                    if policy is not None and kind not in ('main','knowledge_router','expression','expression_learning',
+                                                           OPENROUTER_WRITER_PERMISSION) and kind not in FIXED_MODEL_PERMISSIONS:
                         raise RuntimeErrorBase('private_copy_permission_kind_not_allowed')
                 if policy is None:raise RuntimeErrorBase('private_scope_mismatch')
                 cfg=ConfigStore(self.paths).load()
@@ -160,6 +163,10 @@ class PrivatePersonas:
                     from .knowledge_routing import configured_model
                     model=configured_model(self.paths)
                 if kind=='selector':model=cfg['character_selector']
+                if kind==OPENROUTER_WRITER_PERMISSION:
+                    from .main_reply import binding, writer
+                    binding(ConfigStore(self.paths),cfg)
+                    model=writer(cfg)
                 if kind in FIXED_MODEL_PERMISSIONS:
                     from .provider_policy import require_generation_provider
                     if cfg.get('private_research_account')=='native_web' and kind=='knowledge_native':
@@ -384,6 +391,16 @@ def guard_cloud_dispatch(store,persona_id,kind,model,*,db=None,decision_use=None
     if policy and policy.get('state')=='en5_visible_copy' and not _en5_grant(store.paths,policy,kind,model):
         raise RuntimeErrorBase('en5_specific_use_unavailable')
     if policy is not None and (kind in ('main','organization','proactive','knowledge_router','selector','expression','expression_learning') or kind in FIXED_MODEL_PERMISSIONS) and private.model_authorized(persona_id,policy,kind,model):return
+    if kind==OPENROUTER_WRITER_PERMISSION:
+        from .provider_policy import is_openrouter_writer
+        copied=store.paths.home/'runtime/private-copy-policy.json'
+        copy_policy=None
+        if policy is None and copied.is_file() and json.loads(copied.read_bytes()).get('persona_id')==persona_id:
+            copy_policy=private.acceptance_copy_policy(persona_id)
+        if (not is_openrouter_writer(model) or
+                (protected:=policy or copy_policy) and not private.model_authorized(persona_id,protected,kind,model)):
+            raise RuntimeErrorBase('private_cloud_provider_not_authorized')
+        return
     if policy is not None and policy.get('_migration_binding'):
         raise RuntimeErrorBase('private_cloud_provider_not_authorized')
     with (store.connection() if db is None else nullcontext(db)) as db:

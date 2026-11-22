@@ -8,13 +8,14 @@ from contextlib import ExitStack
 from importlib.metadata import version
 from pathlib import Path
 from queue import Empty, SimpleQueue
-from threading import Thread
+from threading import RLock, Thread
 import time
 from urllib.parse import unquote
 
 from .app_runtime import AppRuntime
 from .config import atomic_json
 from .workbench_import import WorkbenchData
+from .workbench_appearance import ACCENT, APPEARANCE_FILE, APPEARANCE_MODES, appearance_settings
 from .lifecycle import ServiceController
 from .models import RuntimeErrorBase
 from .workbench_errors import report_failure
@@ -24,8 +25,6 @@ from .workbench_instance import acquire_or_wake, next_wakeup, wait_for_previous_
 WEBVIEW_VERSION = "6.2.1"
 STARTUP_TIMEOUT = 25
 WINDOW_TITLE = "PCAR 新版工作台"
-APPEARANCE_FILE = Path("config", "workbench-appearance.json")
-APPEARANCE_MODES = ("system", "light", "dark")
 WINDOW_COLORS = {
     "light": ("#e6e8de", "#ebece2", "#24352f"),
     "dark": ("#1a211e", "#252f29", "#dce6dc"),
@@ -36,12 +35,7 @@ DWMWA_COLOR_DEFAULT = 0xFFFFFFFF
 
 
 def read_appearance(paths):
-    try:
-        saved = json.loads((paths.home / APPEARANCE_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return "system"
-    mode = saved.get("mode") if isinstance(saved, dict) else None
-    return mode if mode in APPEARANCE_MODES else "system"
+    return appearance_settings(paths)["mode"]
 
 
 def initial_window_appearance(mode):
@@ -58,11 +52,12 @@ def initial_window_appearance(mode):
     return "dark" if light == 0 else "light"
 
 
-def workbench_html(appearance="system"):
+def workbench_html(appearance="system", accent=None):
     assets = Path(__file__).with_name("workbench_web")
     html = (assets / "index.html").read_text(encoding="utf-8")
     mode = appearance if appearance in APPEARANCE_MODES else "system"
-    html = html.replace('data-appearance="system"', f'data-appearance="{mode}" data-native-workbench', 1)
+    seed = f' data-accent="{accent.lower()}"' if isinstance(accent, str) and ACCENT.fullmatch(accent) else ""
+    html = html.replace('data-appearance="system"', f'data-appearance="{mode}"{seed} data-native-workbench', 1)
     script = "\n".join((assets / name).read_text(encoding="utf-8") for name in ("desktop.js","persona_import.js"))
     body, mark, rest = html.rpartition("</body>")
     if not mark:
@@ -94,6 +89,7 @@ class DesktopControls(WorkbenchData):
         super().__init__(paths,window)
         self._post = post
         self._status = status
+        self._appearance_lock = RLock()
 
     def ready(self):
         self._post(("ready", None))
@@ -110,7 +106,17 @@ class DesktopControls(WorkbenchData):
     def save_appearance(self, mode):
         if mode not in APPEARANCE_MODES:
             raise RuntimeErrorBase("外观选项无效。")
-        atomic_json(self._config.paths.home / APPEARANCE_FILE, {"mode": mode}, durable=True)
+        self._save_appearance(mode=mode)
+
+    def save_accent(self, accent):
+        if accent is not None and (not isinstance(accent, str) or not ACCENT.fullmatch(accent)):
+            raise RuntimeErrorBase("请选择有效的主题色。")
+        self._save_appearance(accent=accent.lower() if accent else None)
+
+    def _save_appearance(self, **changes):
+        paths = self._config.paths
+        with self._appearance_lock:
+            atomic_json(paths.home / APPEARANCE_FILE, appearance_settings(paths) | changes, durable=True)
 
     def set_window_appearance(self, theme):
         if theme not in ("light", "dark"):
@@ -469,12 +475,12 @@ def run(paths):
             import webview
 
             stage = "webview_resources"
-            appearance = read_appearance(paths)
-            html = workbench_html(appearance)
+            appearance = appearance_settings(paths)
+            html = workbench_html(appearance["mode"], appearance["accent"])
             stage = "console_lease"
             controller = ServiceController(paths)
             lease = controller.start_console()
-            host = WebViewHost(controller, appearance)
+            host = WebViewHost(controller, appearance["mode"])
             cleanup.callback(host.release)
             stage = "cleanup_legacy"
             wait_for_previous_components(controller, lease)

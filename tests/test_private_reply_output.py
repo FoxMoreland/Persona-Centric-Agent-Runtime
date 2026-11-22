@@ -35,6 +35,36 @@ class OutputHandoff(unittest.IsolatedAsyncioTestCase):
         stage3.ResearchTests.setUp(self)
         self.providers.output_contract_version = VERSION
 
+    async def test_conversation_keeps_full_reply_across_fragment_restart(self):
+        self.consent(True)
+        self.providers.output_contract_version = FACT_REVIEW_VERSION
+        self.providers.conversation_systems = {'reply_system': '701'}
+        self.providers.route = 'none'
+        self.providers.consume = False
+        self.providers.body = ('。'.join(['甲'*30]*7))+'。'
+        choose = self.providers.choose
+        async def choose_short(node, attempt, state, options):
+            if node == 'J6.mode':
+                return 'short_answer', {}
+            return await choose(node, attempt, state, options)
+        self.providers.choose = choose_short
+        tid = await self.submit()
+        unit = self.out.list(self.pid,self.sid,tid)[0]
+        uid = unit['id']
+        plan = self.out.plan(self.pid,self.sid,uid)
+        self.assertGreater(len(plan['items']), 1)
+        constraints = self.providers.bodies[-1][1]['output_constraints']
+        self.assertEqual(constraints, {'phase':'main','mode':'short_answer','output_fields':['body']})
+        prefix = self.paint(uid,plan,0)
+        self.reopen()
+        restored = self.out.plan(self.pid,self.sid,uid)
+        self.assertEqual((restored['id'],restored['revision']), (plan['id'],plan['revision']))
+        self.assertEqual(restored['items'][0]['state'],'presented')
+        pieces = [prefix]+[self.paint(uid,restored,i) for i in range(1,len(restored['items']))]
+        self.assertEqual(''.join(pieces), self.providers.body)
+        self.assertEqual(self.chat.get(tid)['status'],'completed')
+        self.assertFalse(self.providers.lookups)
+
     def paint_full_bubble(self, tid, phase, expected):
         unit = next(u for u in self.out.list(self.pid,self.sid,tid) if u['phase']==phase)
         plan = self.out.plan(self.pid,self.sid,unit['id'])
@@ -237,6 +267,12 @@ class OutputHandoff(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('output_fields',ordinary_wire['output_constraints'])
         self.assertEqual(long_wire['output_constraints']['output_fields'],['body','detail'])
 
+        for tool in ('acquired','empty','failed','not_dispatched'):
+            await adapter.reply('707',main|{'research':{'retrieval':{'tool':tool}}})
+        self.assertEqual([m[1][0]['content'] for m in received[-4:]],['711','711','711','704'])
+        self.assertTrue(all('search_notice_presented' not in json.loads(m[1][1]['content'])
+                            for m in received[-4:]))
+
         from persona_runtime.provider_policy import PRIVATE_COMPATIBLE_WRITER, require_generation_provider
         from persona_runtime.session_privacy import recipients
         gateway, model_name = PRIVATE_COMPATIBLE_WRITER
@@ -293,6 +329,159 @@ class OutputHandoff(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([p['model'] for p in requests[-3:]],['deepseek-flash','deepseek-flash','deepseek-v4-pro'])
         self.assertTrue(all(not p.get('tools') for p in requests[-3:]))
         self.assertEqual(requests[-2]['response_format'],{'type':'json_object'})
+
+        from unittest.mock import AsyncMock
+        from persona_runtime.provider_compat import build_request
+        from persona_runtime import lookup_target, session_privacy
+        from persona_runtime.knowledge_routing import configured_model
+        dedicated={'name':'deepseek-v4-flash','base_url':'https://api.deepseek.com'}
+        prev=session_privacy.recipients(self.config,self.config.load())
+        self.config.update({'lookup_target_model':dedicated|{'api_key':'811'}})
+        self.assertNotIn('lookup_target',prev)
+        self.assertNotIn('encrypted_key',self.config.public()['lookup_target_model'])
+        grant=self.consent(True)
+        self.assertEqual(grant['recipients']['lookup_target'],dedicated['base_url'])
+        bundle['jev']={k:configured_model(self.config.paths)[k] for k in ('base_url','name')}
+        bundle['lookup_target']={'version':lookup_target.VERSION,'model':dedicated,'system':bundle['knowledge_study']['instructions']}
+        path.write_text(json.dumps(bundle),encoding='utf-8')
+        resolver=AsyncMock()
+        resolver.complete.return_value=('{"parts":[]}',{'total_tokens':4})
+        adapter=ReviewedPrivateChatProviders(self.config,path,sha256(path.read_bytes()).hexdigest(),target_client=resolver)
+        state={'fields':[{'ref':'817','text':'818'}]}
+        with self.assertRaisesRegex(RuntimeErrorBase,'not_authorized'):
+            adapter.bind_target({'consent':grant|{'enabled':False}},state)
+        invoke,audit=adapter.bind_target({'consent':grant},state)
+        answer,usage=await invoke('819')
+        self.assertEqual((answer,usage['usage']['total_tokens']),({'parts':[]},4))
+        sent,messages=resolver.complete.await_args.args
+        self.assertEqual((sent['name'],audit['endpoint'],messages[0]['content']),
+                         (dedicated['name'],dedicated['base_url'],bundle['lookup_target']['system']))
+        self.assertEqual(json.loads(messages[1]['content']),state)
+        self.assertNotIn('tools',build_request(sent,messages)[0])
+        from unittest.mock import patch
+        from persona_runtime import knowledge_coverage, public_lookup
+        from persona_runtime.chat import ModelCompletion
+        from persona_runtime.archive import fingerprint
+        bundle['public_lookup_version']=public_lookup.VERSION
+        path.write_text(json.dumps(bundle),encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeErrorBase,'review_incomplete'):
+            ReviewedPrivateChatProviders(self.config,path,sha256(path.read_bytes()).hexdigest())
+        bundle['local_lookup_version']=knowledge_coverage.VERSION
+        bundle['knowledge_study']['version']=knowledge_coverage.STUDY_VERSION
+        selector=bundle['nodes']['J5']
+        selector.update(criteria=dict.fromkeys(('complete','insufficient'),selector['instructions']),
+                        source_criterion=selector['instructions'])
+        path.write_text(json.dumps(bundle),encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeErrorBase,'review_incomplete'):
+            ReviewedPrivateChatProviders(self.config,path,sha256(path.read_bytes()).hexdigest())
+        bundle['public_lookup_j5']={'instructions':'810','criteria':{'complete':'811','source/0':'812','insufficient':'813'}}
+        path.write_text(json.dumps(bundle),encoding='utf-8')
+        signed=ReviewedPrivateChatProviders(self.config,path,sha256(path.read_bytes()).hexdigest())
+        from persona_runtime.public_lookup_study import SOURCE_OPTIONS
+        transport=AsyncMock()
+        transport.complete.return_value=(200,'{}')
+        signed.jev_factory=lambda model:transport
+        _,audit=await signed.bind_public_source()('J5','809',{'question':'807','source':{}},SOURCE_OPTIONS)
+        wire=transport.complete.await_args.args[0]['questions']['J5']
+        self.assertEqual(wire,dict(type='choice',**bundle['public_lookup_j5']))
+        self.assertEqual(audit['purpose'],'public_lookup_j5')
+        self.assertEqual(audit['request_sha256'],fingerprint(transport.complete.await_args.args[0]))
+        await signed.bind_choose()('J5','808',{'facts':[]},('drop/0','insufficient'))
+        old=transport.complete.await_args.args[0]['questions']['J5']
+        self.assertEqual(old['criteria']['drop/0'],selector['source_criterion'])
+        from persona_runtime.ordinary_providers import register
+        self.assertFalse(session_privacy.status(self.store,self.config,self.pid,self.sid)['public_lookup']['available'])
+        register(self.config,path,sha256(path.read_bytes()).hexdigest())
+        self.assertTrue(session_privacy.status(self.store,self.config,self.pid,self.sid)['public_lookup']['available'])
+        search=signed.search_model()
+        reply=ModelCompletion('',{}, {},native={'outcome':'completed','assistant':{}})
+        with patch('persona_runtime.deepseek_native_transport.DeepSeekNativeClient.complete',
+                   new=AsyncMock(return_value=reply)) as capture:
+            send,endpoint,payload=signed.bind_retrieve('native','820',{'question':'821','as_of':'2026-11-21'},search)
+            await send()
+            actual,messages=capture.await_args.args
+            self.assertEqual(fingerprint(payload),fingerprint(build_request(actual,messages)[0]))
+            self.assertEqual(endpoint,'https://api.deepseek.com/chat/completions')
+            self.assertEqual([m['role'] for m in messages],['system','user'])
+            self.assertTrue(messages[-1]['content'].endswith('821'))
+        with patch('persona_runtime.knowledge_web_transport.request',new=AsyncMock(return_value=('{}',{}))) as capture:
+            send,endpoint,payload=signed.bind_retrieve('search','822',{'query':'821'},search)
+            await send()
+            self.assertEqual(capture.await_args.args[1],payload)
+            self.assertEqual(payload,{'query':'821','count':8,'need_content':True})
+            self.assertEqual(endpoint,'https://api.deepseek.com/v1/tools/search')
+        from persona_runtime import reply_provenance
+        bundle['lookup_target']['version']=lookup_target.QUOTED_TARGET_VERSION
+        bundle['provenance_version']=reply_provenance.VERSION
+        bundle['lookup_delivery_system']='817 JSON'
+        bundle['nodes'][reply_provenance.NODE]={'instructions':'818','criteria':{'grounded':'819','unbound':'820'}}
+        path.write_text(json.dumps(bundle),encoding='utf-8')
+        writer=AsyncMock()
+        writer.complete.return_value=('{"body":"801","claims":[]}',{})
+        attributed=ReviewedPrivateChatProviders(self.config,path,sha256(path.read_bytes()).hexdigest(),writer=writer)
+        body,usage=await attributed.reply('821',main|{'provenance':{'version':reply_provenance.VERSION,'fresh_fact_ids':[]}})
+        sent,messages=writer.complete.await_args.args
+        self.assertEqual(messages[0]['content'],bundle['lookup_delivery_system'])
+        self.assertTrue(sent['_json_output'])
+        self.assertEqual((body,usage['lookup_attribution']),('801',{'claims':[]}))
+        self.config.update({'lookup_target_model':dedicated|{'api_key':'812'}})
+        with self.assertRaisesRegex(RuntimeErrorBase,'not_authorized'):
+            adapter.bind_target({'consent':grant},state)
+
+        official_pro={'name':'deepseek-v4-pro','base_url':official_flash['base_url']}
+        self.config.update({'model':official_pro|{'api_key':'801'}})
+        bundle['main']=official_pro
+        path.write_text(json.dumps(bundle),encoding='utf-8')
+        direct=ReviewedPrivateChatProviders(self.config,path,sha256(path.read_bytes()).hexdigest(),writer=writer)
+        writer.complete.return_value=(json.dumps({'body':'801','mode':main['mode'],'claims':[]}),{})
+        body,usage=await direct.reply('821',main|{'provenance':{'version':reply_provenance.VERSION,'fresh_fact_ids':[]}})
+        self.assertEqual((body,usage['lookup_attribution']),('801',{'claims':[]}))
+        sent,messages=writer.complete.await_args.args
+        self.assertEqual(sent['base_url'],official_pro['base_url'])
+        self.assertEqual(messages[0]['content'],bundle['lookup_delivery_system'])
+        self.assertEqual(direct.notice_model()['base_url'],gateway)
+        self.assertEqual(direct.search_model()['base_url'],official_flash['base_url'])
+        from persona_runtime.ordinary_providers import OFFICIAL_DEEPSEEK_ROUTE
+        from persona_runtime.config import atomic_json
+        bundle['generation_route']=OFFICIAL_DEEPSEEK_ROUTE
+        path.write_text(json.dumps(bundle),encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeErrorBase,'recipient_changed'):
+            ReviewedPrivateChatProviders(self.config,path,sha256(path.read_bytes()).hexdigest())
+        bundle['notice']=bundle['knowledge_study']['model']=official_flash
+        self.config.update({'organization':{'reuse_chat':False,'model':official_flash|{'api_key':'801'}}})
+        router=self.paths.home/'private/knowledge-router/config.json'
+        bundle['jev']={'base_url':gateway,'name':'jev-1.14'}
+        atomic_json(router,json.loads(router.read_bytes())|bundle['jev'])
+        from persona_runtime import research_contract
+        bundle['research_coverage']={'version':research_contract.VERSION,'model':official_flash,
+                                     'system':bundle['knowledge_study']['instructions']}
+        path.write_text(json.dumps(bundle),encoding='utf-8')
+        organizer=AsyncMock()
+        organizer.complete.return_value=('{}',{})
+        official=ReviewedPrivateChatProviders(self.config,path,sha256(path.read_bytes()).hexdigest(),organizer=organizer)
+        self.assertEqual(official._model('jev')['base_url'],gateway)
+        self.assertEqual([m['base_url'] for m in (official._model('main'),official.notice_model(),
+                         official.study_model(),official.target_model(),official.search_model())],
+                         [official_flash['base_url']]*5)
+        await official.organize('824',{},official.study_model())
+        self.assertEqual(organizer.complete.await_args.args[0]['base_url'],official_flash['base_url'])
+        granted=self.consent(True)
+        check,audit=official.bind_coverage({'consent':granted},{'version':research_contract.VERSION})
+        await check('825')
+        self.assertEqual(audit['endpoint'],official_flash['base_url'])
+        self.config.update({'organization':{'reuse_chat':False,'model':relay_flash|{'api_key':'802'}}})
+        with self.assertRaisesRegex(RuntimeErrorBase,'recipient_changed'):
+            official.bind_phase_reply('search_notice')
+        self.config.update({'organization':{'reuse_chat':False,'model':official_flash|{'api_key':'801'}}})
+        bundle['main']=relay_pro
+        self.config.update({'model':relay_pro|{'api_key':'802'}})
+        path.write_text(json.dumps(bundle),encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeErrorBase,'recipient_changed'):
+            ReviewedPrivateChatProviders(self.config,path,sha256(path.read_bytes()).hexdigest())
+        bundle['main']=official_pro|{'base_url':'https://example.invalid'}
+        path.write_text(json.dumps(bundle),encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeErrorBase,'recipient_changed'):
+            ReviewedPrivateChatProviders(self.config,path,sha256(path.read_bytes()).hexdigest(),writer=writer)
 
     async def test_format_failure_reuses_decisions_and_search_then_displays_original(self):
         self.consent(True)

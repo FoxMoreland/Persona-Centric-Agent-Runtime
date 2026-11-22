@@ -118,6 +118,9 @@ class ConfigStore:
 
     @staticmethod
     def validate(value):
+        if 'main_reply' in value:
+            from .main_reply import validate
+            validate(value['main_reply'])
         limits=value.get("call_limits",DEFAULTS["call_limits"])
         if (not isinstance(limits,dict) or set(limits)-{'enabled','hourly','daily','saved_automatic'} or not {'enabled','hourly','daily'}<=limits.keys()
                 or type(limits['enabled']) is not bool or any(type(limits[k]) is not int or not 0<=limits[k]<=1000000 for k in ('hourly','daily'))
@@ -209,6 +212,21 @@ class ConfigStore:
         for field, low, high in (("timeout", 1, 300), ("max_tokens", 1, 32768), ("hourly_limit", 0, 10000), ("max_input_chars", 1000, 200000)):
             if type(background[field]) is not int or not low <= background[field] <= high:
                 raise RuntimeErrorBase("Invalid organization model limit")
+        if 'lookup_target_model' in value:
+            from .provider_policy import require_generation_provider
+            target = value['lookup_target_model']
+            if not isinstance(target,dict) or set(target)!=set(DEFAULTS['model']):
+                raise RuntimeErrorBase('invalid_lookup_target_model')
+            try:
+                require_generation_provider(target)
+            except ValueError:
+                raise RuntimeErrorBase('invalid_lookup_target_model') from None
+            if not isinstance(target['encrypted_key'],str) or not target['encrypted_key']:
+                raise RuntimeErrorBase('invalid_lookup_target_model')
+            for field,low,high in (('timeout',1,300),('max_tokens',1,32768),
+                                   ('hourly_limit',0,10000),('max_input_chars',1000,200000)):
+                if type(target[field]) is not int or not low<=target[field]<=high:
+                    raise RuntimeErrorBase('invalid_lookup_target_model')
         if research_account == 'native_web' or 'native_web_model' in value:
             from .deepseek_native_contract import official_endpoint
             native = value.get('native_web_model')
@@ -227,6 +245,8 @@ class ConfigStore:
 
     def public(self):
         value = self.load()
+        from .main_reply import status
+        value['main_reply'] = status(self,value)
         value["character_selector"]["has_key"] = bool(value["character_selector"].pop("encrypted_key"))
         value.pop("admin_token")
         value.pop("bridge_token")
@@ -234,6 +254,9 @@ class ConfigStore:
         value["organization"]["model"]["has_key"] = bool(value["organization"]["model"].pop("encrypted_key"))
         if 'native_web_model' in value:
             value['native_web_model']['has_key'] = bool(value['native_web_model'].pop('encrypted_key'))
+        if 'lookup_target_model' in value:
+            target = value['lookup_target_model']
+            target['has_key'] = bool(target.pop('encrypted_key'))
         return value
 
     def update(self, changes):
@@ -245,15 +268,27 @@ class ConfigStore:
     def _update(self, changes):
         value = self.load()
         allowed = {"call_limits","organization_parallel_tasks","service_port", "napcat_port", "astrbot_port", "onebot_port", "bot_qq", "owner_qq", "model", "interaction", "organization", "character_selector", "qq_backend", "snowluma_port", "private_research_account", "native_web_model"}
+        allowed.add('lookup_target_model')
+        allowed.add('main_reply')
         if not isinstance(changes, dict) or not set(changes) <= allowed:
             raise RuntimeErrorBase("Unknown configuration field")
         for key, change in changes.items():
-            if key in ("model", "native_web_model"):
+            if key == 'main_reply':
+                from .main_reply import update
+                update(self,value,change)
+                continue
+            if key == 'lookup_target_model' and change is None:
+                value.pop(key,None)
+                continue
+            if key in ("model", "native_web_model", "lookup_target_model"):
                 if not isinstance(change, dict) or not set(change) <= {
                     "base_url", "name", "api_key", "timeout", "max_tokens", "hourly_limit", "max_input_chars"
                 }:
                     raise RuntimeErrorBase("Unknown model configuration field")
                 change = dict(change)
+                if (key == 'lookup_target_model' and key in value and 'base_url' in change
+                        and change['base_url'] != value[key]['base_url'] and not change.get('api_key')):
+                    raise RuntimeErrorBase('credential_required_for_new_endpoint')
                 if "api_key" in change:
                     key_value = change.pop("api_key")
                     if not isinstance(key_value, str):

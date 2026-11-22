@@ -191,7 +191,19 @@ def collect(entry, db, turn, contract, frozen=None):
         recent_ids=[i for i in recent_ids if i in admitted]
         previous_exchange=[i for i in previous_exchange if i in admitted]
         catalog={k:v for k,v in catalog.items() if k in admitted}
-    return {'current':current_ids,'recent':recent_ids,'references':refs,'memories':memory_ids,'character':character,
+    from . import message_time
+    time_proof = {}
+    if message_time.enabled(turn) and (frozen is None or frozen.get(message_time.KEY)==message_time.VERSION):
+        dialogue_ids = set(current_ids + recent_ids + refs).intersection(catalog)
+        times = message_time.event_times(db, dialogue_ids)
+        time_proof = {'message_time_bindings':times}
+        for eid in dialogue_ids:
+            item = catalog[eid]
+            entries = message_time.wire_times(times.get(eid, []))
+            item.pop('time', None)
+            if entries:
+                item['message_times'] = entries
+    return {**time_proof,'current':current_ids,'recent':recent_ids,'references':refs,'memories':memory_ids,'character':character,
             'history':history,'previous_exchange':previous_exchange,'jev_model':jev['name'],
             'catalog':catalog,'persona':{kind:model_persona_data(item['data']) for kind,item in profile.items()},
             'profile_versions':{kind:item['id'] for kind,item in profile.items()}}

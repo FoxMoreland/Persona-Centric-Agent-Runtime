@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import ipaddress
 import json
 import os
+import random
 from pathlib import Path
 import runpy
 import subprocess
@@ -55,7 +56,23 @@ def local_service(module):
         def mark(self,key,aid):
             with (home/'calls.jsonl').open('a',encoding='ascii') as f:
                 f.write(json.dumps([key,aid])+'\n');f.flush();os.fsync(f.fileno())
+        async def inject(self,stage):
+            fault=home/'retry-fault.json'
+            if not fault.is_file():
+                return
+            setting=json.loads(fault.read_bytes())
+            if stage!=setting['stage']:
+                return
+            (home/'retry-entered').touch()
+            if setting['mode']=='silence':
+                while fault.exists():
+                    await asyncio.sleep(.1)
+            raise ModelError('provider_http_503',diagnostics={'http_status':503})
+
         async def choose(self,node,aid,state,choices):
+            if(home/'appearance-case.json').exists():
+                assert "data:image/" not in json.dumps(state)
+            await self.inject(node)
             if node=='J1' and (home/'offline').exists():
                 (home/'prewire-observed').touch()
                 raise ModelError('provider_network_error',diagnostics={'request_headers_sent':False})
@@ -67,6 +84,9 @@ def local_service(module):
             self.route='web' if (home/'lookup').exists() else 'none'
             return await super().choose(node,aid,state,choices)
         async def reply(self,aid,packet):
+            if(home/'appearance-case.json').exists():
+                assert "data:image/" not in json.dumps(packet)
+            await self.inject('writer')
             self.mark('writer',aid)
             self.body='751。'*30
             return await super().reply(aid,packet)
@@ -78,7 +98,7 @@ def local_service(module):
         runpy.run_module(module,run_name='__main__')
 
 
-def desktop(home, phase):
+def desktop(home, phase, exercise_case=None):
     from persona_runtime import workbench_webview as gui
     from persona_runtime.app_processes import AppProcesses
     from persona_runtime.lifecycle import ServiceController,port_open
@@ -126,7 +146,35 @@ def desktop(home, phase):
             host.form.BeginInvoke(Action(activate));host.queue.put(('show',None))
             screen.wait("window.pcarLive?.active && !pcarLive.offline && currentSession()?.id==="+json.dumps(sid),timeout=50)
             report.update(console=host.lease_token,service_pid=host.controller.record('service')['host']['ProcessId'])
-            if phase=='evening':
+            if exercise_case is not None:
+                report.update(exercise_case(screen, host))
+            elif phase=='retry':
+                screen.eval("document.getElementById('session-privacy').click();true")
+                screen.click('同意并开启本会话全流程授权');screen.wait('!dialog.open')
+                send('741')
+                tid=wait(lambda:turn('741').get('id'))
+                fault=home/'retry-fault.json'
+                setting=json.loads(fault.read_bytes())
+                condition="[...document.querySelectorAll('button')].find(b=>b.textContent==='重试' && !b.disabled)"
+                screen.wait("Boolean("+condition+")",timeout=210)
+                fault.unlink()
+                if setting['mode']=='silence':
+                    # The original adapter now returns a definite terminal error.
+                    wait(lambda:turn('741').get('status')=='interrupted' and
+                         terminal_attempt(store,tid),timeout=20)
+                    screen.wait("Boolean("+condition+")",timeout=20)
+                screen.eval('('+condition+').click(); true')
+                wait(lambda:turn('741').get('status')=='completed',65)
+                frames=visible(tid)
+                assert frames and all(v['receipt_id'] for v in frames)
+                screen.wait('!('+condition+')')
+                with store.connection() as db:
+                    archived=db.execute("SELECT count(*) FROM desktop_stage_attempts WHERE turn_id=? AND operation IS NOT NULL",(tid,)).fetchone()[0]
+                    accepted=db.execute('SELECT count(*) FROM ingress_receipts WHERE session_id=?',(sid,)).fetchone()[0]
+                assert archived==accepted==1
+                report.update(seed=setting['seed'],injected_stage=setting['stage'],mode=setting['mode'],
+                              accepted=accepted,retried_attempts=archived,visible_fragments=len(frames))
+            elif phase=='evening':
                 screen.eval("document.getElementById('session-privacy').click();true")
                 screen.click('同意并开启本会话全流程授权');screen.wait('!dialog.open')
                 assert status(store,cfg,pid,sid)['enabled']
@@ -228,6 +276,23 @@ def desktop(home, phase):
     (home/(phase+'.json')).write_text(json.dumps(report),encoding='utf8')
 
 
+def terminal_attempt(store,tid):
+    with store.connection() as db:
+        return db.execute("SELECT 1 FROM desktop_stage_attempts WHERE turn_id=? AND outcome='terminal'",(tid,)).fetchone()
+
+
+def run_retry(home,seed,mode):
+    if mode not in ('error','silence'):
+        raise ValueError('expected error or silence')
+    setup(home)
+    stage=random.Random(seed).choice(['J1','J2.action','J2.stance','J2.task','J3','J6.mode','writer'])
+    (home/'retry-fault.json').write_text(json.dumps({'seed':seed,'stage':stage,'mode':mode}))
+    env=os.environ|{'PERSONA_RUNTIME_HOME':str(home),'PCAR_PYTHON':sys.executable}
+    subprocess.run([sys.executable,'-B','-m','tests.workbench_private_daily_cycle',str(home),'retry'],
+                   check=True,env=env,timeout=290)
+    return json.loads((home/'retry.json').read_bytes())
+
+
 def run(home):
     setup(home)
     env=os.environ|{'PERSONA_RUNTIME_HOME':str(home),'PCAR_PYTHON':sys.executable}
@@ -254,7 +319,9 @@ def run(home):
 
 if __name__=='__main__':
     directory=Path(sys.argv[1]).resolve()
-    if len(sys.argv)==2:run(directory)
+    if len(sys.argv)==5 and sys.argv[2]=='--retry':
+        print(json.dumps(run_retry(directory,int(sys.argv[3]),sys.argv[4])))
+    elif len(sys.argv)==2:run(directory)
     else:
         assert RuntimePaths.from_environment().home==directory
         desktop(directory,sys.argv[2])

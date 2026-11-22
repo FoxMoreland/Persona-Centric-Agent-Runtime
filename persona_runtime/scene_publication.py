@@ -45,26 +45,25 @@ class ScenePublication:
 
     @staticmethod
     def desktop_plans(db, turn):
+        from .message_time import visible_parts
         plans = []
-        for row in db.execute("""SELECT u.id utterance_id,u.phase,p.id publication_id,p.revision,p.state,
+        for row in db.execute("""SELECT u.id utterance_id,u.phase,u.source_kind,p.id publication_id,p.revision,p.state,
                     json_extract(v.plan_json,'$.bubble_limit') bubble_limit
                 FROM expression_speech_units u JOIN expression_speech_publications p ON p.utterance_id=u.id
                 JOIN expression_speech_versions v ON v.publication_id=p.id AND v.revision=p.revision
                 WHERE u.turn_id=? ORDER BY u.rowid""", (turn['id'],)):
             items = db.execute("""SELECT ordinal,state,delay_ms FROM expression_speech_items
                 WHERE publication_id=? AND revision=? ORDER BY ordinal""",(row["publication_id"],row["revision"]))
-            visible = db.execute("""SELECT fragment_id id,ordinal,text,presented_at FROM expression_speech_visible
-                WHERE publication_id=? ORDER BY ordinal""",(row["publication_id"],))
-            plans.append(dict(row,kind="speech",items=list(map(dict,items)),visible=list(map(dict,visible))))
+            visible = visible_parts(db, row["publication_id"])
+            plans.append(dict(row,kind="speech",items=list(map(dict,items)),visible=visible))
         if not any(plan["phase"]=="main" for plan in plans):
             row = db.execute("SELECT id publication_id,revision,state FROM expression_publications WHERE turn_id=?",(turn['id'],)).fetchone()
             if row:
                 items=db.execute("""SELECT ordinal,state,delay_ms FROM expression_presentation_items
                     WHERE publication_id=? AND revision=? ORDER BY ordinal""",(row["publication_id"],row["revision"]))
-                visible=db.execute("SELECT id,ordinal,text,presented_at FROM expression_utterances WHERE publication_id=? ORDER BY ordinal",
-                                   (row["publication_id"],))
+                visible = visible_parts(db, row["publication_id"], legacy=True)
                 plans.append(dict(row,kind="legacy",phase="main",turn_id=turn["id"],
-                                  items=list(map(dict,items)),visible=list(map(dict,visible))))
+                                  items=list(map(dict,items)),visible=visible))
         return plans
 
     def issue(self, db, turn, source):
@@ -73,7 +72,11 @@ class ScenePublication:
         validate_history(db,turn,context['details'].get('import_history_sources'))
         imported = import_style.frozen(turn)
         history_only = native_policy(turn)=={"history_presentation":1}
-        if history_only:
+        policy=turn.get('context_policy_snapshot') or {}
+        if isinstance(policy,str):
+            policy=json.loads(policy)
+        conversational=policy.get('conversation_bubbles')==1
+        if history_only or conversational:
             body = source['body']
         elif imported:
             import_style.validate(self.store,db,turn,context['details'].get(import_style.KEY))
@@ -88,7 +91,9 @@ class ScenePublication:
         require(body and body.strip(),'empty_reply')
         unit = self.outlet._register(db,turn,'main',SOURCE,source['id'],source['raw_hash'],body,
                                     native_policy(turn),{},context)
-        self.publisher.publish(db,unit,SOURCE,body,short_frames(body,True),'history_native_reply' if history_only else 'import_native_reply' if imported else 'scene_native_reply')
+        reason='history_native_reply' if history_only else 'import_native_reply' if imported else 'scene_native_reply'
+        segments=[] if conversational else short_frames(body,True)
+        self.publisher.publish(db,unit,SOURCE,body,segments,reason,conversation=conversational)
         db.execute("UPDATE turns SET status='running',usage_json=?,error_code=NULL,updated_at=? WHERE id=?",
                    (source['usage_json'],timestamp(),turn['id']))
         record(db,turn['id'],'generated',source['logical_attempt_id'])

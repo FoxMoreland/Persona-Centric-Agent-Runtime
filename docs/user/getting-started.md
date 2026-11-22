@@ -1,10 +1,12 @@
 # 第一次使用 PCAR
 
-本指南适用于 **v0.3 Windows 桌面包（程序 0.3.0，数据库结构 36）**。部署命令与旧数据升级步骤见[同版本部署手册](../../AGENT_INSTALL.md)。
+本指南适用于 **v0.4 Windows 桌面包（程序 0.4.0，数据库结构 36）**。部署命令与旧数据升级步骤见[同版本部署手册](../../AGENT_INSTALL.md)。
 
-从 v0.3 桌面包使用新版 Windows 工作台时，可以[从私聊记录创建角色](双人聊天生成角色卡.md)或[接续历史聊天](历史聊天接续.md)。
+从 v0.4 桌面包使用新版 Windows 工作台时，可以[从私聊记录创建角色](双人聊天生成角色卡.md)或[接续历史聊天](历史聊天接续.md)。
 
 在左下角「应用菜单 → 外观」选择浅色模式、深色模式或跟随系统。首次打开默认跟随 Windows 的应用颜色，系统切换时工作台会同步换色。手动选择即时应用并保存在本机，重开后直接沿用。浅色使用柔和的暖灰绿底，深色使用低亮度的灰绿底，两套配色都保留聊天正文、输入提示和按钮的可读对比度。
+
+在「人物资料」为当前人物导入头像或聊天背景。切换会话后仍沿用该人物的外观。「应用菜单 → 外观」可以设置界面强调色。已审私聊角色可另行启用 OpenRouter 正文候选。[正文模型设置](OpenRouter-Hydrogen.md)
 
 在聊天输入框上方打开「输入缓冲」，可为当前角色选择逐条发送、定时缓冲或无限缓冲。定时缓冲可设为 1 至 3600 秒，每加入一条都重新计时。无限缓冲下，点击「加入本轮」暂存消息，关闭再打开同一会话仍可继续添加。点击「确认发送本轮」后，已加入的消息才会按顺序一次发送。每轮最多暂存 20 条、共 12,000 字符，达到容量时会保留草稿，由你确认发送或取消本轮。
 
@@ -26,7 +28,7 @@ Agent 会准备 Python 3.12 x64（含 Tkinter）、uv 和依赖。桌面包已�
 
 ## 桌面包和环境准备
 
-取得 `PCAR-v0.3-Windows-x64-desktop.zip` 和 `SHA256SUMS.txt` 后核对摘要，解压到新的程序目录。桌面 ZIP 内置固定版本的本地向量模型和公开人工演练包。[v0.3 发行页](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/v0.3) · [桌面 ZIP](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/v0.3/PCAR-v0.3-Windows-x64-desktop.zip) · [SHA256SUMS.txt](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/v0.3/SHA256SUMS.txt) · [环境准备与升级命令](../../AGENT_INSTALL.md)
+取得 `PCAR-v0.4-Windows-x64-desktop.zip` 和 `SHA256SUMS.txt` 后核对摘要，解压到新的程序目录。桌面 ZIP 内置固定版本的本地向量模型和公开人工演练包。[v0.4 发行页](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/v0.4) · [桌面 ZIP](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/v0.4/PCAR-v0.4-Windows-x64-desktop.zip) · [SHA256SUMS.txt](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/v0.4/SHA256SUMS.txt) · [环境准备与升级命令](../../AGENT_INSTALL.md)
 
 三种数据方式各有用途：
 
@@ -36,7 +38,7 @@ Agent 会准备 Python 3.12 x64（含 Tkinter）、uv 和依赖。桌面包已�
 
 已有工作台先正常退出。迁移时先核对原资料，再启用目标；不要用新建流程覆盖旧数据，也不要向正式实例导入包内人工演练数据。详细步骤见 [本版部署手册](../../AGENT_INSTALL.md)。
 
-已有 v0.2 数据时先正常退出旧工作台并备份，再登记原数据目录，结构 33 升至 36。旧版迁移包先用对应版本恢复到空目录，再升级。
+已有 v0.3 数据时，先正常退出旧工作台并备份，再登记原数据目录，业务数据库沿用结构 36。v0.2 的原机数据可从结构 33 升至 36。旧版迁移包先用对应版本恢复到空目录，再升级。
 
 ## 发送第一条消息
 

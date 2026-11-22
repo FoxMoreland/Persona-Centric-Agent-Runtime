@@ -7,6 +7,7 @@ import sqlite3
 from . import local_knowledge as knowledge
 from . import knowledge_coverage as coverage
 from . import semantic_knowledge as semantic
+from . import lookup_target, research_contract
 from .archive import encoded, fingerprint
 from .models import RuntimeErrorBase, timestamp
 
@@ -54,6 +55,19 @@ def preceding_context(db,turn,target,consent):
 
 
 def resolved_query(db,turn,target,question,consent,instance,*,versioned=False,public_only=False):
+    need=research_contract.request(db,turn['id']) if not public_only else None
+    if need:
+        research_contract.validate_request(db,turn,{'instance':instance,'consent':consent},target)
+        return need['query']
+    proof = lookup_target.for_query(db,turn['id'])
+    if proof and not public_only:
+        lookup_target.validate(db,turn,consent,proof)
+        it = db.execute('SELECT origin,query_json FROM private_lookup_intents WHERE turn_id=?',(turn['id'],)).fetchone()
+        if it and it['origin']=='confirmed' and it['query_json']:
+            return json.loads(it['query_json'])['question']
+        if proof.get('task'):
+            return proof['task']['question']
+        return question
     if semantic.active(db,turn['id']):
         if public_only:return question
         selected=db.execute('SELECT value FROM knowledge_control WHERE key=?',('private.semantic.context.'+turn['id'],)).fetchone()
@@ -95,38 +109,94 @@ def resolved_query(db,turn,target,question,consent,instance,*,versioned=False,pu
     return next(iter(referents.values()))+' '+question[pronoun.end():]
 
 
+def research_passages(db,turn,base,question,*,ids=None,resolution=None):
+    from . import lookup_continuation
+    rows=semantic.materials(db,turn,base,question,ids=ids)
+    cited=lookup_continuation.public_subject(db,turn,base,resolution)
+    if not cited:
+        return rows
+    known={f['id'] for f in rows}
+    return rows+[dict(f,index_labels=[]) for f in cited['facts']
+                 if f['id'] not in known and (ids is None or f['id'] in ids)]
+
+
+def pinned_research_passages(db,turn,base,question,ids,resolution):
+    found={f['id']:semantic.public_material(f) for f in research_passages(
+        db,turn,base,question,ids=ids,resolution=resolution)}
+    if not ids or any(ident not in found for ident in ids):
+        raise RuntimeErrorBase('private_reply_source_changed')
+    return [found[ident] for ident in ids]
+
+
 async def decide(flow,turn,base,material,target):
     from .private_lookup import NO_QUERY, _basis, enabled, projection, previous_reply, refers_back
+    from . import single_retrieval
     tid=turn['id']
     vector=getattr(flow.providers,'semantic_lookup',True)
     with flow.store.connection() as db:
         question=query(db,turn,target)
+        current_messages=[material['catalog'][eid]['text'] for eid in material['current']]
+        local_only=knowledge.local_only(question) or any(knowledge.local_only(text) for text in current_messages)
+        web_declined=any(NO_QUERY.search(text) for text in current_messages)
         permitted=knowledge.enabled(db,turn['persona_id'])
+        contextual = lookup_target.enrolled(db,tid,flow.providers)
+        single=single_retrieval.enrolled(db,tid)
+        contract=research_contract.active(db,tid)
+        target_version = lookup_target.frozen_version(db,tid)
+        automatic = contextual and target_version in lookup_target.AUTOMATIC_VERSIONS
+        catalogue = None
+        public_lookup = contextual and enabled(db,turn['persona_id']) and not local_only and not web_declined
+        explicit_search = contextual and any(db.execute("""SELECT 1 FROM knowledge_control
+            WHERE key IN (?,?)""", ('private.lookup.span.'+eid,'knowledge.native.public_event.'+eid)).fetchone()
+            for eid in material['current'])
     choice='none'
     continuation=None
-    if target!='wait' and permitted and (not NO_QUERY.search(question) or knowledge.local_only(question)):
+    if target!='wait' and permitted and (not NO_QUERY.search(question) or local_only):
         state={'target':target,'question':question}
         referent=previous_reply(material) if refers_back(question) else ''
-        if vector:
+        if vector and not single:
             continuation=await _research_continuation(flow,turn,target,base,question,material)
             if not referent and continuation:
                 referent=continuation[1]
         if referent:
             state['previous_reply']=referent
-        choice=await flow.choice(tid,0,'J4',state,('retrieve','none'),base,material)
+        if contextual:
+            with flow.store.connection() as db:
+                catalogue = lookup_target.packet(db,turn,material,target,base['consent'])
+            state['context'] = lookup_target.wire(catalogue)
+            state['explicit_request'] = explicit_search
+            def check(db):
+                lookup_target.check_packet(db,turn,material,target,base['consent'],catalogue)
+            choice=await flow.choice(tid,0,'J4',state,('retrieve','none'),base,material,check_evidence=check)
+        else:
+            choice=await flow.choice(tid,0,'J4',state,('retrieve','none'),base,material)
+    if single and choice=='retrieve':
+        return await single_retrieval.decide(flow,turn,base,material,target,not local_only and not web_declined)
+    partial=False
+    need=None
+    assessment=None
     outcome='not_requested' if permitted else 'disabled'
     facts=[]
     selected=None
     local_query=question
+    resolution = None
+    retrieve=choice=='retrieve'
+    web_requested=retrieve and not local_only and not web_declined
+    if web_requested and public_lookup:
+        resolution = await lookup_target.resolve(flow,turn,base,material,target,catalogue)
+        if resolution.get('task'):
+            local_query = resolution['task']['question']
     versioned=getattr(flow.providers,'knowledge_revisions',False)
     structured=getattr(flow.providers,'structured_study',False)
     coverage_id=None
     plan=None
     chosen_context=None
-    refresh=not knowledge.local_only(question) and knowledge._REFRESH.search(question)
+    # A saved manual request retains its refresh behavior. Ordinary v4 sends assess local evidence first.
+    refresh=not local_only and (explicit_search or target_version!=lookup_target.QUOTED_TARGET_VERSION and (
+        knowledge._REFRESH.search(question) or resolution and knowledge._REFRESH.search(local_query)))
     read_base=base|{'versioned_knowledge':versioned}
     def lookup(db,text,*,learn=False):
-        outcome,items=knowledge.search(db,turn['persona_id'],turn['session_id'],base['consent'],text,instance=base['instance'],versioned=versioned)
+        outcome,items=knowledge.search(db,turn['persona_id'],turn['session_id'],base['consent'],text,instance=base['instance'],versioned=versioned,alternatives=True)
         match=False
         if structured and outcome not in ('disabled','refresh_requested'):
             items={f['id']:f for f in items}
@@ -149,29 +219,56 @@ async def decide(flow,turn,base,material,target):
                 items=preferred
                 outcome='hit'
         return outcome,items,match
-    if choice=='retrieve' and vector:
+    if not contract and resolution and resolution['status'] in ('ambiguous','invalid'):
+        outcome='insufficient'
+    elif retrieve and vector:
         with flow.store.connection(write=True) as db:
             previous=preceding_context(db,turn,target,base['consent'])
             if not refresh:
                 semantic.import_prior_sources(db,turn,base)
-            candidates=[] if refresh else semantic.materials(db,turn,base,question)
-            will_need_index=not candidates and enabled(db,turn['persona_id']) and not knowledge.local_only(question)
+            candidates=[] if refresh else research_passages(db,turn,base,local_query,resolution=resolution)
+            if resolution:
+                candidates=lookup_target.current_enough(candidates,resolution)
+            will_need_index=not candidates and web_requested and enabled(db,turn['persona_id'])
         anchors=[]
-        if continuation and previous and continuation[0]==previous[0]:
+        if not resolution and continuation and previous and continuation[0]==previous[0]:
             verified={f['id']:semantic.public_material(f) for f in candidates}
             anchors=[f for f in continuation[2][:1] if verified.get(f['id'])==f]
-        if previous and previous[1] and previous[1]!=question and (anchors or previous[2] or refers_back(question) or candidates and
+        if not resolution and previous and previous[1] and previous[1]!=question and (anchors or previous[2] or refers_back(question) or candidates and
                 await asyncio.to_thread(semantic.related_questions,flow.store.paths,question,previous[1])):
             chosen_context=[previous[0],fingerprint(previous[1])]
             local_query=question+'\n'+previous[1]
         if will_need_index:
             await asyncio.to_thread(semantic.require_encoder,flow.store.paths)
         facts=await asyncio.to_thread(semantic.rank,flow.store.paths,local_query,candidates)
+        if not contract and candidates and getattr(flow.providers,'public_lookup_version',None) and contextual:
+            from . import public_lookup, public_lookup_study
+            with flow.store.connection() as db:
+                enrolled=public_lookup.active(db,tid)
+                linked=public_lookup_study.linked_passages(db,resolution) if enrolled else set()
+            if enrolled:
+                ranked_ids={f['id'] for f in facts}
+                extra=[r for r in candidates if r['id'] in linked and r['id'] not in ranked_ids]
+                if extra:
+                    prior=await asyncio.to_thread(semantic.rank,flow.store.paths,local_query,extra,minimum_score=-1.0)
+                    facts=(facts+prior)[:semantic.PASSAGE_LIMIT]
+                def verify(db):
+                    if resolution:
+                        lookup_target.validate(db,turn,base['consent'],resolution)
+                    if semantic.pinned(db,turn,base,local_query,[f['id'] for f in facts])!=facts:
+                        raise RuntimeErrorBase('private_reply_source_changed')
+                facts,checks=await public_lookup_study.supported(flow,turn,base,material,local_query,facts,'local',verify)
+                partial=bool(facts) and not any(c['result']=='complete' for c in checks)
         if anchors:
             identities={(f['url'],f['text']) for f in anchors}
             facts=(anchors+[f for f in facts if (f['url'],f['text']) not in identities])[:semantic.PASSAGE_LIMIT]
-        outcome='hit' if facts else 'refresh_requested' if refresh else 'miss'
-    elif choice=='retrieve':
+        outcome='partial' if partial else 'hit' if facts else 'refresh_requested' if refresh else 'miss'
+        if contract:
+            need,assessment,facts=await assess_read(flow,turn,base,material,target,local_query,resolution,facts,
+                                                  chosen_context,question)
+            outcome={'complete':'hit','partial':'partial','unconfirmed':'coverage_unconfirmed',
+                     'insufficient':'insufficient' if candidates else outcome}[assessment['outcome']]
+    elif retrieve:
         with flow.store.connection(write=True) as db:
             local_query=resolved_query(db,turn,target,question,base['consent'],base['instance'],versioned=versioned)
             outcome,facts,query_bound=lookup(db,local_query,learn=True)
@@ -196,25 +293,43 @@ async def decide(flow,turn,base,material,target):
     elif vector and continuation and not refresh:
         facts=continuation[2]
         outcome='continued'
+    elif vector and contract and permitted and target!='wait' and not refresh and (not web_declined or local_only):
+        from .persona_world_topics import referenced_passages
+        with flow.store.connection() as db:
+            referenced=referenced_passages(db,turn,base,question)
+        if referenced:
+            ranked=await asyncio.to_thread(semantic.rank,flow.store.paths,question,referenced)
+            if ranked:
+                linked_need,assessment,facts=await assess_read(flow,turn,base,material,target,question,None,
+                    ranked,None,question,world_reference=True)
+                if facts:
+                    need=linked_need
+                    outcome='continued'
     with flow.store.connection(write=True) as db:
         _,live,actual=flow._snapshot(db,tid)
         if live!=base or actual!=material:
             raise RuntimeErrorBase('private_lookup_scope_changed')
-        if vector and (choice=='retrieve' or outcome=='continued'):
+        if need:
+            research_contract.freeze_request(db,tid,need)
+        if resolution:
+            lookup_target.validate(db,turn,base['consent'],resolution)
+            db.execute('INSERT INTO knowledge_control VALUES(?,?)',(lookup_target.PREFIX+tid,encoded(resolution)))
+        if vector and (retrieve or outcome=='continued'):
             if chosen_context:
                 previous=preceding_context(db,turn,target,base['consent'])
                 if not previous or chosen_context!=[previous[0],fingerprint(previous[1])]:
                     raise RuntimeErrorBase('private_reply_source_changed')
                 db.execute('INSERT INTO knowledge_control VALUES(?,?)',('private.semantic.context.'+tid,encoded(chosen_context)))
-            if outcome=='continued':
+            if outcome=='continued' and not (need and need.get('world_reference')):
                 previous=preceding_context(db,turn,target,base['consent'])
                 if not previous or not previous[1] or previous[0]!=continuation[0]:
                     raise RuntimeErrorBase('private_reply_source_changed')
                 db.execute('INSERT INTO knowledge_control VALUES(?,?)',
                            ('private.semantic.continued.'+tid,encoded([previous[0],fingerprint(previous[1])])))
-            if facts and semantic.pinned(db,turn,base,question,[f['id'] for f in facts])!=facts:
+            if facts and pinned_research_passages(db,turn,base,local_query if resolution else question,
+                                                 [f['id'] for f in facts],resolution)!=facts:
                 raise RuntimeErrorBase('private_reply_source_changed')
-        elif choice=='retrieve':
+        elif retrieve:
             current_query=resolved_query(db,turn,target,question,base['consent'],base['instance'],versioned=versioned)
             current=lookup(db,current_query)
             if (current_query!=local_query or current!=(outcome,facts,query_bound)
@@ -230,11 +345,20 @@ async def decide(flow,turn,base,material,target):
         task=None
         origin=None
         state='none'
-        if choice=='retrieve' and outcome!='hit' and enabled(db,turn['persona_id']) and not knowledge.local_only(question):
+        if web_requested and outcome not in ('hit','coverage_unconfirmed') and enabled(db,turn['persona_id']):
             ids=material['current'] if target=='batch' else [target]
-            task,origin=projection(db,turn,ids,base['consent']['enabled'],grounded=True)
+            if resolution:
+                task, origin = resolution.get('task'), resolution.get('origin')
+            else:
+                task,origin=projection(db,turn,ids,base['consent']['enabled'],grounded=True)
             if origin!='declined':
-                state='ready' if task else 'waiting'
+                state='ready' if task else 'none' if automatic else 'waiting'
+        from . import public_lookup
+        if public_lookup.active(db,tid):
+            public_lookup.freeze(db,public_lookup.key(tid,'request'),public_lookup.request(db,turn))
+            if state=='ready' and (resolution['status']=='resolved' or public_lookup.link_uses_session_scope(db,tid)):
+                state='waiting'
+                task=origin=None
         db.execute("""INSERT INTO private_lookup_intents VALUES(?,?,?,?,?,?,?,?,?,?)""",
             (tid,encoded(target),origin,choice,_basis(base,material),None,state,
              encoded(task) if task else None,None,base['consent']['revision']))
@@ -248,6 +372,39 @@ async def decide(flow,turn,base,material,target):
             db.execute('INSERT INTO knowledge_control VALUES(?,?)',('private.study.structured.'+tid,'true'))
         if vector:
             db.execute('INSERT INTO knowledge_control VALUES(?,?)',('private.semantic.turn.'+tid,'true'))
+
+
+async def assess_read(flow,turn,base,material,target,local_query,resolution,passages,chosen_context,original,*,world_reference=False):
+    tid=turn['id']
+    with flow.store.connection() as db:
+        j4=db.execute("SELECT attempt_id FROM private_reply_nodes WHERE turn_id=? AND draft=0 AND node='J4'",(tid,)).fetchone()[0]
+    eligibility=local_query if resolution else original
+    need=research_contract.build_request(turn,base,material,target,local_query,resolution,j4,eligibility_query=eligibility)
+    if world_reference:
+        need['world_reference']=True
+    with flow.store.connection() as db:
+        passages=research_contract.restore_offer(db,tid,need,'local',passages,
+                            lambda ids:pinned_research_passages(db,turn,base,eligibility,ids,resolution))
+    def check(db):
+        fresh,live,actual=flow._snapshot(db,tid)
+        if live!=base or actual!=material:
+            raise RuntimeErrorBase('private_reply_source_changed')
+        if resolution:
+            lookup_target.validate(db,fresh,base['consent'],resolution)
+        if world_reference:
+            from .persona_world_topics import referenced_passages
+            live_ids={f['id'] for f in referenced_passages(db,fresh,base,eligibility)}
+            if any(f['id'] not in live_ids for f in passages):
+                raise RuntimeErrorBase('private_reply_source_changed')
+        if chosen_context:
+            previous=preceding_context(db,fresh,target,base['consent'])
+            if not previous or chosen_context!=[previous[0],fingerprint(previous[1])]:
+                raise RuntimeErrorBase('private_reply_source_changed')
+        if passages and pinned_research_passages(db,fresh,base,eligibility,
+                                         [p['id'] for p in passages],resolution)!=passages:
+            raise RuntimeErrorBase('private_reply_source_changed')
+    receipt=await research_contract.assess(flow,turn,base,material,need,passages,'local',check)
+    return need,receipt,research_contract.selected_facts(receipt,passages)
 
 
 async def _research_continuation(flow,turn,target,base,question,material):
@@ -308,14 +465,14 @@ def receipt(db,tid):
 
 
 def has_local_material(record):
-    return bool(record and record['outcome'] in ('hit','continued'))
+    return bool(record and record['outcome'] in ('hit','continued','partial'))
 
 
 def answer_receipt(db,tid):
     prior=receipt(db,tid)
-    if prior and not has_local_material(prior) and db.execute("SELECT 1 FROM sqlite_master WHERE name='knowledge_study_reads'").fetchone():
+    if prior and (not has_local_material(prior) or prior['outcome']=='partial') and db.execute("SELECT 1 FROM sqlite_master WHERE name='knowledge_study_reads'").fetchone():
         reread=db.execute('SELECT * FROM knowledge_study_reads WHERE turn_id=?',(tid,)).fetchone()
-        if reread:return reread
+        if reread and (reread['outcome']=='hit' or prior['outcome']!='partial'):return reread
     return prior
 
 def recover_storage(store,turn,error):
@@ -336,13 +493,31 @@ def recover_storage(store,turn,error):
 def current_facts(db,turn,it,consent,record,*,after_commit=None):
     target=json.loads(it['target_json'])
     instance=db.execute('SELECT instance_id FROM private_reply_turns WHERE turn_id=?',(turn['id'],)).fetchone()[0]
+    from . import single_retrieval
+    plan=single_retrieval.saved(db,turn['id'],'plan')
+    if plan:
+        if fingerprint(consent)!=plan['consent'] or record['query_hash']!=fingerprint(plan):
+            raise RuntimeErrorBase('private_reply_source_changed')
+        phase='readback' if 'query_bound' in record.keys() else 'local'
+        result=single_retrieval.saved(db,turn['id'],phase)
+        facts=single_retrieval.current_facts(db,turn,{'instance':instance,'consent':consent},plan,result)
+        if [f['id'] for f in facts]!=json.loads(record['fact_ids']):
+            raise RuntimeErrorBase('private_reply_source_changed')
+        return facts
     versioned=revision_mode(db,turn['id'])
     question=resolved_query(db,turn,target,query(db,turn,target),consent,instance,versioned=versioned)
     if record['query_hash']!=fingerprint(question):
         raise RuntimeErrorBase('private_reply_source_changed')
     if semantic.active(db,turn['id']):
-        return semantic.pinned(db,turn,{'instance':instance,'consent':consent},query(db,turn,target),json.loads(record['fact_ids']))
-    outcome,facts=knowledge.search(db,turn['persona_id'],turn['session_id'],consent,question,instance=instance,after_commit=after_commit,versioned=versioned)
+        proof = lookup_target.for_query(db,turn['id'])
+        need=research_contract.request(db,turn['id'])
+        eligible_query = need['eligibility_query'] if need else question if proof else query(db,turn,target)
+        facts=pinned_research_passages(db,turn,{'instance':instance,'consent':consent},eligible_query,
+                                       json.loads(record['fact_ids']),proof)
+        if len(lookup_target.current_enough(facts,proof))!=len(facts):
+            raise RuntimeErrorBase('private_reply_source_changed')
+        return facts
+    outcome,facts=knowledge.search(db,turn['persona_id'],turn['session_id'],consent,question,instance=instance,after_commit=after_commit,versioned=versioned,alternatives=True)
     ids=json.loads(record['fact_ids'])
     structured=db.execute('SELECT 1 FROM knowledge_control WHERE key=?',('private.study.structured.'+turn['id'],)).fetchone()
     if structured:
@@ -390,6 +565,11 @@ def current_facts(db,turn,it,consent,record,*,after_commit=None):
 
 
 def validate_hit(db,turn,it,consent,context):
+    if 'retained_read' in context:
+        from . import lookup_continuation
+        instance=db.execute('SELECT instance_id FROM private_reply_turns WHERE turn_id=?',(turn['id'],)).fetchone()[0]
+        lookup_continuation.validate(db,turn,{'instance':instance,'consent':consent},context)
+        return context['facts']
     record=answer_receipt(db,turn['id'])
     after=turn['id'] if context.get('lookup_outcome')=='studied' else None
     if not has_local_material(record) or not it or record['selection_id']!=context.get('j5_receipt'):
@@ -416,6 +596,21 @@ def _validate_continuation(db,turn,it,consent,context,after):
     if not db.execute("""SELECT 1 FROM private_reply_nodes WHERE turn_id=? AND attempt_id=? AND node='J4'
         AND draft=0 AND state='received' AND result_json=?""",(tid,context.get('j4_receipt'),encoded('none'))).fetchone():
         raise RuntimeErrorBase('private_reply_source_changed')
+    need=research_contract.request(db,tid)
+    if need and need.get('world_reference'):
+        from .persona_world_topics import referenced_passages
+        instance=db.execute('SELECT instance_id FROM private_reply_turns WHERE turn_id=?',(tid,)).fetchone()[0]
+        base={'instance':instance,'consent':consent}
+        target=json.loads(it['target_json'])
+        research_contract.validate_request(db,turn,base,target)
+        current=referenced_passages(db,turn,base,query(db,turn,target))
+        assessment=research_contract.coverage(db,tid,'local')
+        ids=[f['id'] for f in context['facts']]
+        if (not assessment or assessment['request']!=fingerprint(need) or not ids
+                or set(ids)!={w['id'] for w in assessment['witnesses']}
+                or not set(ids).issubset(f['id'] for f in current)):
+            raise RuntimeErrorBase('private_reply_source_changed')
+        return
     binding=db.execute('SELECT value FROM knowledge_control WHERE key=?',('private.semantic.continued.'+tid,)).fetchone()
     previous=preceding_context(db,turn,context['target'],consent)
     if not binding or not previous or not previous[1] or json.loads(binding[0])!=[previous[0],fingerprint(previous[1])]:
@@ -441,6 +636,10 @@ def details(db,store,turn,context):
                   'kind':e['source_kind'],'span':e['span'],'relation':e['relation']}
                  for f in actual for e in f['evidence']]
         return {'notes':'\n'.join(f['text'] for f in context['facts']),'sources':sources}
-    return {'notes':'\n'.join(f['text'] for f in context['facts']),
+    return source_details(context['facts'])
+
+
+def source_details(facts):
+    return {'notes':'\n'.join(f['text'] for f in facts),
             'sources':[{'id':f['source_ids'][0],'title':f['title'],'url':f['url'],'content':f['text'],
-                        'date':f['date'],'kind':f['source_kind']} for f in context['facts']]}
+                        'date':f['date'],'kind':f['source_kind']} for f in facts]}

@@ -1,6 +1,6 @@
 # 超级大肥鱼 · PCAR 文档导航
 
-v0.3 Windows 工作台的程序版本为 0.3.0，业务库结构 36。[部署手册](../AGENT_INSTALL.md) · [历史接续](user/历史聊天接续.md) · [场景发言与回退](expression/E.N6-场景发言接入与回退.md)
+v0.4 Windows 工作台的程序版本为 0.4.0，业务库结构 36。[部署手册](../AGENT_INSTALL.md) · [历史接续](user/历史聊天接续.md) · [场景发言与回退](expression/E.N6-场景发言接入与回退.md)
 
 了解人格持续存在、自主生活与成长方向，从[产品路线](product/roadmap.md)开始；体验当前公开能力，从[用户入门](user/getting-started.md)开始。部署步骤以包内同版本手册为准。
 
@@ -8,12 +8,12 @@ v0.3 Windows 工作台的程序版本为 0.3.0，业务库结构 36。[部署手
 
 | 任务 | 文档 |
 | --- | --- |
-| 下载、准备环境、第一次对话 | [用户入门](user/getting-started.md) · [v0.3 完整部署手册](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/blob/v0.3/AGENT_INSTALL.md) |
+| 下载、准备环境、第一次对话 | [用户入门](user/getting-started.md) · [v0.4 完整部署手册](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/blob/v0.4/AGENT_INSTALL.md) |
 | 用新版工作台建卡和续聊 | [双人聊天生成角色卡](user/双人聊天生成角色卡.md) · [历史聊天接续](user/历史聊天接续.md) |
 | 管理人物、表达和关系资料 | [人物操作说明](M5.md) · [界面操作手册](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/blob/v0.2/docs/acceptance/M5-人格与关系真人验收手册.md) |
 | 开启和查看自动记忆 | [自动记忆操作手册](acceptance/M8.D-自动记忆验收手册.md) |
 | 了解自动调用的额度 | [调用额度与用量说明](自动调用额度与人工免限额.md) |
-| 备份、迁移与登记已有实例 | [v0.3 原机升级与跨机迁移](../AGENT_INSTALL.md#原机从-v02-升级) |
+| 备份、迁移与登记已有实例 | [v0.4 原机升级与跨机迁移](../AGENT_INSTALL.md#原机从-v03-或-v02-升级) |
 | 了解 QQ 接入状态 | [暂停政策](QQ接口开发暂停政策.md) · [后续跟踪方向](SnowCat-持续跟踪与QQ恢复开发指导.md) |
 
 部分操作文档仍沿用 M5、M8.D 等研发阶段名称；其部署前提以同版本完整部署手册为准。QQ 历史接入资料仅供追溯，当前使用工作台。

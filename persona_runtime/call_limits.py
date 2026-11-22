@@ -92,6 +92,12 @@ def take(db,config,scope,category,now=None):
     now=time.time() if now is None else now
     reason=capacity(db,config,scope,now)
     if reason:raise CallLimitPending(scope,*reason)
+    if category=='lookup_target' and not granted(db,scope):
+        limit=config.load().get('lookup_target_model',{}).get('hourly_limit',0)
+        if limit and config.quota_override().get('status')!='active':
+            oldest=db.execute("""SELECT started FROM model_call_meter WHERE category=? AND started>?
+                ORDER BY started DESC LIMIT 1 OFFSET ?""",(category,now-3600,limit-1)).fetchone()
+            if oldest:raise CallLimitPending(scope,'lookup_target_hourly',oldest[0]+3600+.01)
     return record_call(db,scope,category,now)
 
 
@@ -158,6 +164,12 @@ async def wait_for_budget(store,wait):
     config=ConfigStore(store.paths)
     with store.connection(write=True) as db:
         park(db,wait.scope,wait.reason,wait.until)
+        if wait.scope.startswith('turn/'):
+            from . import research_contract
+            tid=wait.scope.split('/')[1]
+            if research_contract.active(db,tid) and not granted(db,wait.scope):
+                from .progress import record
+                record(db,tid,'knowledge_waiting_quota')
     try:
         while True:
             check_draining(store)

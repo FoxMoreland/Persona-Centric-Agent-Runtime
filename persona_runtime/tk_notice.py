@@ -144,7 +144,7 @@ def authorize_search(db,store,turn):
     if not row or not row[0]:raise RuntimeErrorBase('search_notice_not_fully_presented')
 
 
-def isolate(store,persona_id,session_id,turn_id,notice_id,*,presentation_id=None,release=False):
+def isolate(store,persona_id,session_id,turn_id,notice_id,*,presentation_id=None,release=False,reason=None):
     with store.connection(write=True) as db:
         row = db.execute("SELECT * FROM turns WHERE id=? AND persona_id=? AND session_id=? AND channel='desktop'",
                          (turn_id,persona_id,session_id)).fetchone()
@@ -153,6 +153,8 @@ def isolate(store,persona_id,session_id,turn_id,notice_id,*,presentation_id=None
             raise RuntimeErrorBase('desktop_notice_not_pending')
         if pending.get('presenter') not in (None,presentation_id):
             raise RuntimeErrorBase('desktop_notice_already_offered')
+        from .desktop_presentation import record_paint
+        record_paint(db,presentation_id,notice_id,'not_presented' if release else 'unknown',reason)
         if release:
             if pending.get('presenter')==presentation_id:
                 pending.pop('presenter',None)

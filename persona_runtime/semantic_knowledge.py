@@ -7,6 +7,7 @@ import sqlite3
 from threading import Lock
 
 from . import local_knowledge as library
+from . import persona_world
 from .archive import encoded, fingerprint
 from .character_embedding import SemanticFailure, private_directory, provider_for, safe_path
 from .knowledge_store import SOURCE_POLICY
@@ -42,7 +43,7 @@ def organizer_labels(raw):
     return labels
 
 
-def store_sources(db, turn, base, data, task, labels=None):
+def store_sources(db, turn, base, data, task, labels=None, *, passages=None):
     from .private_lookup import intent
     pid,sid,tid=turn['persona_id'],turn['session_id'],turn['id']
     acquisition=intent(db,tid)
@@ -67,7 +68,8 @@ def store_sources(db, turn, base, data, task, labels=None):
         prior=db.execute("""SELECT id,spec_json,withdrawn FROM local_knowledge_facts WHERE document_id=?
             AND json_extract(spec_json,'$.state')!='source_excerpt'""",(doc,)).fetchall()
         if prior:
-            ids.extend(row[0] for row in prior)
+            if passages is None:
+                ids.extend(row[0] for row in prior)
             if any(row[2] or _restricted_claim(json.loads(row[1])) or library.revisions.superseded(db,row[0],at,set(),None)
                    for row in prior):
                 continue
@@ -77,7 +79,7 @@ def store_sources(db, turn, base, data, task, labels=None):
         binding=[tid,source['id'],fingerprint(original)]
         for start in range(0,len(body),432):
             piece=body[start:start+480]
-            if piece.strip():
+            if piece.strip() and (passages is None or [start,start+len(piece)] in passages[source['id']]['spans']):
                 ident=library.put_fact(db,doc,subject=source['title'][:128],predicate=kind,value=piece,
                     quote=piece,start=start,end=start+len(piece),attributes=(labels or {}).get(source['id'],[]),
                     evidence_state='source_excerpt',turn_source=binding,expires_at=expires,versioned=True,
@@ -95,6 +97,7 @@ def _restricted_claim(spec):
 def import_prior_sources(db, turn, base):
     """Index surviving sources from earlier sessions of this protocol within the current grant and conversation."""
     from .private_lookup import evidence
+    from . import public_lookup
     pid,sid=turn['persona_id'],turn['session_id']
     rows=db.execute("""SELECT r.turn_id,i.query_json,i.origin,i.consent_revision FROM private_lookup_records r
         JOIN private_lookup_intents i ON i.turn_id=r.turn_id JOIN turns t ON t.id=r.turn_id
@@ -103,6 +106,8 @@ def import_prior_sources(db, turn, base):
         AND NOT EXISTS(SELECT 1 FROM knowledge_control WHERE key='private.semantic.sources.'||r.turn_id)
         ORDER BY r.rowid""",(pid,sid,turn['id'],turn['id'],turn['id'])).fetchall()
     for origin,task,scope,revision in rows:
+        if public_lookup.active(db,origin):
+            continue
         if not task or scope not in ('session','confirmed','explicit','derived'):
             continue
         if scope=='session' and (not base['consent']['enabled'] or base['consent']['revision']!=revision):
@@ -117,6 +122,12 @@ def import_prior_sources(db, turn, base):
         db.execute('INSERT OR IGNORE INTO knowledge_control VALUES(?,?)',('private.semantic.sources.'+origin,'true'))
 
 
+MATERIAL_ROWS="""SELECT f.id,f.document_id,f.spec_json,d.scope,d.session_id,d.sha256,d.title,d.url,d.source_kind,d.published_at,d.acquired_at
+    FROM local_knowledge_facts f JOIN local_knowledge_documents d ON d.id=f.document_id
+    WHERE f.withdrawn=0 AND NOT EXISTS
+        (SELECT 1 FROM knowledge_control k WHERE k.key='private.study.withdrawn_document.'||d.id)"""
+
+
 def materials(db, turn, base, question, *, ids=None, now=None):
     pid,sid=turn['persona_id'],turn['session_id']
     if not library.enabled(db,pid) or ids==[]:
@@ -124,15 +135,49 @@ def materials(db, turn, base, question, *, ids=None, now=None):
     consent=base['consent']
     revision=consent['revision'] if consent['enabled'] else 0
     grant=library._grant(db,base['instance'],pid,sid,revision) if revision else None
-    sql="""SELECT f.id,f.document_id,f.spec_json,d.scope,d.title,d.url,d.source_kind,d.published_at,d.acquired_at
-        FROM local_knowledge_facts f JOIN local_knowledge_documents d ON d.id=f.document_id
-        WHERE f.withdrawn=0 AND (d.scope='instance' OR (d.persona_id=? AND
-        (d.scope='persona' OR (d.session_id=? AND (d.consent_revision=0 OR (d.consent_revision=? AND d.grant_hash=?))))))
-        AND NOT EXISTS(SELECT 1 FROM knowledge_control k WHERE k.key='private.study.withdrawn_document.'||d.id)"""
-    args=[pid,sid,revision,grant]
-    if ids is not None:
+    world=persona_world.active(db,turn,base)
+    offered=ids
+    if world and ids:
+        # Recheck later, readable revisions of a pinned passage even when the caller asks for one ID.
+        related=db.execute("""SELECT DISTINCT g.id FROM local_knowledge_facts f
+            JOIN local_knowledge_documents d ON f.document_id=d.id
+            JOIN local_knowledge_documents n ON n.persona_id=d.persona_id AND n.url=d.url AND n.sha256!=d.sha256
+            JOIN local_knowledge_facts g ON g.document_id=n.id
+            WHERE d.persona_id=? AND f.id IN (SELECT value FROM json_each(?))""",(pid,encoded(ids)))
+        offered=list(dict.fromkeys([*ids,*(row[0] for row in related)]))
+    shared=persona_world.eligible_fact_ids(db,turn,base,offered) if world else {}
+    sql=MATERIAL_ROWS+""" AND (d.scope='instance' OR (d.persona_id=? AND
+        (d.scope='persona' OR (d.session_id=? AND (d.consent_revision=0 OR (d.consent_revision=? AND d.grant_hash=?)))))
+        OR f.id IN (SELECT value FROM json_each(?)))"""
+    args=[pid,sid,revision,grant,encoded(sorted(shared))]
+    if offered is not None:
         sql+=' AND f.id IN (SELECT value FROM json_each(?))'
-        args.append(encoded(ids))
+        args.append(encoded(offered))
+    result=_read_material_rows(db,turn,question,db.execute(sql,args),now,shared_sessions=shared,
+                               shared_revisions=world,instance=base['instance'])
+    if ids is None:
+        return result
+    wanted=set(ids)
+    return [fact for fact in result if fact['id'] in wanted]
+
+
+def retained_public_passages(db,turn,question,ids,revision,grant):
+    """Read the exact session revision already authorized by lookup_continuation."""
+    if not ids or not revision or not grant or not library.enabled(db,turn['persona_id']):
+        return []
+    rows=db.execute(MATERIAL_ROWS+""" AND d.scope='session' AND d.persona_id=? AND d.session_id=?
+        AND d.consent_revision=? AND d.grant_hash=? AND f.id IN (SELECT value FROM json_each(?))
+        AND json_extract(f.spec_json,'$.turn_source[0]')=? AND json_extract(f.spec_json,'$.state')='source_excerpt'
+        AND d.source_kind IN ('page_content','native_search_summary','search_content','search_summary')""",
+        (turn['persona_id'],turn['session_id'],revision,grant,encoded(ids),turn['id']))
+    owner=db.execute('SELECT instance_id FROM private_reply_turns WHERE turn_id=?',(turn['id'],)).fetchone()
+    eligible={f['id']:f for f in _read_material_rows(db,turn,question,rows,instance=owner[0] if owner else None)}
+    return [public_material(eligible[i]) for i in ids if i in eligible]
+
+
+def _read_material_rows(db,turn,question,rows,now=None,*,shared_sessions=None,shared_revisions=False,instance=None):
+    from . import research_contract
+    pid,sid=turn['persona_id'],turn['session_id']
     today=library._utc(now or timestamp())
     as_of=library._AS_OF.search(question)
     try:
@@ -145,9 +190,21 @@ def materials(db, turn, base, question, *, ids=None, now=None):
     state=library.revisions.requested_state(question)
     current_information=bool(library._REFRESH.search(question) or re.search('现在|当前|目前|最新|如今',question))
     sources={}
+    qualifications={}
+    study_reads={}
     document_guards={}
+    shared_sessions=shared_sessions or {}
+    revisions={}
+    document_scope={}
     result=[]
-    for row in db.execute(sql,args):
+    check_withdrawals=instance and persona_world.has_withdrawals(db,instance,pid)
+    for row in rows:
+        if check_withdrawals:
+            if row['document_id'] not in document_scope:
+                document_scope[row['document_id']]=not persona_world.withdrawn(
+                    db,instance,pid,row['url'],row['sha256'])
+            if not document_scope[row['document_id']]:
+                continue
         spec=json.loads(row['spec_json'])
         checked=spec.get('verification') or row
         since=checked['published_at'] or row['acquired_at']
@@ -165,7 +222,8 @@ def materials(db, turn, base, question, *, ids=None, now=None):
             continue
         if state and spec['state'] not in (state,'source_excerpt'):
             continue
-        if library.revisions.superseded(db,row['id'],when,versions,state):
+        effective_state=state if as_of or current_information else state or spec['state']
+        if library.revisions.superseded(db,row['id'],when,versions,effective_state):
             continue
         if spec['state']=='source_excerpt':
             doc=row['document_id']
@@ -178,7 +236,7 @@ def materials(db, turn, base, question, *, ids=None, now=None):
                             or library.revisions.superseded(db,claim[0],when,versions,state))
                 document_guards[doc]=any(restrict(claim) for claim in claims)
             if document_guards[doc]:continue
-            if not versions and checked['published_at'] and db.execute("""SELECT 1 FROM local_knowledge_documents newer
+            if not shared_revisions and not versions and checked['published_at'] and db.execute("""SELECT 1 FROM local_knowledge_documents newer
                 JOIN local_knowledge_documents old ON old.id=? WHERE newer.url=old.url AND newer.scope=old.scope
                 AND newer.persona_id IS old.persona_id AND newer.session_id IS old.session_id
                 AND newer.consent_revision=old.consent_revision AND newer.grant_hash IS old.grant_hash
@@ -189,16 +247,40 @@ def materials(db, turn, base, question, *, ids=None, now=None):
             continue
         if spec['turn_source']:
             origin,key,digest=spec['turn_source']
+            if origin!=turn['id']:
+                if origin not in study_reads:
+                    study_reads[origin]=None
+                    if research_contract.active(db,origin):
+                        read=db.execute('SELECT fact_ids FROM knowledge_study_reads WHERE turn_id=?',(origin,)).fetchone()
+                        study_reads[origin]=set(json.loads(read[0])) if read else set()
+                if study_reads[origin] is not None and row['id'] not in study_reads[origin]:
+                    continue
             if (origin,key) not in sources:
-                source=library._turn_source(db,pid,sid,origin,key,active_turn=turn['id'])
+                source=library._turn_source(db,pid,shared_sessions.get(row['id'],sid),origin,key,active_turn=turn['id'])
                 sources[origin,key]=fingerprint(source) if source else None
+                if source and source.get('qualification'):
+                    from . import public_lookup
+                    if public_lookup.saved(db,public_lookup.key(origin,'admission')):
+                        qualifications[origin,key]=source['qualification']
             if sources[origin,key]!=digest:
                 continue
+        if shared_revisions and not versions and spec['state']=='source_excerpt' and checked['published_at']:
+            revisions[row['id']]=((row['scope'],row['url']),row['sha256'],checked['published_at'])
         result.append({'id':row['id'],'subject':spec['subject'],'predicate':spec['predicate'],'text':spec['quote'],
             'value':spec['value'],'qualifications':spec['conditions'],'kind':spec['state'],'title':checked['title'],
             'date':checked['published_at'],'source_kind':checked['source_kind'],'url':row['url'],'source_ids':[row['document_id']],
             'verified_at':verified,'valid_from':spec['valid_from'],'valid_until':spec['valid_until'],
-            'span':[spec['start'],spec['end']],'index_labels':spec['attributes'] if spec['state']=='source_excerpt' else []})
+            'span':[spec['start'],spec['end']],'index_labels':spec['attributes'] if spec['state']=='source_excerpt' and row['session_id']==sid else []})
+        if spec['turn_source'] and (origin,key) in qualifications:
+            result[-1]['qualification']=qualifications[origin,key]
+    if revisions:
+        latest={}
+        for key,digest,date in revisions.values():
+            dates=latest.setdefault(key,{})
+            dates[digest]=max(date,dates.get(digest,date))
+        superseded={ident for ident,(key,digest,date) in revisions.items()
+                    if any(other!=digest and newer>date for other,newer in latest[key].items())}
+        return [fact for fact in result if fact['id'] not in superseded]
     return result
 
 
@@ -241,20 +323,20 @@ def pinned(db, turn, base, question, ids):
     return [found[i] for i in ids]
 
 
-def rank(paths, question, rows, *, encoder=None, limit=PASSAGE_LIMIT):
+def rank(paths, question, rows, *, encoder=None, limit=PASSAGE_LIMIT, minimum_score=None, one_per_document=False):
     """Rank in one local embedding space; cache derived vectors, never an authority or a verdict."""
     if not rows or not question.strip():
         return []
     with _encoder_lock:
         try:
-            return _rank(paths,question,rows,encoder,limit)
+            return _rank(paths,question,rows,encoder,limit,minimum_score,one_per_document)
         except SemanticFailure as exc:
             raise RuntimeErrorBase('local_knowledge_embedding_unavailable') from exc
         except sqlite3.DatabaseError as exc:
             raise library.storage_error(exc) from exc
 
 
-def _rank(paths, question, rows, encoder, limit):
+def _rank(paths, question, rows, encoder, limit, minimum_score=None, one_per_document=False):
     from .character_embedding import DIMENSION,numpy_module
     from .character_retrieval import load_config
     np=numpy_module()
@@ -262,7 +344,7 @@ def _rank(paths, question, rows, encoder, limit):
     model=encoder.identity()['fingerprint']
     query=np.concatenate([encoder.embed_query([part])[1] for start in range(0,len(question),24000)
                           if (part:=question[start:start+24000]).strip()])
-    cutoff=load_config()['thresholds']['lore']
+    cutoff=load_config()['thresholds']['lore'] if minimum_score is None else minimum_score
     docs={}
     for r in rows:
         content='\n'.join([r['title'],*r['index_labels'],r['text']])
@@ -304,7 +386,7 @@ def _rank(paths, question, rows, encoder, limit):
     seen=set()
     selected=[]
     for _,r in ranked:
-        key=(r['url'],r['text'])
+        key=r['url'] if one_per_document else (r['url'],r['text'])
         if key not in seen:
             selected.append(public_material(r))
             seen.add(key)

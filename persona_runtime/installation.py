@@ -121,6 +121,7 @@ def _frontend_packages(source):
     with (source/'uv.lock').open('rb') as stream:
         packages={item['name']:item for item in tomllib.load(stream)['package']}
     pending=['pywebview'];frontend={}
+    if 'pillow' in packages:pending.append('pillow')
     while pending:
         name=pending.pop()
         if name in frontend:continue

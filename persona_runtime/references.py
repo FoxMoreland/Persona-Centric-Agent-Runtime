@@ -53,6 +53,15 @@ def prepare(conn, turn):
         existing = {reply['id'] for reply in group['replies']}
         group['replies'].extend(reply for reply in current['replies'] if reply['id'] not in existing)
         group['replies'].sort(key=lambda reply:reply_order[reply['id']])
+    from . import message_time
+    if message_time.enabled(turn):
+        proof = {}
+        for group in groups:
+            events = group['members'] + group['replies']
+            times = message_time.event_times(conn, [e['id'] for e in events], group['turn_id'])
+            message_time.annotate_events(events, times)
+            proof.update(times)
+        manifest['message_time_bindings'] = proof
     block = serialize_reference_block(groups,selections)
     manifest['reference_characters']=len(block)
     if len(block)>12000:raise ReferenceError('reference_budget_exceeded',manifest)

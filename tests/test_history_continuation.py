@@ -86,6 +86,80 @@ class DesktopHistory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turn["status"],"completed", turn["error_code"])
         return [(m["role"],m["content"]) for m in self.client.calls[-1][1:]]
 
+    async def test_native_time_contract_binds_received_members_and_current_position(self):
+        from persona_runtime import message_time
+        pid = self.new_role()
+        sid = self.engine.session("desktop")["session_id"]
+        await self.exchange(pid,sid,101)
+        self.assertNotIn("history_recorded_at", self.client.calls[-1][0]["content"])
+        policy = self.ingress.current_policy(pid, "desktop")
+        self.ingress.update_policy(pid, "desktop", policy["mode"], policy["id"], identifier(),
+                                   message_time_version=message_time.VERSION)
+        await self.exchange(pid,sid,102)
+        messages = self.client.calls[-1]
+        times = json.loads(messages[0]["content"].splitlines()[-1])["history_recorded_at"]
+        with self.store.connection() as db:
+            expected = {r[0]:r[1] for r in db.execute(
+                "SELECT event_id,received_at FROM ingress_receipts WHERE session_id=?", (sid,))}
+            self.assertEqual({t['event_id']:t['recorded_at'] for t in times if t['source']=='received'},expected)
+            for t in times:
+                self.assertNotIn('receipt_id', t)
+                if t['source']=='received':
+                    pos = -1 if t.get('position')=='current_input' else t['message_index']
+                    original = db.execute("SELECT text FROM events WHERE id=?", (t['event_id'],)).fetchone()[0]
+                    self.assertEqual(messages[pos]['content'], original)
+            saved = json.loads(db.execute("""SELECT m.manifest_json FROM context_manifests m
+                JOIN turns t ON m.turn_id=t.id WHERE t.session_id=? AND m.task_type='dialogue'
+                ORDER BY m.rowid DESC LIMIT 1""", (sid,)).fetchone()[0])
+            proof = saved['prompt_assembly']['source_refs']['message_times']
+            self.assertEqual(proof[-1]['message_index'], len(messages)-1)
+            self.assertTrue(proof[-1]['receipt_id'])
+
+    async def test_reference_time_matches_receipt_and_preserves_accepted_binding(self):
+        from persona_runtime import message_time
+        from persona_runtime.archive import ArchiveService, binding
+        from persona_runtime.references import prepare
+        pid = self.new_role()
+        sid = self.engine.session("desktop")["session_id"]
+        await self.exchange(pid,sid,101)
+        with self.store.connection() as db:
+            eid, at = db.execute("SELECT event_id,received_at FROM ingress_receipts WHERE session_id=?", (sid,)).fetchone()
+        policy = self.ingress.current_policy(pid, "desktop")
+        self.ingress.update_policy(pid, "desktop", policy["mode"], policy["id"], identifier(),
+                                   message_time_version=message_time.VERSION)
+        target = {"kind":"event","id":eid}
+        archive = ArchiveService(self.store)
+        preview = archive.preview(persona_id=pid,channel='desktop',target=target)
+        reply = self.ingress.accept({"channel":"desktop","persona_id":pid,"session_id":sid,"text":"102",
+            "desktop_presentation":CONTRACT,"request_id":identifier(),"reference":target})
+        await self.engine.wait()
+        with self.store.connection() as db:
+            turn = dict(db.execute("SELECT * FROM turns WHERE id=?", (reply['turn_id'],)).fetchone())
+            block, proof = prepare(db, turn)
+            self.assertEqual(proof['message_time_bindings'][eid][0]['recorded_at'], at)
+            self.assertEqual(len(block),preview['preview']['reference_characters'])
+            before = db.execute("SELECT binding_json FROM input_references WHERE event_id=?",(reply['event_id'],)).fetchone()[0]
+            self.assertEqual(binding(read_exact(db,scope(pid,'desktop'),target))['hash'],json.loads(before)['hash'])
+        self.assertIn(at, self.client.calls[-1][0]['content'])
+
+    async def test_timed_import_trimming_and_unknown_source_precision(self):
+        from persona_runtime import message_time
+        pid = self.new_role()
+        sid = self.restore(pid,b"## X [2017-03-04 19:11]\n"+b"5"*7800+
+                           b"\n## Y [2017-03-04 19:12]\n88821\n## Y\n88822")
+        policy = self.ingress.current_policy(pid, "desktop")
+        self.ingress.update_policy(pid, "desktop", policy["mode"], policy["id"], identifier(),
+                                   message_time_version=message_time.VERSION)
+        await self.exchange(pid,sid,903)
+        wire = self.client.calls[-1]
+        times = json.loads(wire[0]['content'].splitlines()[-1])['history_recorded_at']
+        imported = [e for e in times if e['source']=='imported']
+        self.assertEqual(len(imported), 1)
+        only = imported[0]
+        self.assertEqual((only['precision'], only['member_index']), ('minute',0))
+        self.assertIn('88821',wire[only['message_index']]['content'])
+        self.assertNotIn('19:11',wire[0]['content'])
+
     async def test_native_and_import_match_for_six_successive_desktop_turns(self):
         native = self.new_role()
         sid = self.engine.session("desktop")["session_id"]

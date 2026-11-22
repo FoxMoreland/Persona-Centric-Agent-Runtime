@@ -352,6 +352,14 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         service = engine.service
         if not isinstance(args, dict):
             raise RuntimeErrorBase("JSON object required")
+        if action == 'desktop.main_reply.status':
+            from .main_reply import status
+            return web.json_response(status(config,config.load()))
+        if action == 'desktop.main_reply.configure':
+            return web.json_response(config.update({'main_reply':args})['main_reply'])
+        if action == 'desktop.main_reply.consent':
+            from .session_privacy import update_writer_consent
+            return web.json_response(update_writer_consent(store,config,**args))
         if action in ('desktop.privacy.status','desktop.privacy.update','desktop.privacy.connection'):
             from . import session_privacy
             handler = {'desktop.privacy.status':session_privacy.status,
@@ -388,6 +396,12 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         if action == "desktop.lookup.detail":
             from .private_lookup import details
             return web.json_response(await asyncio.to_thread(details,store,**args))
+        if action == "desktop.stage.retry":
+            from .desktop_turn_retry import retry
+            applied = retry(store, **args)
+            if applied['state'] == 'accepted':
+                ingress.schedule_committed()
+            return web.json_response(applied)
         if action == "desktop.lookup.confirm":
             from .private_lookup import confirm
             applied=confirm(store,**args)
@@ -568,6 +582,7 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
             'expression.v2.list':speech_publication.list,
             'expression.v2.status':speech_publication.status,
             'expression.v2.plan':speech_publication.plan,
+            'expression.v2.inline_main':speech_publication.confirm_inline_main,
             'expression.v2.offer':speech_publication.offer,
             'expression.v2.ack':speech_publication.acknowledge,
             'expression.v2.visible':speech_publication.visible,
@@ -752,7 +767,12 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
 
     async def delivery_housekeeping():
         while True:
-            try:await asyncio.to_thread(delivery_service.reconcile_unknown)
+            try:
+                from .desktop_turn_retry import expire, reconcile_clicks
+                await asyncio.to_thread(expire, store)
+                if not engine.draining and await asyncio.to_thread(reconcile_clicks,store):
+                    ingress.schedule_committed()
+                await asyncio.to_thread(delivery_service.reconcile_unknown)
             except asyncio.CancelledError:raise
             except Exception:
                 import logging

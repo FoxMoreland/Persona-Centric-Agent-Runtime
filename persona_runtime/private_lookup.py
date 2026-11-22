@@ -4,6 +4,8 @@ import re
 import sqlite3
 
 from . import local_lookup_route
+from . import lookup_target
+from . import public_lookup
 from .archive import encoded, fingerprint
 from .call_limits import gate, turn_scope
 from .knowledge_general import public_url
@@ -64,6 +66,25 @@ def presented_notice(db,tid):
         SELECT 1 FROM expression_speech_items WHERE publication_id=? AND state!='presented'""",(row['id'],)).fetchone():
         return row['canonical_event_id']
     return None
+
+
+def background_lookup(db,tid):
+    row=db.execute("""SELECT json_extract(source_json,'$.background_lookup')
+        FROM private_reply_source_sets WHERE turn_id=?""",(tid,)).fetchone()
+    return bool(row and row[0])
+
+
+def waiting_for_notice_display(db,tid):
+    if not background_lookup(db,tid):
+        return False
+    row=notice(db,tid)
+    return bool(row and row['state'] in ('pending','partial'))
+
+
+def notice_ready(db,tid):
+    if background_lookup(db,tid):
+        return notice(db,tid) is not None
+    return visible_notice(db,tid)
 
 
 def visible_notice(db,tid):
@@ -170,11 +191,17 @@ def bind_long(db,config,eid,text):
     db.execute("INSERT INTO knowledge_control VALUES(?,?)",('private.lookup.long.'+eid,encoded({'hash':fingerprint(text)})))
 
 
-def explicit_long(db,members):
+DOCUMENT_REQUEST = re.compile(r'(?:写|给|完成|提供|输出|展开|列出|生成|撰写|想要|想看|需要|请求|来一篇).{0,14}(?:长文|全文|(?:完整|详细).{0,6}(?:报告|文章|代码|推导|说明书|方案|文档|教程))|^\s*(?:长文|全文)[。！!]?\s*$')
+
+
+def explicit_long(db,members,*,conversation=False):
     for m in members:
         row=db.execute("SELECT value FROM knowledge_control WHERE key=?",('private.lookup.long.'+m['id'],)).fetchone()
         if row and json.loads(row[0])['hash']==fingerprint(m['text']):
             return not any(NO_LONG.search(v['text']) for v in members)
+    if conversation:
+        texts=[m['text'] for m in members]
+        return any(DOCUMENT_REQUEST.search(text) for text in texts) and not any(NO_LONG.search(text) for text in texts)
     return wants_long(members)
 
 
@@ -205,13 +232,16 @@ def confirm(store,pid,sid,tid,expected,op,text=None):
         if not t or not it or it['binding']!=expected:
             raise RuntimeErrorBase('private_lookup_scope_changed')
         task=None
+        resolution=lookup_target.saved(db,tid)
         if text is not None:
             if not isinstance(text,str) or not text.strip() or len(text)>4000 or SENSITIVE_QUERY.search(text) or NO_QUERY.search(text):
                 raise RuntimeErrorBase('native_public_task_invalid')
-            if not any(text in m['text'] for m in load_turn_input(db,dict(t))):
+            clarifying = resolution and (resolution['status'] in ('ambiguous','invalid','needs_consent')
+                        or public_lookup.active(db,tid) and resolution['status']=='resolved')
+            if not clarifying and not any(text in m['text'] for m in load_turn_input(db,dict(t))):
                 raise RuntimeErrorBase('private_lookup_scope_changed')
             task=_task(text.strip())
-            if local_lookup_route.receipt(db,tid):
+            if not clarifying and local_lookup_route.receipt(db,tid):
                 from .config import ConfigStore
                 instance=ConfigStore(store.paths).load()['instance_id']
                 resolved=local_lookup_route.resolved_query(db,t,json.loads(it['target_json']),text.strip(),
@@ -233,7 +263,7 @@ def confirm(store,pid,sid,tid,expected,op,text=None):
         return True
 
 
-def evidence(db,pid,sid,origin, *, active_turn=None):
+def evidence(db,pid,sid,origin, *, active_turn=None, acquisition=False):
     if not origin:
         return None
     root=db.execute("SELECT * FROM turns WHERE id=? AND persona_id=? AND session_id=? AND channel='desktop'",(origin,pid,sid)).fetchone()
@@ -249,6 +279,10 @@ def evidence(db,pid,sid,origin, *, active_turn=None):
         sources=json.loads(row['sources_json']); notes=row['notes']
         states=read(db,'private.lookup.sources.'+pid+'.'+sid,{})['data']
         sources, organized=apply_source_states(states,sources,{'notes':notes})
+        if public_lookup.active(db,origin) and not acquisition:
+            admitted=public_lookup.saved(db,public_lookup.key(origin,'admission')) or {}
+            sources=[s for s in sources if admitted.get(s['id'],{}).get('revision')==fingerprint(s)]
+            organized={}
     else:
         data=read(db,'conversation.record.'+origin,{})['data']
         outcome=data.get('retrieval',{})
@@ -390,6 +424,37 @@ def details(store,pid,sid,tid,kind):
         turn=db.execute("SELECT * FROM turns WHERE id=? AND persona_id=? AND session_id=? AND channel='desktop'",(tid,pid,sid)).fetchone()
         if not turn:
             raise RuntimeErrorBase('retrieved_notes_unavailable')
+        if kind=='citations':
+            return reply_citations(db,store,dict(turn))
+        if kind=='draft':
+            return recovered_main(db,store,dict(turn))
+        if kind=='research':
+            from . import lookup_continuation, research_contract, single_retrieval
+            if single_retrieval.saved(db,tid,'plan'):
+                row=db.execute("""SELECT a.*,d.contract_json,d.binding,s.source_json,s.material_hash
+                    FROM private_reply_attempts a JOIN private_reply_decisions d ON d.id=a.decision_id
+                    JOIN private_reply_reviews v ON v.attempt_id=a.id AND v.approved=1
+                    JOIN private_reply_source_sets s ON s.turn_id=a.turn_id
+                    JOIN expression_speech_units u ON u.source_id=a.id AND u.phase='main'
+                    JOIN expression_speech_publications p ON p.utterance_id=u.id AND p.state='complete'
+                    WHERE a.turn_id=? AND a.phase='main' AND p.canonical_event_id=?""",
+                    (tid,turn['reply_event_id'])).fetchone()
+                if not row:
+                    raise RuntimeErrorBase('retrieved_notes_unavailable')
+                context=validate_detail_binding(db,store,dict(turn),row)
+                result=local_lookup_route.source_details(context['facts'])
+                indices={f['id']:i for i,f in enumerate(context['facts'],1)}
+                result['queries']=[{'text':q['question'],'result':q['result'],'tool':q['tool'],
+                                    'sources':[indices[i] for i in q['facts']]}
+                                   for q in context['retrieval']['items']]
+                return result
+            if retained:=lookup_continuation.retained_detail(db,store,turn):
+                return local_lookup_route.source_details(retained[0])
+            if failed:=research_contract.failed_reply_with_evidence(db,turn):
+                context=validate_detail_binding(db,store,dict(turn),failed)
+                return local_lookup_route.details(db,store,turn,context)
+            if public_lookup.saved(db,public_lookup.key(tid,'order')):
+                return public_lookup.details(db,store,turn)
         stored=None
         if kind=='research':
             stored=saved_failed_research(db,turn)
@@ -440,6 +505,92 @@ def details(store,pid,sid,tid,kind):
         raise RuntimeErrorBase('retrieved_notes_unavailable')
 
 
+def recovered_main(db,store,turn,*,fragments=False):
+    """Read an approved original without acquiring a publication lease or changing history."""
+    from .expression_contract import text_hash
+    unavailable='retrieved_notes_unavailable'
+    if turn['error_code']!='desktop_presentation_unknown' or turn['cancelled_at']:
+        raise RuntimeErrorBase(unavailable)
+    from .turn_input import load_turn_input
+    if any(db.execute('SELECT 1 FROM source_exclusions WHERE event_id=?',(m['id'],)).fetchone()
+           for m in load_turn_input(db,turn)):
+        raise RuntimeErrorBase(unavailable)
+    row=db.execute("""SELECT a.body,a.body_sha256,a.received_at,p.id publication,p.revision,u.body_hash unit_hash,u.source_hash,p.body_hash publication_hash,
+        d.contract_json,d.binding,s.source_json,s.material_hash FROM private_reply_attempts a
+        JOIN private_reply_decisions d ON d.id=a.decision_id AND d.turn_id=a.turn_id
+        JOIN private_reply_reviews v ON v.attempt_id=a.id AND v.approved=1
+        JOIN expression_speech_units u ON u.source_id=a.id AND u.turn_id=a.turn_id AND u.phase='main'
+        JOIN expression_speech_publications p ON p.utterance_id=u.id AND p.state='closed'
+        JOIN private_reply_source_sets s ON s.turn_id=a.turn_id
+        WHERE a.turn_id=? AND a.phase='main' AND a.state='received' AND u.source_kind='maibot_private_reply'
+        AND p.reason='desktop_presentation_unknown' AND u.persona_id=? AND u.session_id=?
+        AND u.body=a.body AND p.body=a.body AND EXISTS (SELECT 1 FROM expression_speech_items i
+          JOIN expression_speech_receipts r ON r.fragment_id=i.id AND r.id=i.receipt_id
+          WHERE i.publication_id=p.id AND i.revision=p.revision AND r.state='unknown'
+          AND i.state='unknown' AND r.body_hash=i.body_hash)""",
+        (turn['id'],turn['persona_id'],turn['session_id'])).fetchone()
+    if not row or any(row[k]!=text_hash(row['body']) for k in ('body_sha256','unit_hash','source_hash','publication_hash')):
+        raise RuntimeErrorBase(unavailable)
+    validate_detail_binding(db,store,turn,row)
+    if not fragments:
+        return {'body':row['body']}
+    items=[dict(r) for r in db.execute("""SELECT id,ordinal,text,body_hash FROM expression_speech_items
+        WHERE publication_id=? AND revision=? ORDER BY ordinal""",(row['publication'],row['revision']))]
+    if (not items or ''.join(i['text'] for i in items)!=row['body']
+            or any(i['ordinal']!=n or text_hash(i['text'])!=i['body_hash'] for n,i in enumerate(items))):
+        raise RuntimeErrorBase(unavailable)
+    latest=db.execute("""SELECT id FROM turns WHERE persona_id=? AND session_id=? ORDER BY rowid DESC LIMIT 1""",
+                      (turn['persona_id'],turn['session_id'])).fetchone()
+    return {'publication':row['publication'],'revision':row['revision'],'items':items,'received_at':row['received_at'],
+            'confirmable':not turn['reply_event_id'] and latest[0]==turn['id'] and turn['status']=='interrupted'}
+
+
+def validate_detail_binding(db,store,turn,row):
+    from types import SimpleNamespace
+    from . import ordinary_materials,session_privacy
+    from .config import ConfigStore
+    unavailable='retrieved_notes_unavailable'
+    binding=json.loads(row['contract_json'])
+    cfg=ConfigStore(store.paths)
+    settings=cfg.load()
+    consent=session_privacy.current(db,cfg,settings,turn['persona_id'],turn['session_id'],session_privacy.recipients(cfg,settings))
+    if (binding['instance']!=settings['instance_id'] or binding['consent']!=consent
+            or binding['turn']!=turn['id'] or binding['revision']!=turn['execution_revision']
+            or fingerprint(binding)!=row['binding']):
+        raise RuntimeErrorBase(unavailable)
+    material=ordinary_materials.collect(SimpleNamespace(store=store),db,turn,binding,json.loads(row['source_json']))
+    if fingerprint(material)!=row['material_hash']:
+        raise RuntimeErrorBase(unavailable)
+    research=binding['ordinary'].get('research')
+    if research:
+        validate_context(db,turn,binding,research,config=cfg,material=material)
+    return research
+
+
+def reply_citations(db,store,turn):
+    from .reply_provenance import literal_citations,references
+    if turn['cancelled_at'] or not eligible(db,turn['id']):
+        raise RuntimeErrorBase('retrieved_notes_unavailable')
+    row=db.execute("""SELECT a.*,d.contract_json,d.binding,s.source_json,s.material_hash FROM private_reply_attempts a
+        JOIN private_reply_reviews v ON v.attempt_id=a.id AND v.approved=1
+        JOIN private_reply_decisions d ON a.decision_id=d.id JOIN private_reply_source_sets s ON s.turn_id=a.turn_id
+        JOIN expression_speech_units u ON u.source_id=a.id AND u.phase='main' AND u.source_kind='maibot_private_reply'
+        JOIN expression_speech_publications p ON p.utterance_id=u.id AND p.state='complete'
+        WHERE a.turn_id=? AND a.phase='main' AND p.canonical_event_id=?""",(turn['id'],turn['reply_event_id'])).fetchone()
+    if not row:
+        raise RuntimeErrorBase('retrieved_notes_unavailable')
+    research=validate_detail_binding(db,store,turn,row)
+    record=public_lookup.saved(db,'private.reply.attribution.'+row['id'])
+    annotation=json.loads(row['usage_json']).get('lookup_attribution')
+    bindings=references(row['body'],row['detail'],annotation,research['facts'])
+    if not record or record['verdict']!='grounded' or bindings is None or bindings!=record['bindings']:
+        raise RuntimeErrorBase('retrieved_notes_unavailable')
+    facts={f['id']:f for f in research['facts']}
+    declared=[{'claim':item['claim'],'quote':item['quote'],'title':facts[item['fact']]['title'],
+             'url':facts[item['fact']]['url']} for item in annotation['claims']]
+    return declared+literal_citations(db,turn['id'],row['body'],row['detail'],research,declared)
+
+
 def _basis(base,material):
     return fingerprint([{k:v for k,v in base.items() if k!='consent'},base['consent']['recipient_hash'],
                         material['current'],material['references']])
@@ -463,8 +614,15 @@ def _private_origin(db,tid):
     return row is not None and row['origin']=='session'
 
 
-def validate_context(db,turn,base,context):
+def validate_context(db,turn,base,context,*,config=None,material=None):
     tid=turn['id']; it=intent(db,tid)
+    target_proof = lookup_target.for_query(db,tid)
+    if target_proof:
+        lookup_target.validate(db,turn,base['consent'],target_proof)
+    if public_lookup.saved(db,public_lookup.key(tid,'order')):
+        public_lookup.require_order(db,config,turn,base,it)
+        if context.get('public_result') is not None and context['public_result']!=public_lookup.result(db,tid):
+            raise RuntimeErrorBase('private_reply_source_changed')
     if not it or json.loads(it['target_json'])!=context['target'] or context['phase']!=base['phase']:
         raise RuntimeErrorBase('private_lookup_scope_changed')
     for node in ('J4','J5'):
@@ -479,6 +637,29 @@ def validate_context(db,turn,base,context):
                 raise RuntimeErrorBase('private_lookup_scope_changed')
     if it['choice'] in ('web','retrieve') and not context.get('j4_receipt'):
         raise RuntimeErrorBase('private_lookup_scope_changed')
+    from . import single_retrieval
+    plan=single_retrieval.saved(db,tid,'plan')
+    if plan:
+        if material is None:
+            raise RuntimeErrorBase('private_lookup_scope_changed')
+        single_retrieval.check_context(db,turn,base,material,plan)
+        batch=single_retrieval.saved(db,tid,'batch')
+        from . import session_privacy
+        if batch['items'] and session_privacy.public_scope(db,config,base['instance'],turn['persona_id'],
+                turn['session_id'],base['consent'],protocol=batch['scope']['protocol'],
+                historical=turn['status']=='completed')!=batch['scope']:
+            raise RuntimeErrorBase('private_lookup_scope_changed')
+        if context['phase']=='main':
+            result=single_retrieval.saved(db,tid,'readback') or single_retrieval.saved(db,tid,'local')
+            if (context.get('retrieval')!=single_retrieval.handoff(db,turn,base,plan,result)
+                    or context['facts']!=single_retrieval.current_facts(db,turn,base,plan,result)):
+                raise RuntimeErrorBase('private_reply_source_changed')
+    from . import research_contract
+    if research_contract.active(db,tid) and it['choice']=='retrieve':
+        research_contract.validate_request(db,turn,base,context['target'])
+        if not research_contract.request(db,tid) or (base['phase']=='main'
+                and context.get('assessment')!=research_contract.handoff(db,tid)):
+            raise RuntimeErrorBase('private_reply_source_changed')
     if context.get('status')=='local_hit':
         local_lookup_route.validate_hit(db,turn,it,base['consent'],context)
     elif context['facts'] and not context.get('j5_receipt'):
@@ -540,7 +721,7 @@ async def _decide_lookup(flow,turn,base,mat):
 def _tool_scope(flow,db,turn,base):
     tid=turn['id']
     root,actual=flow.entry._binding(db,tid,'main')
-    if actual!=base or not enabled(db,turn['persona_id']) or not visible_notice(db,tid):
+    if actual!=base or not enabled(db,turn['persona_id']) or not notice_ready(db,tid):
         raise RuntimeErrorBase('private_lookup_scope_changed')
     it=intent(db,tid)
     if it['state']!='ready' or not it['query_json']:
@@ -548,7 +729,7 @@ def _tool_scope(flow,db,turn,base):
     choice='web'
     if getattr(flow.providers,'local_first',False):
         read_receipt=local_lookup_route.receipt(db,tid)
-        if not read_receipt or local_lookup_route.has_local_material(read_receipt) or read_receipt['outcome'] in ('disabled','not_requested'):
+        if not read_receipt or read_receipt['outcome'] in ('hit','continued','disabled','not_requested','coverage_unconfirmed'):
             raise RuntimeErrorBase('private_lookup_scope_changed')
         choice='retrieve'
     if it['choice']!=choice or not db.execute("""SELECT 1 FROM private_reply_nodes WHERE turn_id=? AND draft=0 AND node='J4'
@@ -565,6 +746,14 @@ def _tool_scope(flow,db,turn,base):
     elif not actual['consent']['enabled']:
         guard_cloud_dispatch(flow.store,root['persona_id'],'knowledge_native',model,db=db)
     query=json.loads(it['query_json'])
+    proof = lookup_target.for_query(db,tid)
+    if proof:
+        lookup_target.validate(db,root,actual['consent'],proof)
+        if proof.get('task') != query and not (it['origin']=='confirmed' and it['confirmation_id']):
+            raise RuntimeErrorBase('private_lookup_scope_changed')
+    signed=public_lookup.active(db,tid)
+    if signed:
+        public_lookup.require_order(db,flow.entry.config,root,actual,it)
     if 'confirmed_span' in query:
         original=query.pop('confirmed_span')
         resolved=local_lookup_route.resolved_query(db,root,json.loads(it['target_json']),original,
@@ -573,20 +762,39 @@ def _tool_scope(flow,db,turn,base):
         if resolved!=query['question'] or SENSITIVE_QUERY.search(resolved):
             raise RuntimeErrorBase('private_lookup_scope_changed')
     if getattr(flow.providers,'grounded_search',False):
-        from datetime import datetime
-        query['as_of']=datetime.fromisoformat(turn['created_at']).astimezone().date().isoformat()
+        from datetime import datetime, timedelta, timezone
+        zone=timezone(timedelta(hours=8)) if signed else None
+        query['as_of']=datetime.fromisoformat(turn['created_at']).astimezone(zone).date().isoformat()
     return query,model
 
 
-async def _call(flow,turn,base,step,args=None):
+async def _call(flow,turn,base,step,args=None,*,item=None):
     tid=turn['id']
+    from . import desktop_turn_retry as turn_retry
+    send=None
     with flow.store.connection(write=True) as db:
         query,model=_tool_scope(flow,db,turn,base)
+        receipt_step=step
+        if item is not None:
+            from . import single_retrieval
+            translated=single_retrieval.check_item(flow,db,turn,base,item)
+            query=query|{'question':translated}
+            receipt_step=f'item.{item}.{step}'
+            single_retrieval.init_item_calls(db)
+            if step=='search' and args!={'query':translated}:
+                raise RuntimeErrorBase('private_lookup_scope_changed')
+            if step=='fetch':
+                native=db.execute("SELECT result_json FROM private_lookup_calls WHERE turn_id=? AND step=? AND state='received'",
+                                  (tid,f'item.{item}.native')).fetchone()
+                response=json.loads(native[0]) if native else {}
+                sources=normalized_sources(turn,response.get('sources',[]),by_id=False)
+                if not response.get('tool_calls') or args.get('url') not in sources:
+                    raise RuntimeErrorBase('private_lookup_scope_changed')
         request=args if args is not None else query
         study=step in ('organize','organize_retry')
         if study and callable(getattr(flow.providers,'study_model',None)):
             model=flow.providers.study_model()
-        old=db.execute("SELECT * FROM private_lookup_calls WHERE turn_id=? AND step=?",(tid,step)).fetchone()
+        old=db.execute("SELECT * FROM private_lookup_calls WHERE turn_id=? AND step=?",(tid,receipt_step)).fetchone()
         if study:
             from .knowledge_study import packet,freeze_input
             from .knowledge_coverage import truncated_response
@@ -605,23 +813,54 @@ async def _call(flow,turn,base,step,args=None):
             if old['binding']!=signature:raise RuntimeErrorBase('private_lookup_scope_changed')
             return old['state'],json.loads(old['result_json']) if old['result_json'] else {}
         if study and not request['sources']:return 'empty',{}
-        meter=gate(db,flow.store,'knowledge_study' if study else 'private_lookup',turn_scope(turn))
         aid=identifier()
-        db.execute("INSERT INTO private_lookup_calls VALUES(?,?,?,?,'sending',NULL,NULL)",(tid,step,aid,signature))
+        if item is not None:
+            bind=getattr(flow.providers,'bind_retrieve',None)
+            if bind:
+                try:
+                    send,endpoint,payload=bind(step,aid,request,model)
+                except RuntimeErrorBase as exc:
+                    if str(exc)!='native_input_budget_exceeded':
+                        raise
+                    single_retrieval.freeze(db,tid,f'item.{item}.skip','native_input_budget_exceeded')
+                    return 'too_large',{}
+            else:
+                endpoint,payload=None,request
+            single_retrieval.freeze(db,tid,'wire.'+aid,{
+                'item':item,'step':step,'query_hash':fingerprint(translated),'binding':signature,
+                'endpoint':endpoint,'request_hash':fingerprint(payload)})
+        meter=gate(db,flow.store,'knowledge_study' if study else 'private_lookup',turn_scope(turn))
+        if not study and public_lookup.active(db,tid):
+            work=public_lookup.saved(db,public_lookup.key(tid,'order'))
+            public_lookup.check_step(db,work,step,request)
+            bind=getattr(flow.providers,'bind_retrieve',None)
+            if bind:
+                send,endpoint,payload=bind(step,aid,request,model)
+            else:
+                endpoint,payload=None,request
+            wire={'step':step,'order_hash':fingerprint(work),'query_hash':fingerprint(work['query']),
+                  'endpoint':endpoint,'payload_hash':fingerprint(payload),'level':'http_json' if bind else 'adapter'}
+            public_lookup.freeze(db,public_lookup.key(tid,'step.'+step),wire)
+            public_lookup.freeze(db,public_lookup.key(tid,'wire.'+aid),wire|{'attempt':aid})
+        turn_retry.start(db,tid,aid,"lookup",signature)
+        db.execute("INSERT INTO private_lookup_calls VALUES(?,?,?,?,'sending',NULL,NULL)",(tid,receipt_step,aid,signature))
+        if item is not None:
+            db.execute("INSERT INTO retrieval_item_calls VALUES(?,?,?,?,?)",(tid,item,step,fingerprint(translated),aid))
         if study:
             freeze_input(db,aid,request)
             record(db,tid,'knowledge_studying')
     try:
         if study:
             dispatch=model|{'_study_length_retry':True} if step=='organize_retry' else model
-            result,usage=await flow.providers.organize(aid,request,dispatch)
+            result,usage=await turn_retry.observe(flow.store,aid,flow.providers.organize(aid,request,dispatch))
             if not isinstance(result,dict) or not isinstance(result.get('raw'),str):
                 raise RuntimeErrorBase('knowledge_study_invalid_result')
         else:
-            result,usage=await flow.providers.retrieve(step,aid,request,model)
+            result,usage=await turn_retry.observe(flow.store,aid,send() if send else flow.providers.retrieve(step,aid,request,model))
             if not isinstance(result,dict) or not isinstance(result.get('sources'),list) or not isinstance(result.get('notes',''),str):
                 raise RuntimeErrorBase('private_lookup_invalid_result')
         with flow.store.connection(write=True) as db:
+            turn_retry.mark(db,aid,"received")
             db.execute("UPDATE private_lookup_calls SET state='received',result_json=?,usage_json=? WHERE attempt_id=?",
                        (encoded(result),encoded(usage),aid))
             if study:record(db,tid,'knowledge_study_received')
@@ -639,9 +878,13 @@ async def _call(flow,turn,base,step,args=None):
         from .private_transport_recovery import park
         with flow.store.connection(write=True) as db:
             if park(db,turn,aid,'lookup',signature,meter,error):
+                turn_retry.mark_error(db,aid,error,True)
                 return 'parked',{}
+            turn_retry.mark_error(db,aid,error,False)
             db.execute("UPDATE private_lookup_calls SET state=?,result_json=?,usage_json=? WHERE attempt_id=?",
                        (state,encoded(audit),encoded(getattr(error,'usage',None)),aid))
+        if item is not None and step=='native' and turn_retry.classify(error)[0]=='terminal':
+            raise RuntimeErrorBase('upstream_error') from error
         return state,audit if study else {}
     finally:
         with flow.store.connection(write=True) as db:
@@ -652,7 +895,9 @@ async def _acquire(flow,turn,base,it):
     from .deepseek_native_contract import supplement
     tid=turn['id'];query=json.loads(it['query_json'])
     from .semantic_knowledge import active
-    with flow.store.connection() as db:vector=active(db,tid)
+    with flow.store.connection() as db:
+        vector=active(db,tid)
+        signed=public_lookup.active(db,tid)
     state,result=await _call(flow,turn,base,'native')
     if state=='parked':return False
     sources=result.get('sources',[]) if state=='received' else []
@@ -662,6 +907,10 @@ async def _acquire(flow,turn,base,it):
         action=supplement(enabled=True,decision='web',outcome='completed',used=0,tool_calls=result.get('tool_calls'),
                           intent='explicit_link' if query.get('url') else 'explicit_search',
                           public_query=query['question'],url=query.get('url'))
+        if signed and action and action['tool']=='search' and action['input']['query']!=query['question']:
+            with flow.store.connection(write=True) as db:
+                public_lookup.freeze(db,public_lookup.key(tid,'fallback'),'query_exceeds_search_limit')
+            action=None
         if action:
             fetched=action['tool']=='fetch'
             state,extra=await _call(flow,turn,base,action['tool'],action['input'])
@@ -675,6 +924,7 @@ async def _acquire(flow,turn,base,it):
         retention,page=await _call(flow,turn,base,'fetch',{'url':query['url']})
         if retention=='parked':return False
         if retention=='received':sources=[*sources,*page.get('sources',[])]
+        elif signed and retention in ('sending','unknown'):state=retention
     elif state=='received' and result.get('sources') and not fetched and not query.get('url') and (
             getattr(flow.providers,'structured_study',False) or vector):
         if not any(isinstance(s,dict) and s.get('content') for s in sources):
@@ -685,6 +935,7 @@ async def _acquire(flow,turn,base,it):
                 retention,page=await _call(flow,turn,base,'fetch',{'url':target})
                 if retention=='parked':return False
                 if retention=='received':sources=[*sources,*page.get('sources',[])]
+                elif signed and retention in ('sending','unknown'):state=retention
                 break
     elif state=='received' and result.get('sources') and not fetched and not query.get('url') and getattr(flow.providers,'study_enabled',False):
         from .knowledge_study import forward_fetch_target,forward_hints,forward_sources_have_names
@@ -700,6 +951,20 @@ async def _acquire(flow,turn,base,it):
             supplement_state,supplemented=await _call(flow,turn,base,'search',{'query':query['question'][:128]})
             if supplement_state=='parked':return False
             if supplement_state=='received':sources=[*sources,*supplemented.get('sources',[])]
+    verified=normalized_sources(turn,sources,by_id=vector or getattr(flow.providers,'structured_study',False))
+    outcome='acquired' if verified else 'unconfirmed' if state in ('sending','unknown') else 'unavailable'
+    if signed and state in ('sending','unknown'):
+        outcome='unconfirmed'
+    with flow.store.connection(write=True) as db:
+        _tool_scope(flow,db,turn,base)
+        db.execute("INSERT OR IGNORE INTO private_lookup_records VALUES(?,?,?,?,?,?,?,?)",
+                   (tid,turn['persona_id'],turn['session_id'],outcome,notes,encoded(list(verified.values())),
+                    None if verified else it['cached_turn'],timestamp()))
+        record(db,tid,('knowledge_selection' if signed else 'knowledge_ready') if outcome=='acquired' else 'knowledge_unavailable')
+    return True
+
+
+def normalized_sources(turn,sources,*,by_id):
     verified={}
     for source in sources:
         if not isinstance(source,dict):continue
@@ -709,23 +974,39 @@ async def _acquire(flow,turn,base,it):
              for k in ('content','summary','date','qualification','kind')}
         row.update(url=url,title=source['title'] if isinstance(source.get('title'),str) and source['title'] else url)
         row['id']=fingerprint([turn['persona_id'],turn['session_id'],url,row['content'],row['summary']])
-        verified[row['id'] if vector or getattr(flow.providers,'structured_study',False) else url]=row
-    outcome='acquired' if verified else 'unconfirmed' if state in ('sending','unknown') else 'unavailable'
-    with flow.store.connection(write=True) as db:
-        _tool_scope(flow,db,turn,base)
-        db.execute("INSERT OR IGNORE INTO private_lookup_records VALUES(?,?,?,?,?,?,?,?)",
-                   (tid,turn['persona_id'],turn['session_id'],outcome,notes,encoded(list(verified.values())),
-                    None if verified else it['cached_turn'],timestamp()))
-        record(db,tid,'knowledge_ready' if verified else 'knowledge_unavailable')
-    return True
+        verified[row['id'] if by_id else url]=row
+    return verified
 
 
 async def prepare(flow,turn,base,material):
+    from . import research_contract,single_retrieval
     from .semantic_knowledge import active
     tid=turn['id']
     with flow.store.connection() as db:it=intent(db,tid)
     if not it:
         await _decide_lookup(flow,turn,base,material)
+    else:
+        with flow.store.connection() as db:
+            proof = lookup_target.saved(db,tid)
+        if (it['state']=='waiting' and base['consent']['enabled'] and proof
+                and proof['status']=='needs_consent'):
+            if it['binding']!=_basis(base,material):
+                raise RuntimeErrorBase('private_lookup_scope_changed')
+            target = json.loads(it['target_json'])
+            with flow.store.connection() as db:
+                catalogue = lookup_target.packet(db,turn,material,target,base['consent'])
+            resolved = await lookup_target.resolve(flow,turn,base,material,target,catalogue)
+            with flow.store.connection(write=True) as db:
+                _,live,actual=flow._snapshot(db,tid)
+                if (live!=base or actual!=material or intent(db,tid)['state']!='waiting'
+                        or lookup_target.saved(db,tid)!=proof):
+                    raise RuntimeErrorBase('private_lookup_scope_changed')
+                lookup_target.validate(db,turn,base['consent'],resolved)
+                db.execute('UPDATE knowledge_control SET value=? WHERE key=?',
+                           (encoded(resolved),lookup_target.PREFIX+tid))
+                if resolved.get('task') and not (public_lookup.active(db,tid) and resolved['status']=='resolved'):
+                    db.execute("""UPDATE private_lookup_intents SET state='ready',origin=?,query_json=?,consent_revision=?
+                        WHERE turn_id=?""",(resolved['origin'],encoded(resolved['task']),base['consent']['revision'],tid))
     with flow.store.connection(write=True) as db:
         it=intent(db,tid)
         vector=active(db,tid)
@@ -736,7 +1017,25 @@ async def prepare(flow,turn,base,material):
         if it['binding']!=_basis(base,material):raise RuntimeErrorBase('private_lookup_scope_changed')
         target=json.loads(it['target_json'])
         full=base['consent']['enabled']
-        if it['state']=='waiting' and full:
+        if public_lookup.active(db,tid):
+            proof=lookup_target.saved(db,tid)
+            if (it['state']=='waiting' and proof and (proof['status']=='resolved' or
+                    proof['status']=='direct' and public_lookup.link_uses_session_scope(db,tid))):
+                proposed=public_lookup.order(db,flow.entry.config,turn,base,it)
+                if proposed:
+                    db.execute("""UPDATE private_lookup_intents SET state='ready',origin=?,query_json=?,
+                        consent_revision=? WHERE turn_id=?""",(proof['origin'],encoded(proposed['query']),
+                                                               base['consent']['revision'],tid))
+                    it=intent(db,tid)
+                elif lookup_target.frozen_version(db,tid) in lookup_target.AUTOMATIC_VERSIONS:
+                    # The target can support a local read, but cannot authorize a public request.
+                    db.execute("UPDATE private_lookup_intents SET state='none' WHERE turn_id=?",(tid,))
+                    it=intent(db,tid)
+            if it['state']=='ready':
+                work=public_lookup.order(db,flow.entry.config,turn,base,it)
+                if not work:raise RuntimeErrorBase('private_lookup_scope_changed')
+                public_lookup.freeze(db,public_lookup.key(tid,'order'),work)
+        if it['state']=='waiting' and full and not lookup_target.saved(db,tid):
             task,origin=projection(db,turn,material['current'] if target=='batch' else [target],True,
                                    grounded=getattr(flow.providers,'grounded_search',False))
             db.execute("UPDATE private_lookup_intents SET state=?,origin=?,query_json=?,consent_revision=? WHERE turn_id=?",
@@ -750,23 +1049,36 @@ async def prepare(flow,turn,base,material):
         addressed=[target] if target in material['current'] else material['current']
         j4=db.execute("SELECT attempt_id FROM private_reply_nodes WHERE turn_id=? AND node='J4' AND state='received'",(tid,)).fetchone()
         context={'target':target,'phase':'main','status':'ordinary','facts':[],'j4_receipt':j4[0] if j4 else None,
-                 'explicit_long':explicit_long(db,[material['catalog'][i] for i in addressed])}
-        if getattr(flow.providers,'local_first',False):
+                 'explicit_long':explicit_long(db,[material['catalog'][i] for i in addressed],
+                                               conversation=bool(getattr(flow.providers,'conversation_systems',None)))}
+        single=it['choice']=='retrieve' and single_retrieval.enrolled(db,tid)
+        if getattr(flow.providers,'local_first',False) and not single:
             read_receipt=local_lookup_route.receipt(db,tid)
             if not read_receipt:raise RuntimeErrorBase('private_lookup_scope_changed')
-            if local_lookup_route.has_local_material(read_receipt):
+            if (local_lookup_route.has_local_material(read_receipt) and
+                    (read_receipt['outcome']!='partial' or it['state'] not in ('ready','waiting'))):
                 facts=local_lookup_route.current_facts(db,turn,it,base['consent'],read_receipt)
                 return context|{'status':'local_hit','facts':facts,'j5_receipt':read_receipt['selection_id']}
+            if read_receipt['outcome']=='coverage_unconfirmed':
+                return context|{'status':'insufficient','lookup_outcome':'coverage_unconfirmed'}
             if it['choice']=='retrieve' and it['state'] in ('none','skipped'):
+                proof=lookup_target.saved(db,tid)
+                if it['state']=='none' and proof and lookup_target.frozen_version(db,tid) in lookup_target.AUTOMATIC_VERSIONS:
+                    return context|{'status':'insufficient','lookup_outcome':'target_unresolved'}
                 return context|{'status':'insufficient' if it['state']=='none' else 'skipped'}
         paper=db.execute("SELECT outcome FROM private_lookup_records WHERE turn_id=?",(tid,)).fetchone()
-        if it['state']=='ready' and not paper:
+        if not single and it['state']=='ready' and not paper:
             if not enabled(db,turn['persona_id']):raise RuntimeErrorBase('knowledge_permission_changed')
             pub=notice(db,tid)
-            if not pub:return context|{'phase':'search_notice','status':'before_search','explicit_long':False}
+            if not pub:
+                if research_contract.request(db,tid):
+                    record(db,tid,'research_preparing_notice')
+                return context|{'phase':'search_notice','status':'before_search','explicit_long':False}
             if not visible_notice(db,tid):
                 if pub['state'] in ('closed','unknown'):raise RuntimeErrorBase('search_notice_not_fully_presented')
                 return None
+    if single:
+        return await single_retrieval.finish(flow,turn,base,material,context)
     if it['state']=='ready' and not paper and not await _acquire(flow,turn,base,it):
         return None
     if (getattr(flow.providers,'study_enabled',False) or vector) and it['state']=='ready':

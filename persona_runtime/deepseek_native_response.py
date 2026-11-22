@@ -88,6 +88,9 @@ class NativeResponse:
         event = choice.get('server_tool_event')
         if event is not None:
             if not isinstance(event, dict): self.fail('provider_native_invalid_response')
+            if event.get('type') in ('call_finished','step_reasoning_done'):
+                from .desktop_turn_retry import content_received
+                content_received()
             self.events.append(deepcopy(event))
             if event.get('type') == 'step_reasoning_done': self.reasoning = []
             if self.progress and event.get('type') == 'call_started':
@@ -109,10 +112,15 @@ class NativeResponse:
                     if self.first_content_ms is None:
                         self.first_content_ms = elapsed
                         if self.progress: self.progress('composing')
+                    from .desktop_turn_retry import content_received
+                    content_received()
                     self.parts.append(text)
             thought = item.get('reasoning_content')
             if thought is not None:
                 if not isinstance(thought, str): self.fail('provider_native_invalid_response')
+                if thought:
+                    from .desktop_turn_retry import content_received
+                    content_received()
                 self.reasoning.append(thought)
             for key in ('server_tool_calls', 'annotations', 'refusal', 'title'):
                 if key in item:

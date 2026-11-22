@@ -144,7 +144,10 @@ class IngressService:
     def _remember(self,conn,persona,operation_id,fingerprint,result):
         conn.execute('INSERT INTO batch_operations VALUES (?,?,?,?,?,?)',(operation_id,persona,LOCAL_USER_ID,fingerprint,encoded(result),timestamp()))
 
-    def update_policy(self,persona_id,channel,mode,expected_version,operation_id,pending_action=None,disposition_mode=None,reply_mode=None,context_mode=None,cross_session=None,character_retrieval_mode=None,expected_selected=None,conversation_policy_version=None,expression_policy_version=None,situation_observation_mode=None,companion_mode=None,delivery_source=None,buffer_quiet_ms=None,manual_confirmation=None):
+    def update_policy(self,persona_id,channel,mode,expected_version,operation_id,pending_action=None,disposition_mode=None,reply_mode=None,context_mode=None,cross_session=None,character_retrieval_mode=None,expected_selected=None,conversation_policy_version=None,expression_policy_version=None,situation_observation_mode=None,companion_mode=None,delivery_source=None,buffer_quiet_ms=None,manual_confirmation=None,message_time_version=None):
+        from .message_time import KEY as TIME_KEY, VERSION as TIME_VERSION
+        if message_time_version is not None and (channel != 'desktop' or message_time_version not in ('off', TIME_VERSION)):
+            raise RuntimeErrorBase('invalid_message_time_version')
         custom_buffer=buffer_quiet_ms is not None or manual_confirmation is not None
         if custom_buffer and channel!='desktop':raise RuntimeErrorBase('desktop_buffer_only')
         if (buffer_quiet_ms is not None and (type(buffer_quiet_ms) is not int or not 1000<=buffer_quiet_ms<=MAX_QUIET_MS)
@@ -156,7 +159,7 @@ class IngressService:
         if companion_mode=='disabled':
             if any(value is not None for value in (disposition_mode,reply_mode,context_mode,cross_session,
                     character_retrieval_mode,conversation_policy_version,expression_policy_version,situation_observation_mode,
-                    buffer_quiet_ms,manual_confirmation)):
+                    buffer_quiet_ms,manual_confirmation,message_time_version)):
                 raise RuntimeErrorBase('companion_restore_conflict')
             return self._disable_companion_policy(persona_id,channel,mode,expected_version,operation_id,
                 pending_action,expected_selected)
@@ -194,6 +197,8 @@ class IngressService:
                 from .decision_capsule import require_admission
                 require_admission(self.engine,persona_id,disposition_mode)
             value={'channel':channel,'mode':mode,'reply_mode':reply_mode,'context_mode':context_mode,'cross_session':cross_session,'expected_version':expected_version,'pending_action':pending_action}
+            if message_time_version is not None:
+                value[TIME_KEY] = message_time_version
             if requested_disposition_mode is not None:value['disposition_mode']=requested_disposition_mode
             if requested_observation_mode is not None:value['situation_observation_mode']=requested_observation_mode
             if character_retrieval_mode is not None:value['character_retrieval_mode']=character_retrieval_mode
@@ -238,6 +243,8 @@ class IngressService:
             cross_session=current['cross_session'] if cross_session is None else cross_session
             character_policy=selected_character if selected_character is not None else current['character_retrieval']
             context_changed=observation_changed or (context_mode,cross_session,character_policy)!=(current['context_mode'],current['cross_session'],current['character_retrieval'])
+            if message_time_version is not None and message_time_version != current.get(TIME_KEY, 'off'):
+                context_changed = True
             changed=mode!=current['mode'] or context_changed or reply_mode!=current['reply_mode'] or strategy_changed or disposition_mode!=current.get('disposition_mode','baseline')
             if changed and channel=='desktop' and manual_pending(conn,persona_id):
                 raise RuntimeErrorBase('manual_buffer_pending')
@@ -250,6 +257,10 @@ class IngressService:
             else:
                 vid=identifier()
                 data=json.loads(current['data_json']);data['expression']=expression_snapshot(reply_mode,vid,version=target_expression);data['context']={**data.get('context',{}),'context_mode':context_mode,'cross_session':cross_session,'character_retrieval':character_policy,'disposition_mode':disposition_mode,'situation_observation_mode':situation_observation_mode}
+                if message_time_version == TIME_VERSION:
+                    data['context'][TIME_KEY] = TIME_VERSION
+                elif message_time_version == 'off':
+                    data['context'].pop(TIME_KEY, None)
                 if selected_companion is not None:
                     from .companion import capture_restore, RESTORE_KEY
                     if 'companion' not in old_data:
@@ -358,6 +369,7 @@ class IngressService:
         row=self._batch(conn,batch_id)
         for key in ('profile_snapshot','character_snapshot','model_snapshot','selector_model_snapshot','observation_model_snapshot','scope_key'):row.pop(key,None)
         row['policy']=json.loads(row.pop('policy_json'))
+        row['policy'].pop('_main_reply',None)
         row['origin']={'bot':row['bot'],'sender':row['peer']} if row['channel']=='qq' else None
         row['members']=[dict(r) for r in conn.execute('SELECT r.id AS receipt_id,r.accepted_seq,e.id AS event_id,e.text,e.created_at FROM input_batch_members m JOIN ingress_receipts r ON r.id=m.receipt_id JOIN events e ON e.id=m.event_id WHERE m.batch_id=? ORDER BY m.member_order',(batch_id,))]
         turn=conn.execute('SELECT id FROM turns WHERE input_batch_id=?',(batch_id,)).fetchone()
@@ -379,7 +391,7 @@ class IngressService:
 
     def _receipt(self,conn,row):
         batch=self._view(conn,row['batch_id'])
-        return {'receipt_id':row['id'],'event_id':row['event_id'],'batch_id':row['batch_id'],'accepted_seq':row['accepted_seq'],'persona_id':row['persona_id'],'session_id':row['session_id'],'channel':row['channel'],'origin':batch['origin'],'turn_id':batch['turn_id'],'status':batch['status'],'batch_revision':batch['revision'],'ingress_ms':row['ingress_ms']}
+        return {'receipt_id':row['id'],'received_at':row['received_at'],'event_id':row['event_id'],'batch_id':row['batch_id'],'accepted_seq':row['accepted_seq'],'persona_id':row['persona_id'],'session_id':row['session_id'],'channel':row['channel'],'origin':batch['origin'],'turn_id':batch['turn_id'],'status':batch['status'],'batch_revision':batch['revision'],'ingress_ms':row['ingress_ms']}
 
     def lookup(self,channel,request_id):
         with self.store.connection() as conn:
@@ -458,6 +470,11 @@ class IngressService:
                 if route:
                     policy["private_reply_instance"] = cfg['instance_id']
                     policy["private_reply_route"] = route
+                from .main_reply import admit, MARKER
+                if accepted_writer := admit(self.config,cfg,route):
+                    policy[MARKER] = accepted_writer
+                from .desktop_turn_retry import admission_scope
+                policy["desktop_retry_contract"] = admission_scope(conn,self.config,pid,sid)
             from .en5_replay_scope import replay_request
             replay_request(self.store.paths,conn,value,pid,sid)
             if 'desktop_presentation' in value:policy['desktop_presentation']=value['desktop_presentation']
@@ -571,6 +588,9 @@ class IngressService:
             accepted_context=json.loads(batch['policy_json']).get('context',{})
             conn.execute('UPDATE input_batches SET selector_model_snapshot=? WHERE id=?',(encoded(freeze_auxiliary(config['character_selector'],accepted_context)),batch['id']))
             model=freeze_model(config['model'],accepted_context)
+            from .main_reply import MARKER
+            if MARKER in policy:
+                model[MARKER] = policy[MARKER]
             conn.execute("UPDATE input_batches SET state='sealed_waiting_capacity',sealed_at=?,seal_reason=?,model_snapshot=?,revision=revision+1,updated_at=? WHERE id=?",(timestamp(),reason,encoded(model),timestamp(),batch['id']))
         self._enqueue(conn,batch['persona_id'])
 
@@ -596,6 +616,8 @@ class IngressService:
                 if policy.get('private_reply_instance'):
                     from .private_reply_entry import bind, ROUTE
                     bind(conn,tid,policy['private_reply_instance'],policy.get('private_reply_route',ROUTE))
+                if policy.get('desktop_retry_contract'):
+                    conn.execute('INSERT INTO desktop_turn_checkpoints VALUES(?,?)',(tid,policy['desktop_retry_contract']))
                 from .desktop_recovery import register
                 register(conn,tid,self.config.load())
             conn.execute("UPDATE input_batches SET state='linked',revision=revision+1,updated_at=? WHERE id=?",(timestamp(),b['id']))

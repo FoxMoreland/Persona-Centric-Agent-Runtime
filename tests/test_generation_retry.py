@@ -80,6 +80,34 @@ class AuditedRetry(unittest.IsolatedAsyncioTestCase):
 
 
 class RuntimeRetry(fixture.SelectorTests):
+    async def test_desktop_selector_terminal_retry_keeps_first_receipt(self):
+        from persona_runtime import desktop_turn_retry
+        from persona_runtime.models import identifier
+        self.enable()
+        turn=await self.turn('书店')
+        tid=turn['id']
+        calls=[]
+        async def complete(model,messages):
+            if model.get('_character_selection'):
+                calls.append(messages)
+                if len(calls)==1:
+                    raise ModelError('provider_http_503',diagnostics={'http_status':503})
+                return json.dumps({'schema_version':1,'lore_ids':[],'example_ids':[]}),{'total_tokens':1}
+            return '902',{'total_tokens':1}
+        with patch.object(self.rt,'local_pool',side_effect=self.pool),patch.object(self.model,'complete',complete):
+            await self.engine._run(tid)
+            with self.store.connection() as db:
+                row=db.execute('SELECT * FROM turns WHERE id=?',(tid,)).fetchone()
+                failure=desktop_turn_retry.failure(db,row)
+            desktop_turn_retry.retry(self.store,row['persona_id'],row['session_id'],tid,failure['version'],identifier())
+            await self.engine._run(tid)
+        self.assertEqual(self.engine.get(tid)['status'],'completed',self.engine.get(tid)['error_code'])
+        self.assertEqual(len(calls),2)
+        self.assertEqual(calls[0],calls[1])
+        with self.store.connection() as db:
+            logical=db.execute('SELECT usage_json FROM character_selection_attempts WHERE turn_id=?',(tid,)).fetchone()
+            self.assertEqual(len(json.loads(logical[0])['generation_retry']['attempts']),2)
+
     def setUp(self):
         super().setUp();p=patch.object(retry,'retry_delay',new=AsyncMock());p.start();self.addCleanup(p.stop)
     async def test_main_retry_is_audited_and_counts_against_quota(self):

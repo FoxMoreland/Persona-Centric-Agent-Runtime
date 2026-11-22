@@ -153,20 +153,20 @@ def restore(db, pid, document, target, rows, *, meta=None):
     return sid
 
 
+def imported_time(origin, event_id, stored):
+    detail = origin.get("sources", {}).get(event_id)
+    if detail:
+        return detail["time"]
+    return stored if origin and stored != origin.get("imported_at") else None
+
+
 def source_time(db, event_id):
     row = db.execute("SELECT created_at FROM events WHERE id=?", (event_id,)).fetchone()
     if not row or not event_id.startswith(PREFIX):
         return row[0] if row else None
     parts = event_id.split(".")
     turn = db.execute("SELECT origin_json FROM turns WHERE id=?", (parts[1],)).fetchone()
-    if turn:
-        origin = json.loads(turn[0])
-        detail = origin.get("sources", {}).get(event_id)
-        if detail:
-            return detail["time"]
-        if row[0] != origin.get("imported_at"):
-            return row[0]
-    return None
+    return imported_time(json.loads(turn[0]), event_id, row[0]) if turn else None
 
 
 def group(db, turn, selected, target, audit=False, *, purpose="dialogue", providers=None):
@@ -248,6 +248,8 @@ def page(store,persona_id,session_id,before=None,limit=80,query=None,after=None)
             event["text"] = source.get("original",event["text"])
             event["role"] = source.get("role",event["role"])
             event["created_at"] = source.get("time",None if event["created_at"]==meta["imported_at"] else event["created_at"])
+            from .message_time import stamp
+            event["timestamp"] = stamp(event["created_at"], "imported", raw=source.get("raw_time"))
             if not query or query.casefold() in event["text"].casefold():
                 out.append(event)
             if len(out)==limit or idx==cap-1:

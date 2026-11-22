@@ -20,10 +20,12 @@ SAFE_ERRORS = {
     "desktop_instance_changed","model_not_configured","cancelled_by_user","provider_timeout",
     "knowledge_repeated_notice",
     "reply_bubble_limit","reply_bubble_detail_required","reply_decision_required",
-    "private_reply_decision_stale","private_reply_transport_unavailable","private_reply_candidate_retired","reply_review_pending",
+    "private_reply_decision_stale","private_reply_transport_unavailable","private_reply_candidate_retired","reply_review_pending","private_chat_review_version_changed",
     "reply_dispatch_unknown","private_reply_turn_inactive","private_reply_model_changed","private_reply_persona_changed",
     "private_reply_review_rejected","private_reply_reference_unavailable","private_reply_source_changed",
     "private_lookup_confirmation_required","private_lookup_scope_changed","search_notice_not_fully_presented",
+    "lookup_target_invalid","lookup_target_input_budget_exceeded",
+    "lookup_reply_format_invalid","lookup_reply_citation_invalid","lookup_reply_unbound",
     "provider_network_error","provider_effect_unknown","provider_retries_exhausted","knowledge_evidence_changed",
 }
 NATIVE = "persona_id=? AND session_id=? AND channel='desktop' AND source_key NOT GLOB 'imported.*'"
@@ -54,7 +56,7 @@ def input_buffer(db, pid, sid=None):
     held=manual_pending(db,pid,sid) if sid else None
     batch=None
     if held:
-        members=[dict(r) for r in db.execute("""SELECT r.request_id,e.text FROM input_batch_members m
+        members=[dict(r) for r in db.execute("""SELECT r.request_id,e.text,r.received_at FROM input_batch_members m
             JOIN ingress_receipts r ON r.id=m.receipt_id JOIN events e ON e.id=m.event_id
             WHERE m.batch_id=? ORDER BY m.member_order""",(held["id"],))]
         batch={"id":held["id"],"revision":held["revision"],"members":members}
@@ -116,7 +118,7 @@ def latest_status(store,db,pid,sid):
     return {"id":row["id"],"error_code":error,"needs_connection":needs_connection}
 
 
-def turn_card(db,row):
+def turn_card(db,row,store=None):
     from .turn_input import load_turn_input
     from .bubble_limits import display_bubbles
     from .scene_publication import ScenePublication
@@ -127,29 +129,92 @@ def turn_card(db,row):
     tid=turn["id"]
     members=load_turn_input(db,turn)
     card={k:turn[k] for k in ("id","status","reply_event_id","position")}
-    card["input_members"]=[{"id":m["id"],"text":m["text"]} for m in members]
+    from .message_time import event_times
+    times = event_times(db, [m['id'] for m in members])
+    card["input_members"] = [{"id":m["id"], "text":m["text"], "timestamp":next(iter(times.get(m["id"], ())), None)}
+                             for m in members]
     card["search_notice"]=read_notice(db,turn)
+    if card["search_notice"]:
+        event_id = card["search_notice"]["event_id"]
+        times = event_times(db, [event_id], tid)
+        card["search_notice"]["timestamp"] = next(iter(times[event_id]), None)
     card["desktop_publications"]=ScenePublication.desktop_plans(db,turn)
     card["error_code"]=public_error(turn["error_code"])
+    from .desktop_turn_retry import failure
+    retry = failure(db,turn)
+    if retry:
+        card['status'] = 'failed'
+        card['stage_retry'] = retry
+        card['error_code'] = retry['reason']
     from .private_reply_entry import candidate,RESEARCH
     route=candidate(db,tid)
+    if store and route and card['error_code']=='desktop_presentation_unknown' and not turn['cancelled_at']:
+        from .private_lookup import recovered_main
+        try:
+            card['inline_reply']=recovered_main(db,store,turn,fragments=True)
+        except RuntimeErrorBase:
+            pass
     if route and route['route']==RESEARCH:
         from .private_lookup import intent,saved_failed_research
         lookup=intent(db,tid)
+        from . import lookup_continuation, public_lookup, research_contract
+        if progress:=research_contract.progress(db,turn):
+            card['research_progress']=progress
+        if card['error_code']=='private_reply_review_rejected' and research_contract.active(db,tid):
+            latest=db.execute("""SELECT json_extract(a.usage_json,'$.lookup_attribution.error')
+                FROM private_reply_attempts a JOIN private_reply_reviews r ON r.attempt_id=a.id
+                WHERE a.turn_id=? AND a.phase='main' AND a.state='received' AND r.approved=0
+                ORDER BY a.draft DESC LIMIT 1""",(tid,)).fetchone()
+            if latest and latest[0]=='format':
+                card['error_code']='lookup_reply_format_invalid'
+        if turn['status'] in ('queued','running') and research_contract.active(db,tid):
+            from .call_limits import turn_scope
+            wait=db.execute("""SELECT reason,next_epoch FROM model_call_waits
+                WHERE scope=? AND state IN ('waiting','deferred')""",(turn_scope(turn),)).fetchone()
+            if wait:
+                card['research_quota']=dict(wait)
+        if lookup and public_lookup.active(db,tid):
+            audited=public_lookup.trace(db,tid)
+            if (audited and card['error_code']=='private_reply_review_rejected'
+                    and audited['outcome']=='target_unresolved' and not audited['calls']):
+                card['lookup_scope_unresolved']=True
+            if audited and audited['ready']:
+                card['public_lookup']={'outcome':audited['outcome'],'calls':[
+                    {'step':a['step'],'state':a['state'],'results':a['results']} for a in audited['calls']]}
         if lookup and lookup['state']=='waiting' and not turn['cancelled_at']:
             card['lookup_confirmation']=lookup['binding']
+            from .lookup_target import saved
+            target = saved(db,tid)
+            if target:
+                card['lookup_target_status'] = target['status']
+                if target['status']=='resolved' and public_lookup.active(db,tid):
+                    card['lookup_target_status']='needs_public_scope'
+                    card['lookup_proposal']=target['task']['question']
         if turn['status']=='completed' and turn['reply_event_id']:
-            result=db.execute("""SELECT a.detail,d.contract_json FROM private_reply_attempts a
+            result=db.execute("""SELECT a.id,a.body,a.detail,d.contract_json FROM private_reply_attempts a
                 JOIN private_reply_decisions d ON d.id=a.decision_id JOIN private_reply_reviews v
                 ON v.attempt_id=a.id AND v.approved=1 JOIN expression_speech_units u ON u.source_id=a.id
                 JOIN expression_speech_publications p ON p.utterance_id=u.id AND p.state='complete'
                 WHERE a.turn_id=? AND a.phase='main'""",(tid,)).fetchone()
             if result:
                 card['role_long_detail']=bool(result['detail'])
+                attribution=public_lookup.saved(db,'private.reply.attribution.'+result['id'])
                 research=json.loads(result['contract_json'])['ordinary']['research']
+                from .reply_provenance import literal_citations
+                card['used_sources']=bool(attribution and (attribution.get('bindings') or
+                    literal_citations(db,tid,result['body'],result['detail'],research)))
+                if research.get('retained_read'):
+                    card['retained_lookup']=True
                 card['research_detail']=bool(research.get('origin') or research.get('status')=='local_hit'
-                                             or research.get('lookup_outcome')=='studied')
-        elif saved_failed_research(db,turn):
+                                             or research.get('lookup_outcome')=='studied' or research.get('public_result')
+                                             or research.get('retrieval',{}).get('items'))
+        elif store and turn['error_code']==lookup_continuation.MODEL_STOP:
+            try:
+                card['research_detail']=bool(lookup_continuation.retained_detail(db,store,turn))
+            except RuntimeErrorBase:
+                pass
+        elif (research_contract.failed_reply_with_evidence(db,turn)
+                or not public_lookup.active(db,tid) and saved_failed_research(db,turn)):
             card['research_detail']=True
     if card['search_notice'] and (turn['status']=='completed' or turn['error_code']=='knowledge_repeated_notice'):
         card['has_retrieved_notes']=bool(db.execute("""SELECT 1 FROM context_uses WHERE turn_id=?
@@ -157,7 +222,7 @@ def turn_card(db,row):
             AND json_extract(details_json,'$.knowledge.translation.notes_characters')>0 LIMIT 1""",(tid,tid)).fetchone())
     if card["reply_event_id"] and turn["status"]=="completed":
         if turn_usable(db,tid):
-            event=db.execute("SELECT text FROM events WHERE id=? AND session_id=? AND persona_id=?",
+            event=db.execute("SELECT text,created_at FROM events WHERE id=? AND session_id=? AND persona_id=?",
                              (card["reply_event_id"],turn["session_id"],turn["persona_id"])).fetchone()
             if event:
                 batch=db.execute("SELECT id FROM reply_batches WHERE turn_id=? ORDER BY created_at DESC LIMIT 1",(tid,)).fetchone()
@@ -171,7 +236,7 @@ def turn_card(db,row):
                 except RuntimeErrorBase as error:
                     card.update(error_code=public_error(str(error)), reply_event_id=None)
                 else:
-                    card.update(reply=event[0], display_reply=visible)
+                    card.update(reply=event[0], display_reply=visible, reply_recorded_at=event["created_at"])
                     if bubbles is not None:
                         card["display_bubbles"] = bubbles
         else:
@@ -180,6 +245,20 @@ def turn_card(db,row):
                                        AND json_extract(details_json,'$.import_style') IS NOT NULL LIMIT 1""",(tid,)).fetchone()) if card["reply_event_id"] else False
     activity=db.execute("SELECT event FROM request_activity WHERE turn_id=? ORDER BY seq DESC LIMIT 1",(tid,)).fetchone()
     card["phase"]=activity[0] if activity else turn["status"]
+    from .private_lookup import background_lookup
+    plans = card["desktop_publications"]
+    if any(plan["phase"] == "search_notice" for plan in plans) and background_lookup(db,tid):
+        for plan in plans:
+            if plan["phase"] == "search_notice" and plan["source_kind"] == "maibot_private_reply":
+                plan["background_lookup"] = True
+                if (turn["status"] in ("queued", "running") and not any(p["phase"] == "main" for p in plans)
+                        and card["phase"] in ("desktop_publication_changed","persisted","search_notice_published")):
+                    card["phase"] = "background_search_notice_saved"
+    elif turn["status"] in ("queued", "running") and any(
+        plan["phase"] == "search_notice" and plan["state"] in ("pending", "partial")
+        for plan in card["desktop_publications"]
+    ):
+        card["phase"] = "knowledge_search_notice"
     return card
 
 
@@ -243,17 +322,10 @@ def page(store,pid,sid,version=None,before=None,after=None,anchor=None):
                   "presentable":store.current(db,required=False)==pid,
                   "session_revision":lifecycle["revision"] if lifecycle else 0,
                    "sealed":bool(lifecycle and lifecycle["state"]=="sealed"),"input_buffer":input_buffer(db,pid,sid)}
-        from .knowledge_service import POLICY,read as knowledge_read
-        reader=knowledge_read(db,'policy.'+pid,POLICY)['data']
-        response['public_search_available']=bool(reader['enabled'] and 'desktop' in reader['channels']
-            and knowledge_read(db,'web.policy.'+pid,{})['data'].get('enabled'))
         from .private_reply_entry import selected,RESEARCH
         from .config import ConfigStore
         config=ConfigStore(store.paths);cfg=config.load()
         response['long_reply_available']=selected(db,cfg['instance_id'],pid)==RESEARCH
-        if response['long_reply_available'] and response['public_search_available']:
-            from .session_privacy import current,recipients
-            response['session_search_granted']=current(db,config,cfg,pid,sid,recipients(config,cfg))['enabled']
         delta=version is not None and version<=latest and all(v is None for v in (before,after,anchor))
         if delta:
             if version==latest:
@@ -265,7 +337,7 @@ def page(store,pid,sid,version=None,before=None,after=None,anchor=None):
                 cards=[]
                 for change in changes:
                     row=db.execute("SELECT rowid position,* FROM turns WHERE id=?",(change[0],)).fetchone()
-                    cards.append(turn_card(db,row))
+                    cards.append(turn_card(db,row,store))
                 if len(json.dumps(cards,ensure_ascii=False).encode())<=PAGE_BYTES or len(cards)<=1:
                     return response|{"reset":False,"turns":cards or None}
         if anchor is not None:
@@ -283,7 +355,7 @@ def page(store,pid,sid,version=None,before=None,after=None,anchor=None):
         cards=[]
         size=0
         for row in rows[:PAGE_SIZE]:
-            card=turn_card(db,db.execute("SELECT rowid position,* FROM turns WHERE id=?",(row["id"],)).fetchone())
+            card=turn_card(db,db.execute("SELECT rowid position,* FROM turns WHERE id=?",(row["id"],)).fetchone(),store)
             size+=len(json.dumps(card,ensure_ascii=False).encode())
             if cards and size>PAGE_BYTES:break
             cards.append(card)

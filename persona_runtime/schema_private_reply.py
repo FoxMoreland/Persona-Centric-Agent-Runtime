@@ -67,12 +67,15 @@ def migrate(db):
 
 
 def initialize_nodes(db):
+    from .desktop_turn_retry import initialize
+    initialize(db)
     execute_schema(db, """
     DROP TRIGGER IF EXISTS private_reply_attempt_retained;
     DROP TRIGGER IF EXISTS private_reply_node_retained;
+    DROP TRIGGER IF EXISTS private_reply_attempt_history;
     CREATE TRIGGER IF NOT EXISTS private_reply_attempt_history BEFORE DELETE ON private_reply_attempts
-      WHEN OLD.state!='sending' OR NOT EXISTS(SELECT 1 FROM knowledge_control
-          WHERE key='private.writer.unsent.'||OLD.id AND json_extract(value,'$.turn')=OLD.turn_id)
+      WHEN (OLD.state!='sending' OR NOT EXISTS(SELECT 1 FROM knowledge_control
+          WHERE key='private.writer.unsent.'||OLD.id AND json_extract(value,'$.turn')=OLD.turn_id)) AND NOT EXISTS(SELECT 1 FROM desktop_stage_attempts a WHERE a.attempt_id=OLD.id AND a.turn_id=OLD.turn_id AND a.stage='writer' AND a.outcome='terminal' AND a.operation IS NOT NULL AND a.archived IS NOT NULL)
       BEGIN SELECT RAISE(ABORT,'private reply attempt retained'); END;
     CREATE TABLE IF NOT EXISTS private_lookup_intents (
       turn_id TEXT PRIMARY KEY REFERENCES private_reply_turns(turn_id), target_json TEXT NOT NULL,
@@ -105,8 +108,9 @@ def initialize_nodes(db):
       BEGIN SELECT RAISE(ABORT,'lookup record retained'); END;
     CREATE TRIGGER IF NOT EXISTS private_lookup_intent_retained BEFORE DELETE ON private_lookup_intents
       BEGIN SELECT RAISE(ABORT,'lookup intent retained'); END;
+    DROP TRIGGER IF EXISTS private_lookup_attempt_retained;
     CREATE TRIGGER IF NOT EXISTS private_lookup_attempt_retained BEFORE DELETE ON private_lookup_calls
-      WHEN OLD.state!='sending' OR NOT EXISTS(SELECT 1 FROM knowledge_control WHERE key='private.lookup.unsent.'||OLD.attempt_id)
+      WHEN (OLD.state!='sending' OR NOT EXISTS(SELECT 1 FROM knowledge_control WHERE key='private.lookup.unsent.'||OLD.attempt_id)) AND NOT EXISTS(SELECT 1 FROM desktop_stage_attempts a WHERE a.attempt_id=OLD.attempt_id AND a.turn_id=OLD.turn_id AND a.stage='lookup' AND a.outcome='terminal' AND a.operation IS NOT NULL AND a.archived IS NOT NULL)
       BEGIN SELECT RAISE(ABORT,'lookup attempt retained'); END;
     CREATE TABLE IF NOT EXISTS private_reply_source_sets (
       turn_id TEXT PRIMARY KEY REFERENCES private_reply_turns(turn_id),
@@ -126,8 +130,9 @@ def initialize_nodes(db):
       WHEN OLD.state='received' OR NEW.turn_id!=OLD.turn_id OR NEW.draft!=OLD.draft OR NEW.node!=OLD.node
         OR NEW.attempt_id!=OLD.attempt_id OR NEW.request_hash!=OLD.request_hash OR NEW.state='sending'
       BEGIN SELECT RAISE(ABORT,'private decision receipt sealed'); END;
+    DROP TRIGGER IF EXISTS private_reply_node_history;
     CREATE TRIGGER IF NOT EXISTS private_reply_node_history BEFORE DELETE ON private_reply_nodes
-      WHEN OLD.state!='sending' OR NOT EXISTS(SELECT 1 FROM knowledge_control
-          WHERE key='private.judge.unsent.'||OLD.attempt_id AND json_extract(value,'$.turn')=OLD.turn_id)
+      WHEN (OLD.state!='sending' OR NOT EXISTS(SELECT 1 FROM knowledge_control
+          WHERE key='private.judge.unsent.'||OLD.attempt_id AND json_extract(value,'$.turn')=OLD.turn_id)) AND NOT EXISTS(SELECT 1 FROM desktop_stage_attempts a WHERE a.attempt_id=OLD.attempt_id AND a.turn_id=OLD.turn_id AND a.stage='judge' AND a.outcome='terminal' AND a.operation IS NOT NULL AND a.archived IS NOT NULL)
       BEGIN SELECT RAISE(ABORT,'private decision receipt retained'); END;
     """)

@@ -35,6 +35,7 @@ BUSINESS_TABLES+=SPEECH_TABLES+DIALOGUE_TABLES
 PRIVATE_REPLY_TABLES=('session_privacy_events','private_reply_instances','private_reply_turns',
                       'private_reply_decisions','private_reply_attempts','private_reply_reviews')
 BUSINESS_TABLES+=PRIVATE_REPLY_TABLES
+BUSINESS_TABLES+=('desktop_turn_checkpoints','desktop_stage_attempts','desktop_retry_preparation','desktop_retry_clicks')
 LOCAL_KNOWLEDGE_TABLES=('local_knowledge_documents','local_knowledge_facts','local_knowledge_reads')
 BUSINESS_TABLES+=LOCAL_KNOWLEDGE_TABLES+('knowledge_evidence',)
 STUDY_TABLES=('knowledge_study_commits','knowledge_study_reads')

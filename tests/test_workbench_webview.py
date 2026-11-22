@@ -1,5 +1,6 @@
 """Targeted regression checks for the opt-in desktop preview."""
 
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -66,6 +67,13 @@ class BrowserWorkbenchTests(unittest.TestCase):
         self.assertIn("window.pywebview.api.exit_workbench()", html)
         self.assertLess(html.index("window.pcarDesktop ="), html.rindex("</body>"))
 
+    def test_composer_has_a_single_send_route_for_search_decisions(self):
+        html = workbench_html()
+        self.assertIn('id="send"', html)
+        self.assertIn('id="long-reply-send"', html)
+        self.assertNotIn("public-search-send", html)
+        self.assertNotIn("sessionSearchGranted", html)
+
     def test_appearance_preference_is_loaded_before_first_paint(self):
         parent = RuntimePaths.from_environment().home / "tmp"
         parent.mkdir(parents=True, exist_ok=True)
@@ -79,11 +87,33 @@ class BrowserWorkbenchTests(unittest.TestCase):
                 self.assertEqual(read_appearance(paths), mode)
                 html = workbench_html(read_appearance(paths))
                 self.assertLess(html.index(f'data-appearance="{mode}"'), html.index("<style>"))
+            controls.save_accent("#8A3153")
+            controls.save_appearance("dark")
+            saved = json.loads((paths.home / APPEARANCE_FILE).read_text(encoding="utf-8"))
+            self.assertEqual(saved, {"mode": "dark", "accent": "#8a3153"})
+            html = workbench_html(saved["mode"], saved["accent"])
+            self.assertLess(html.index('data-accent="#8a3153"'), html.index("<style>"))
+            with self.assertRaises(RuntimeErrorBase):
+                controls.save_accent('";<script>')
+            controls.save_accent(None)
             with self.assertRaises(RuntimeErrorBase):
                 controls.save_appearance("invalid")
-            self.assertEqual(read_appearance(paths), "system")
+            self.assertEqual(read_appearance(paths), "dark")
             (paths.home / APPEARANCE_FILE).write_text("{", encoding="utf-8")
             self.assertEqual(read_appearance(paths), "system")
+
+    def test_failed_persona_image_replace_preserves_previous_file(self):
+        from persona_runtime.workbench_appearance import store_image
+
+        with tempfile.TemporaryDirectory() as temporary:
+            paths=RuntimePaths(Path(temporary).resolve())
+            image=paths.home/"private"/"workbench-appearance"/"701"/"avatar.png"
+            store_image(paths,image,b"original")
+            with patch("persona_runtime.workbench_appearance.replace_closed",side_effect=OSError("write blocked")):
+                with self.assertRaises(OSError):
+                    store_image(paths,image,b"replacement")
+            self.assertEqual(image.read_bytes(),b"original")
+            self.assertEqual(list(image.parent.iterdir()),[image])
 
     def test_alternate_frontend_wakes_existing_owner_instead_of_acquiring(self):
         parent = RuntimePaths.from_environment().home / "tmp"

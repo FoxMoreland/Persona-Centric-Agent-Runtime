@@ -6,6 +6,7 @@ import time
 import aiohttp
 
 from .provider_compat import is_grok47, response_metadata, usage_fields
+from .provider_policy import is_openrouter_writer
 
 
 class ChatStream:
@@ -18,6 +19,8 @@ class ChatStream:
         self.usage=None;self.metadata={};self.events=0
         self.first_event_ms=None;self.first_content_delta_ms=None
         self.terminal_error=False
+        self.openrouter=is_openrouter_writer(model)
+        self.openrouter_accounted=False
 
     def error(self, code):
         from .chat import ModelError
@@ -48,14 +51,16 @@ class ChatStream:
         try:value=json.loads(raw)
         except (ValueError,TypeError):self.error('provider_invalid_response')
         if not isinstance(value,dict):self.error('provider_invalid_response')
-        self.metadata.update(response_metadata(value,grok=is_grok47(self.model)))
+        if self.openrouter and value.get('model') not in (None,'',self.model['name']):
+            self.error('provider_unexpected_response_model')
+        self.metadata.update(response_metadata(value,grok=is_grok47(self.model),openrouter=self.openrouter))
         if self.model.get('_private_writer_stream') is True and isinstance(value.get('model'),str):
             self.metadata['requested_model_echoed']=value['model']==self.model['name']
         supplied=value.get('usage')
         if supplied is not None:
             if not isinstance(supplied,dict):self.error('provider_invalid_response')
             # Usage events are cumulative snapshots, never additive deltas.
-            self.usage=usage_fields(supplied,deepseek=True,grok=True) or None
+            self.usage=usage_fields(supplied,deepseek=not self.openrouter,grok=not self.openrouter,openrouter=self.openrouter) or None
         if value.get('error') is not None:
             self.terminal_error=True
             self.error('provider_aborted')
@@ -75,11 +80,27 @@ class ChatStream:
             if text:
                 if self.finished is not None:self.error('provider_invalid_response')
                 if self.first_content_delta_ms is None:self.first_content_delta_ms=elapsed
+                from .desktop_turn_retry import content_received
+                content_received()
                 self.parts.append(text)
-        if delta.get('reasoning_content') or delta.get('reasoning'):self.reasoning=True
+        if delta.get('reasoning_content') or delta.get('reasoning') or self.openrouter and delta.get('reasoning_details'):
+            if not self.openrouter:
+                from .desktop_turn_retry import content_received
+                content_received()
+            self.reasoning=True
         finish=choice.get('finish_reason')
         if finish is not None:
-            if self.finished is not None or finish not in ('stop','length','content_filter','tool_calls','function_call','insufficient_system_resource','aborted'):
+            if self.finished is not None:
+                # OpenRouter's final accounting frame repeats the terminal
+                # reason with an empty delta and a usage object before DONE.
+                if (self.openrouter and not self.openrouter_accounted and finish==self.finished
+                        and supplied is not None and self.usage is not None
+                        and delta.keys() <= {'content','role'}
+                        and delta.get('role') in (None,'assistant')):
+                    self.openrouter_accounted=True
+                    return
+                self.error('provider_invalid_response')
+            if finish not in ('stop','length','content_filter','tool_calls','function_call','insufficient_system_resource','aborted'):
                 self.error('provider_invalid_response')
             self.finished=finish
 
@@ -109,6 +130,8 @@ class ChatStream:
         except UnicodeError:self.error('provider_invalid_response')
         if self.buffer or self.data:self.error('provider_invalid_response')
         if not self.done:self.error('provider_network_error')
+        if self.openrouter and self.metadata.get('response_model') != self.model['name']:
+            self.error('provider_unexpected_response_model')
         if self.finished=='content_filter':self.error('provider_content_filtered')
         if self.finished in ('tool_calls','function_call'):self.error('provider_tool_call_not_supported')
         if self.finished in ('length','insufficient_system_resource','aborted'):

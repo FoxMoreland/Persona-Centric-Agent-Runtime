@@ -80,6 +80,38 @@ class OrdinaryTests(unittest.IsolatedAsyncioTestCase):
                              state,webview=True,publication_id=plan['id'],revision=plan['revision'],ordinal=index)
         return item['body']
 
+    async def test_delivery_times_follow_each_confirmed_fragment_after_reopen(self):
+        from persona_runtime import message_time
+        from persona_runtime.ingress import IngressService
+        from persona_runtime.workbench_timeline import page
+        ingress = IngressService(self.chat)
+        policy = ingress.current_policy(self.pid, 'desktop')
+        ingress.update_policy(self.pid,'desktop',policy['mode'],policy['id'],identifier(),
+                              message_time_version=message_time.VERSION)
+        tid = await self.submit()
+        uid, plan = self.plan(tid)
+        self.assertGreater(len(plan['items']), 1)
+        for i in range(len(plan['items'])):
+            self.paint(uid,plan,i)
+        timeline = page(self.store,self.pid,self.sid)
+        bubbles = timeline['turns'][-1]['desktop_publications'][0]['visible']
+        expected = [m['presented_at'] for m in bubbles]
+        self.reopen()
+        await self.submit('799')
+        packet = self.providers.bodies[-1][1]
+        previous = next(m for m in packet['dialogue'] if m['role']!='user')
+        times = previous['message_times']
+        self.assertEqual([m['recorded_at'] for m in times], expected)
+        self.assertEqual([previous['text'][m['start']:m['end']] for m in times],
+                         [m['text'] for m in bubbles])
+        with self.store.connection() as db:
+            from persona_runtime.recall_runtime import render
+            body = render([{'kind':'dialogue','source_type':'assistant_statement','source_id':previous['id'],
+                            'text':previous['text']}], db, delivery_times=True)
+            self.assertEqual(json.loads(body.splitlines()[-1])['message_times'], times)
+            self.assertEqual(message_time.event_times(db,[previous['id']])[previous['id']][0]['receipt_id'],
+                             bubbles[0]['receipt_id'])
+
     async def test_complete_visible_history_and_memory_source(self):
         tid=await self.submit()
         uid,plan=self.plan(tid)
@@ -189,6 +221,7 @@ class OrdinaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.chat.get(tid)['error_code'],'reply_decision_required')
         self.chat=ChatEngine(self.store,self.config)
         await self.chat.retry(tid)
+        self.assertEqual(self.chat.get(tid)['error_code'],'private_reply_transport_unavailable')
         self.assertFalse(self.out.list(self.pid,self.sid,tid))
 
     def consent(self,enable):

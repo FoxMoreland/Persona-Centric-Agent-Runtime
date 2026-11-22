@@ -55,6 +55,7 @@ class SelectorService:
             raise RuntimeErrorBase('selector_prompt_snapshot_mismatch')
         now=time.time();cfg=self.config.load();limit=cfg['model']['hourly_limit']
         conn.execute("UPDATE quota_reservations SET state='expired' WHERE state='active' AND expires_epoch<=?",(now,))
+        old=None
         if turn:
             current=conn.execute('SELECT * FROM turns WHERE id=?',(turn['id'],)).fetchone()
             if not current or current['status']!='queued' or current['cancelled_at'] or current['execution_revision']!=turn['execution_revision']:
@@ -66,7 +67,9 @@ class SelectorService:
             from .references import prepare
             prepare(conn,dict(current))
             old=conn.execute('SELECT id FROM character_selection_attempts WHERE turn_id=? AND execution_revision=?',(turn['id'],turn['execution_revision'])).fetchone()
-            if old:raise SemanticFailure('selector_already_attempted')
+            if old and not conn.execute('''SELECT 1 FROM desktop_stage_attempts WHERE turn_id=? AND stage='selector'
+                AND operation IS NOT NULL AND replacement IS NULL''',(turn['id'],)).fetchone():
+                raise SemanticFailure('selector_already_attempted')
         from .call_limits import gate,granted,turn_scope as quota_turn,CallLimitPending
         scope=quota_turn(turn) if turn else 'selector/'+str(operation_id)
         bypass=granted(conn,scope)
@@ -81,6 +84,12 @@ class SelectorService:
         aid=identifier();tid=turn['id'] if turn else None;revision=turn['execution_revision'] if turn else None
         from .archive import turn_scope
         scope=turn_scope(conn,turn) if turn else {'persona_id':persona_id,'user_id':LOCAL_USER_ID,'channel':'test'}
+        if old:
+            aid=old[0]
+            conn.execute("UPDATE character_selection_attempts SET status='running',error_code=NULL,finished_epoch=NULL WHERE id=?",(aid,))
+            conn.execute("UPDATE quota_reservations SET state='active',expires_epoch=? WHERE turn_id=? AND execution_revision=?",
+                         (now+min(SELECTOR_TIMEOUT_MAX,model['timeout'])+60,tid,revision))
+            return aid
         conn.execute('INSERT INTO character_selection_attempts (id,turn_id,execution_revision,persona_id,user_id,purpose,operation_id,status,started_epoch,model_snapshot,input_hash,candidate_hash,scope_json,created_at) VALUES(?,?,?,?,?,?,?,\'running\',?,?,?,?,?,?)',
                      (aid,tid,revision,persona_id,LOCAL_USER_ID,'conversation' if turn else 'provider_probe',operation_id,now,encode(model),digest(payload),pool['fingerprint'],encode(scope),timestamp()))
         manifest={'context_id':identifier(),'task_type':'character_selection','purpose':'conversation' if turn else 'provider_probe',
@@ -110,8 +119,25 @@ class SelectorService:
             with self.store.connection(write=True) as conn:
                 aid=self._start(conn,persona_id,turn,model,payload,pool,operation_id,prompt_version=prompt_version)
                 initial_source=digest(validate_snapshot(conn,turn)) if turn else None
+                watch = bool(turn and turn['channel']=='desktop' and conn.execute(
+                    'SELECT 1 FROM desktop_turn_checkpoints WHERE turn_id=?',(turn['id'],)).fetchone())
+                prior_audit=[]
+                if watch:
+                    from . import desktop_turn_retry as stage_retry
+                    previous=conn.execute('SELECT usage_json FROM character_selection_attempts WHERE id=?',(aid,)).fetchone()
+                    prior_audit=json.loads(previous[0] or '{}').get('generation_retry',{}).get('attempts',[])
+                    wire_id=identifier()
+                    binding=digest([initial_source,model,payload,pool['fingerprint'],prompt_version])
+                    stage_retry.start(conn,turn['id'],wire_id,'selector',binding)
+            def history(value):
+                if not prior_audit or not value or 'generation_retry' not in value:
+                    return value
+                from .generation_retry import aggregate
+                retry_state=value['generation_retry']
+                return aggregate(retry_state|{'attempts':[ *prior_audit, *retry_state['attempts']]})
             def save(value):
                 nonlocal usage
+                value=history(value)
                 usage=value
                 with self.store.connection(write=True) as conn:
                     changed=conn.execute("UPDATE character_selection_attempts SET usage_json=? WHERE id=? AND status='running'",(encode(value),aid)).rowcount
@@ -146,13 +172,21 @@ class SelectorService:
                     if turn:
                         conn.execute("UPDATE quota_reservations SET expires_epoch=? WHERE turn_id=? AND execution_revision=? AND state='active'",(time.time()+min(SELECTOR_TIMEOUT_MAX,model['timeout'])+60,turn['id'],turn['execution_revision']))
             try:
-                completion=await audited_complete(self.client,model|{'_json_output':True,'_character_selection':True,'timeout':min(SELECTOR_TIMEOUT_MAX,model['timeout'])},payload,
+                generation=audited_complete(self.client,model|{'_json_output':True,'_character_selection':True,'timeout':min(SELECTOR_TIMEOUT_MAX,model['timeout'])},payload,
                     validate=lambda text:parse_output(text,pool,limit),save=save,before_attempt=before_attempt,
                     prior_failures=getattr(self,'retry_prior_failures',0),timeout_code='selector_timeout',paths=self.store.paths)
+                completion=await stage_retry.observe(self.store,wire_id,generation) if watch else await generation
                 text,usage=completion;answer=parse_output(text,pool,limit)
+                usage=history(usage)
+                if watch:
+                    with self.store.connection(write=True) as conn:
+                        stage_retry.mark(conn,wire_id,'received')
             except BaseException as exc:
                 error='selector_interrupted' if isinstance(exc,asyncio.CancelledError) else str(exc)
                 pending=getattr(exc,'pending_task',None)
+                if watch:
+                    with self.store.connection(write=True) as conn:
+                        stage_retry.mark_error(conn,wire_id,exc,False)
                 raise
             finally:
                 with self.store.connection(write=True) as conn:

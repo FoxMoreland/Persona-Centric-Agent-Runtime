@@ -125,6 +125,20 @@ def preview_provenance(condition):
                 and not re.search('仅|适用|平台|地区|服|渠道|上线',condition))
 
 
+def source_description(state,normalized):
+    if state=='rumor' and normalized in {
+            'likely','probably','possibly','reportedly','unconfirmed','预计','可能','据称','推测','暂未确认','尚未确认'}:
+        # Certainty travels with the evidence; it does not constrain the user's query.
+        return True
+    if state=='rumor' and re.fullmatch(
+            r'(?:据|按|基于)?(?:玩家|社区|媒体|网友)(?:们)?(?:猜测|推测|认为|推断|猜想|传闻)'
+            r'|(?:according to |based on )(?:community|player|media) (?:reports?|speculation|rumou?rs?)',normalized):
+        return True
+    if state in ('rumor','announced') and preview_provenance(normalized):
+        return True
+    return False
+
+
 def _bound_read(db,turn,base,question,ids,*,after_commit=None,for_selection=False):
     """Check each indexed revision independently before J5 can judge compound question coverage."""
     text=library._norm(question)
@@ -142,16 +156,7 @@ def _bound_read(db,turn,base,question,ids,*,after_commit=None,for_selection=Fals
         def applicable(condition):
             normalized=library._norm(condition)
             if normalized in text:return True
-            if spec['state']=='rumor' and normalized in {
-                    'likely','probably','possibly','reportedly','unconfirmed','预计','可能','据称','推测','暂未确认','尚未确认'}:
-                # Certainty travels with the evidence; it does not constrain the user's query.
-                return True
-            if spec['state']=='rumor' and re.fullmatch(
-                    r'(?:据|按|基于)?(?:玩家|社区|媒体|网友)(?:们)?(?:猜测|推测|认为|推断|猜想|传闻)'
-                    r'|(?:according to |based on )(?:community|player|media) (?:reports?|speculation|rumou?rs?)',normalized):
-                return True
-            if spec['state'] in ('rumor','announced') and preview_provenance(normalized):
-                return True
+            if source_description(spec['state'],normalized):return True
             if versioned:
                 if library.revisions.match_condition(text,condition) is not None:return True
                 dimension=re.match(r'^(平台|渠道|地区|区服|服务器)\s*[:是为]',normalized)
@@ -170,7 +175,7 @@ def _bound_read(db,turn,base,question,ids,*,after_commit=None,for_selection=Fals
             canonical+=' 传闻'
         outcome,items=library.search(db,turn['persona_id'],turn['session_id'],base['consent'],canonical,
                                      instance=base['instance'],after_commit=after_commit,fact_id=ident,
-                                     versioned=versioned,intent_question=question,for_selection=typed)
+                                     versioned=versioned,intent_question=question,for_selection=typed,alternatives=True)
         if outcome=='hit':
             for f in items:
                 key=f.get('revision_id',f['id'])
@@ -508,8 +513,6 @@ def _admit(db,turn,base,request,candidate,verified_at):
     suffix='' if _BOUNDARY.fullmatch(quote[-1]) else _BOUNDARY.split(source['text'][begin+len(quote):])[0]
     if _LIMIT.search(prefix) or _LIMIT.search(suffix):
         raise RuntimeErrorBase('knowledge_study_omitted_qualifier')
-    if re.search(r'传闻|爆料|据称|推测',source['title']+' '+quote) and candidate['state']!='rumor':
-        raise RuntimeErrorBase('local_knowledge_evidence_mismatch')
     value=library._text(candidate['value'],600)
     subject=library._text(candidate['subject'],128)
     if (candidate['state']=='rumor' and library._norm(value)==library._norm(subject)
@@ -710,20 +713,27 @@ def commit(flow,turn,base,state,result,*,step='organize'):
 
 def _store_semantic(db,turn,base,query,signature,attempt_id,result):
     from .private_lookup import evidence
+    from . import persona_world
     tid=turn['id']
     data=evidence(db,turn['persona_id'],turn['session_id'],tid,active_turn=tid)
+    persona_world.register_baseline_acquisition(db,turn,base,signature)
     ids=semantic.store_sources(db,turn,base,data,query,semantic.organizer_labels(result.get('raw')))
     db.execute('INSERT INTO knowledge_study_commits VALUES(?,?,?,?,?,?,?)',
                (tid,attempt_id,signature,'committed' if ids else 'insufficient',encoded(ids),0,timestamp()))
     db.execute('INSERT OR IGNORE INTO knowledge_control VALUES(?,?)',('private.semantic.sources.'+tid,'true'))
+    if ids and persona_world.active(db,turn,base):
+        persona_world.index_turn(db,base['instance'],turn['persona_id'],tid)
     record(db,tid,'knowledge_study_committed' if ids else 'knowledge_study_insufficient')
 
 
 async def _semantic_reread(flow,turn,base,material,context):
     import asyncio
+    from . import lookup_target
+    from . import public_lookup, research_contract
     from .private_lookup import intent
     tid=turn['id']
     with flow.store.connection() as db:
+        need=research_contract.request(db,tid)
         saved=db.execute('SELECT * FROM knowledge_study_reads WHERE turn_id=?',(tid,)).fetchone()
         if saved:
             facts=route.current_facts(db,turn,intent(db,tid),base['consent'],saved,after_commit=tid) if saved['outcome']=='hit' else []
@@ -731,15 +741,49 @@ async def _semantic_reread(flow,turn,base,material,context):
         original=route.query(db,turn,context['target'])
         question=route.resolved_query(db,turn,context['target'],original,base['consent'],base['instance'])
         ids=json.loads(_commit(db,tid)['fact_ids'])
-        candidates=semantic.materials(db,turn,base,original,ids=ids)
-    facts=await asyncio.to_thread(semantic.rank,flow.store.paths,question,candidates)
+        target_proof = lookup_target.for_query(db,tid)
+        eligibility = need['eligibility_query'] if need else question if target_proof else original
+        initial=route.receipt(db,tid)
+        if initial and initial['outcome']=='partial' and (ids or need):
+            prior=route.current_facts(db,turn,intent(db,tid),base['consent'],initial)
+            old_ids=[f['id'] for f in prior]
+            if need and old_ids and len(set(ids+old_ids))>semantic.PASSAGE_LIMIT:
+                ids=list(dict.fromkeys([*ids[:semantic.PASSAGE_LIMIT-1],*old_ids,*ids[semantic.PASSAGE_LIMIT-1:]]))
+            else:
+                ids=list(dict.fromkeys([*ids,*old_ids]))
+        candidates=route.research_passages(db,turn,base,eligibility,ids=ids,resolution=target_proof)
+        if target_proof:
+            candidates=lookup_target.current_enough(candidates,target_proof)
+        reviewed=public_lookup.active(db,tid)
+    if reviewed:
+        by_id={f['id']:semantic.public_material(f) for f in candidates}
+        facts=[by_id[ident] for ident in ids if ident in by_id]
+    else:
+        facts=await asyncio.to_thread(semantic.rank,flow.store.paths,question,candidates)
+    if need:
+        with flow.store.connection() as db:
+            offered=research_contract.restore_offer(db,tid,need,'readback',facts[:semantic.PASSAGE_LIMIT],
+                                    lambda ids:route.pinned_research_passages(db,turn,base,eligibility,ids,target_proof))
+        def check(db):
+            root,live,actual=flow._snapshot(db,tid)
+            research_contract.validate_request(db,root,base,context['target'])
+            public_lookup.require_order(db,flow.entry.config,root,base,intent(db,tid))
+            if (live!=base or actual!=material or (offered and route.pinned_research_passages(db,root,base,eligibility,
+                    [f['id'] for f in offered],target_proof)!=offered)):
+                raise RuntimeErrorBase('private_reply_source_changed')
+        receipt=await research_contract.assess(flow,turn,base,material,need,offered,'readback',check)
+        facts=research_contract.selected_facts(receipt,offered)
     selected=[f['id'] for f in facts]
     with flow.store.connection(write=True) as db:
         _,live,actual=flow._snapshot(db,tid)
-        if live!=base or actual!=material or (selected and semantic.pinned(db,turn,base,original,selected)!=facts):
+        if live!=base or actual!=material or (selected and route.pinned_research_passages(db,turn,base,eligibility,selected,target_proof)!=facts):
             raise RuntimeErrorBase('private_reply_source_changed')
         db.execute('INSERT INTO knowledge_study_reads VALUES(?,?,?,?,?,?,?)',(tid,fingerprint(question),
                    'hit' if facts else 'insufficient',encoded(selected),timestamp(),None,0))
+        if need and facts:
+            from . import persona_world
+            if persona_world.enabled(db,base['instance'],turn['persona_id']):
+                persona_world.index_turn(db,base['instance'],turn['persona_id'],tid)
         record(db,tid,'knowledge_study_read')
     return context|{'status':'local_hit' if facts else 'insufficient','lookup_outcome':'studied','facts':facts,'j5_receipt':None}
 
@@ -760,7 +804,7 @@ async def reread(flow,turn,base,material,context):
             outcome,facts=_bound_read(db,turn,base,query,json.loads(committed['fact_ids']),after_commit=tid,for_selection=True)
             return query,outcome,facts,True
         outcome,facts=library.search(db,turn['persona_id'],turn['session_id'],base['consent'],query,
-                                     instance=base['instance'],after_commit=tid,versioned=versioned)
+                                     instance=base['instance'],after_commit=tid,versioned=versioned,alternatives=True)
         ids=set(json.loads(committed['fact_ids']))
         facts=[f for f in facts if f['id'] in ids]
         query_bound=False
@@ -806,16 +850,25 @@ async def reread(flow,turn,base,material,context):
 
 async def finish(flow,turn,base,material,context):
     from .private_lookup import _call
+    from . import public_lookup, public_lookup_study
     tid=turn['id']
     with flow.store.connection() as db:
+        signed=public_lookup.active(db,tid)
         paper=db.execute('SELECT outcome FROM private_lookup_records WHERE turn_id=?',(tid,)).fetchone()
         if not paper or paper['outcome']!='acquired':
             outcome=paper['outcome'] if paper else 'unavailable'
-            return context|{'status':outcome,'lookup_outcome':outcome}
+            result=context|{'status':outcome,'lookup_outcome':outcome}
+            if signed:
+                result['public_result']=public_lookup.result(db,tid)
+                if result['public_result']['outcome']=='no_relevant_evidence':
+                    result.update(status='insufficient',lookup_outcome='no_relevant_evidence')
+            return _with_partial(db,turn,base,result)
         committed=_commit(db,tid)
         vector=semantic.active(db,tid)
     source_only=vector and (not getattr(flow.providers,'study_enabled',False) or getattr(flow.providers,'structured_study',False))
-    if not committed and source_only:
+    if not committed and signed:
+        await public_lookup_study.commit(flow,turn,base,material)
+    elif not committed and source_only:
         from .private_lookup import _tool_scope
         with flow.store.connection(write=True) as db:
             if not semantic.active(db,tid):raise RuntimeErrorBase('private_lookup_scope_changed')
@@ -832,4 +885,19 @@ async def finish(flow,turn,base,material,context):
         if state not in ('received','empty') and not (vector and state=='failed'):
             raise RuntimeErrorBase('knowledge_study_unknown' if state=='unknown' else 'knowledge_study_failed')
         commit(flow,turn,base,state,result,step=step)
-    return await reread(flow,turn,base,material,context)
+    result=await reread(flow,turn,base,material,context)
+    if signed:
+        with flow.store.connection() as db:
+            result['public_result']=public_lookup.result(db,tid)
+            if not result.get('facts'):
+                result=_with_partial(db,turn,base,result)
+    return result
+
+
+def _with_partial(db,turn,base,result):
+    from .private_lookup import intent
+    initial=route.receipt(db,turn['id'])
+    if initial and initial['outcome']=='partial':
+        facts=route.current_facts(db,turn,intent(db,turn['id']),base['consent'],initial)
+        return result|{'status':'local_hit','lookup_outcome':'local_partial','facts':facts,'j5_receipt':None}
+    return result

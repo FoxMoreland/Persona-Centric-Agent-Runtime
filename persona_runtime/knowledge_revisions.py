@@ -33,8 +33,9 @@ def requested_state(text):
     matches = _STATE.findall(text)
     if not matches:
         return None
-    return {'爆料':'rumor','传闻':'rumor','公告':'announced','官宣':'announced',
-            '实装':'observed','实测':'observed'}[matches[-1]]
+    labels={'爆料':'rumor','传闻':'rumor','公告':'announced','官宣':'announced','实装':'observed','实测':'observed'}
+    states={labels[m] for m in matches}
+    return states.pop() if len(states)==1 else None
 
 
 def query_parts(text):
@@ -152,7 +153,7 @@ def superseded(db,ident,when,versions,state):
     return False
 
 
-def project(candidates, *, when, today, historical, archived_state, current_only, state, versions, after_commit, fact_id,allow_rumor=False):
+def project(candidates, *, when, today, historical, archived_state, current_only, state, versions, after_commit, fact_id, alternatives=False, question=''):
     """Resolve applicability before freshness, so expired updates cannot revive older values."""
     from .local_knowledge import _norm,_calendar_value,compatible_dates,compatible_launch_sites,clock_precision
     groups={}
@@ -175,15 +176,13 @@ def project(candidates, *, when, today, historical, archived_state, current_only
             rows=[item for item in rows if split_conditions(item[1]['conditions'])[0]=={max(confirmed_versions)}]
         if state:
             rows=[item for item in rows if item[1]['state']==state]
-        elif not allow_rumor or any(s['state']!='rumor' for _,s,_ in rows):
-            rows=[item for item in rows if item[1]['state']!='rumor']
         if not rows:continue
         numbered=[v for _,s,_ in rows for v in split_conditions(s['conditions'])[0]]
         if numbered:
             wanted=versions or {max(numbered)}
             rows=[item for item in rows if split_conditions(item[1]['conditions'])[0]==wanted]
         if not rows:continue
-        if not state and any(s['state']=='observed' for _,s,_ in rows):
+        if not alternatives and not state and any(s['state']=='observed' for _,s,_ in rows):
             rows=[item for item in rows if item[1]['state']!='announced']
         # A newer dated revision of the same URL replaces older statements from that URL.
         latest={}
@@ -211,6 +210,22 @@ def project(candidates, *, when, today, historical, archived_state, current_only
         if dated:
             valid=[row for row,(c,state) in zip(valid,clocks) if not (c and c[0]=='relative' and
                    any(time==c[1] and phase==state and (zone==c[2] or not zone or not c[2]) for time,zone,phase in dated))]
+        if alternatives:
+            # Compare explicit key/value fields only. A prose passage may refer back to a
+            # subject without repeating its name, including when two posters disagree.
+            keys={}
+            asked={}
+            for row,spec,fact in valid:
+                prefix,sep,suffix=fact['text'].strip().partition(fact['value'])
+                if not sep or suffix.strip(' 。.!！;；') or not prefix.endswith((' ',':','：','\t')):
+                    continue
+                label=prefix.rstrip(' ：:\t').casefold()
+                if re.fullmatch(r'[a-z_][\w.-]*',label):
+                    keys[fact['id']]=label
+                    if label in question and label in map(_norm,spec['attributes']):
+                        asked.setdefault(row['id'],set()).add(label)
+            valid=[item for item in valid if item[2]['id'] not in keys or item[0]['id'] not in asked
+                   or keys[item[2]['id']] in asked[item[0]['id']]]
         equal={}
         for r,s,f in valid:
             slot=knowledge_catalog.entry(f)
@@ -220,7 +235,7 @@ def project(candidates, *, when, today, historical, archived_state, current_only
             revision=(value,s['state'],tuple(sorted(split_conditions(s['conditions'])[0])),s['valid_from'],s['valid_until'])
             equal.setdefault(revision,[]).append((r,s,f))
         # Conflicts are assessed before selecting a specific receipt or fresh acquisition.
-        if len({k[0] for k in equal})>1:
+        if not alternatives and len({k[0] for k in equal})>1:
             combined=[f for _,_,f in valid]
             from .knowledge_coverage import compatible_places
             if not (compatible_dates(combined) or compatible_launch_sites(combined) or compatible_places(combined)):
@@ -247,7 +262,7 @@ def project(candidates, *, when, today, historical, archived_state, current_only
     if not selected:return outcome,[]
     # Preserve the existing order for numbered outlines and the local material budget.
     order=knowledge_catalog.catalog_order(selected)
-    if order is None and len({(p[:2] if (p:=knowledge_catalog.entry(f)) else None) for f in selected})>1:
+    if not alternatives and order is None and len({(p[:2] if (p:=knowledge_catalog.entry(f)) else None) for f in selected})>1:
         return 'conflict',[]
     if order:selected.sort(key=lambda f:order[f['id']])
     return 'hit',selected[:8]

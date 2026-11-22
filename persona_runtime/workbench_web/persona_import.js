@@ -25,6 +25,11 @@ window.pcarLive = (() => {
     const known={session_sealed:"这段对话已封存，可新建对话继续。",session_not_current:"这段对话已归档，可返回当前会话继续。",
       reference_unavailable:"引用的消息已失效，请重新选择。",version_conflict:"内容已更新，请重新打开核对。",
       credential_required_for_new_endpoint:"请填写新网关的 API Key。",session_privacy_recipients_changed:"接收方已变化，请重新打开授权设置。",
+      main_reply_assembly_unavailable:"请先启用候选、录入密钥并确认本机正文装配。",
+      main_reply_session_authorization_required:"请在主回复模型设置中确认当前会话的 OpenRouter 正文授权。",
+      main_reply_private_route_required:"Hydrogen 适用于已登记私聊装配的桌面角色。",
+      main_reply_retry_wait:"OpenRouter 正在限流，请在等待时间结束后重试。",
+      main_reply_retry_unavailable:"此尝试已有回执或已达到重试上限，请核对当前记录。",
       native_public_task_invalid:"请选取可公开查找的片段，或跳过本次查找。",private_lookup_scope_changed:"本轮授权或原消息已变化，请重新核对。",
       private_lookup_confirmation_closed:"本轮查找范围已经处理。",
       invalid_model_connection:"请核对 HTTPS 接口与模型名。",session_privacy_operation_conflict:"授权操作已变化，请重新打开核对。",
@@ -1305,16 +1310,19 @@ window.pcarLive = (() => {
     if(polling||!active)return;
     const p=currentPerson(),s=currentSession(),id=epoch;
     if(!p||!s||!s.id){if(s){s.loading=false;s.restore=null;}return;}
-    if(s.paging)return;
+    if(s.paging||s.sending||s.bufferWorking)return;
+    const bufferRevision=s.bufferRevision||0;
+    const current=()=>id===epoch && s===currentSession() && !stopped &&
+      bufferRevision===(s.bufferRevision||0) && !s.sending && !s.bufferWorking;
     polling=true;
     try{
       if(paintDecision){
-        await api().presentation_decide(presenter,paintDecision.id,paintDecision.state);
+        await api().presentation_decide(presenter,paintDecision.id,paintDecision.state,paintDecision.reason??null);
         paintDecision=null;
       }
       if(await api().presentation_reconcile())s.version=null;
       let result=await api().live_page(p.id,s.id,s.version,null,null,s.version===null&&s.restore?.kind==="native"?s.restore.position:null);
-      if(id!==epoch||s!==currentSession()||stopped)return;
+      if(!current())return;
       const sourceVersion=JSON.stringify(result.source_version);
       const rightsChanged=s.sourceVersion!==undefined && s.sourceVersion!==sourceVersion;
       if(rightsChanged || (result.reset && s.version!==null && s.version!==undefined)){
@@ -1322,7 +1330,7 @@ window.pcarLive = (() => {
         s.restore=reading||s.restore;
         if(rightsChanged || reading?.kind==="native"){
           result=await api().live_page(p.id,s.id,null,null,null,reading?.kind==="native"?reading.position:null);
-          if(id!==epoch||s!==currentSession())return;
+          if(!current())return;
         }
       }
       if(rightsChanged){
@@ -1343,7 +1351,7 @@ window.pcarLive = (() => {
         s.past=h.rows;s.before=h.before;s.pastNewer=mark?.kind==="import" && h.rows.length?h.rows.at(-1).seq:null;s.historyReady=true;
       }
       const submissions=await api().live_submissions(p.id,s.id);
-      if(id!==epoch||s!==currentSession())return;
+      if(!current())return;
       const scopeChanged=s.readOnly!==Boolean(result.sealed||s.id!==p.writableSession);
       s.readOnly=Boolean(result.sealed||s.id!==p.writableSession);
       const bufferChanged=JSON.stringify(s.inputBuffer)!==JSON.stringify(result.input_buffer);
@@ -1364,7 +1372,7 @@ window.pcarLive = (() => {
         await saveDraft(s,p.id,accepted.draft_revision);
       }
       if(settled.length)await api().live_ack_submissions(p.id,s.id,settled);
-      if(id!==epoch||s!==currentSession())return;
+      if(!current())return;
       if(result.turns!==null){
         const atEnd=!s.restore && !s.newer && timeline.scrollHeight-timeline.scrollTop-timeline.clientHeight<24;
         const position=capture();
@@ -1373,13 +1381,14 @@ window.pcarLive = (() => {
         }else render({scrollToEnd:atEnd});
       }else if(changed || accepted || rightsChanged || scopeChanged || bufferChanged) render();
       s.version=result.version;
-      s.publicSearchAvailable=result.public_search_available;
       s.longReplyAvailable=result.long_reply_available;
-      s.sessionSearchGranted=Boolean(result.session_search_granted);
       updateSendButton();
       if(s.restore){restoreReading(s.restore);s.restore=null;disconnectedReading=null;}
       s.loading=false;
       if(!result.presentable||document.hidden||dialog.open||quotaDialog.open||repairDialog.open||!await api().presentation_visible()||s!==currentSession()||id!==epoch)return;
+      const recovered=s.turns.find(t=>t.inline_reply?.confirmable && !(t.desktop_publications||[]).some(
+        plan=>plan.background_lookup && ["pending","partial"].includes(plan.state)));
+      if(recovered && !s.readOnly && await confirmInlineMain(p,s,id,recovered)){s.version=null;return;}
       const pending=result.pending_notices?.[0];
       if(pending){
         const args={...pending,persona_id:p.id,session_id:s.id};
@@ -1394,33 +1403,43 @@ window.pcarLive = (() => {
       if(last && Date.now()-Date.parse(last.presented_at)<item.delay_ms)return;
       const owner=speech.kind==="legacy"?{turn_id:speech.turn_id}:{utterance_id:speech.utterance_id};
       await presentMessage(s,id,speech.kind,{...owner,persona_id:p.id,session_id:s.id,publication_id:speech.publication_id,
-        revision:speech.revision,ordinal:item.ordinal});
+        revision:speech.revision,ordinal:item.ordinal},speech.source_kind==="maibot_private_reply" && speech.phase==="main");
       s.version=null;
     }finally{polling=false;}
   }
-  async function presentMessage(s,id,kind,args){
-    if(!await checkPaintSlot(s,id))return;
+  async function presentMessage(s,id,kind,args,timelineMain=false){
+    if(!timelineMain && !await checkPaintSlot(s,id))return;
     const claim=newId();
-    paintDecision={id:claim,state:"not_presented"};
+    paintDecision={id:claim,state:"not_presented",reason:"bridge_error"};
     const offer=await api().presentation_begin(presenter,claim,kind,args);
     paintDecision=null;
     if(!offer)return;
-    let state="unknown";
-    try{state=await paint(s,id,offer.text);}
+    let decision={state:"unknown",reason:"bridge_error"};
+    try{decision=await paint(s,id,offer,timelineMain);}
     finally{
-      paintDecision={id:offer.id,state};
-      await api().presentation_decide(presenter,offer.id,state);
+      paintDecision={id:offer.id,...decision};
+      await api().presentation_decide(presenter,offer.id,decision.state,decision.reason);
       paintDecision=null;
       await api().presentation_reconcile();
     }
   }
   function paintPoint(s,id,bubble){
-    if(s!==currentSession()||id!==epoch||document.hidden||dialog.open||quotaDialog.open||repairDialog.open||!bubble.isConnected)return null;
+    if(s!==currentSession()||id!==epoch)return {reason:"session_changed"};
+    if(document.hidden)return {reason:"hidden"};
+    if(dialog.open||quotaDialog.open||repairDialog.open)return {reason:"dialog_open"};
+    if(!bubble.isConnected)return {reason:"detached"};
     const rect=bubble.getBoundingClientRect(),area=timeline.getBoundingClientRect();
     const left=Math.max(0,rect.left,area.left),right=Math.min(innerWidth,rect.right,area.right);
     const top=Math.max(0,rect.top,area.top),bottom=Math.min(innerHeight,rect.bottom,area.bottom);
+    if(right<=left||bottom<=top)return {reason:"outside"};
     const x=(left+right)/2,y=(top+bottom)/2;
-    return right>left && bottom>top && bubble.contains(document.elementFromPoint(x,y)) ? {x,y} : null;
+    return bubble.contains(document.elementFromPoint(x,y)) ? {x,y} : {reason:"covered"};
+  }
+  async function visibility(s,id,bubble){
+    const hit=paintPoint(s,id,bubble);
+    if(hit.reason)return hit.reason;
+    const visible=await api().presentation_visible(hit.x*devicePixelRatio,hit.y*devicePixelRatio);
+    return paintPoint(s,id,bubble).reason || (visible?null:"native_covered");
   }
   function paintSlot(){
     const bubble=el("p","",timeline.querySelector(".conversation-inner")||timeline);
@@ -1432,31 +1451,63 @@ window.pcarLive = (() => {
   async function checkPaintSlot(s,id){
     const previous=timeline.scrollTop,bubble=paintSlot();
     try{
-      const hit=paintPoint(s,id,bubble);
-      return hit && await api().presentation_visible(hit.x*devicePixelRatio,hit.y*devicePixelRatio) && paintPoint(s,id,bubble);
+      return !await visibility(s,id,bubble);
     }finally{bubble.remove();if(s===currentSession()&&id===epoch)timeline.scrollTop=previous;}
   }
-  async function paint(s,id,text){
-    const bubble=paintSlot(),slot=paintPoint(s,id,bubble);
-    if(!slot||!await api().presentation_visible(slot.x*devicePixelRatio,slot.y*devicePixelRatio)||!paintPoint(s,id,bubble)){
-      bubble.remove();return "not_presented";
-    }
-    bubble.textContent=text;bubble.style.opacity="";bubble.scrollIntoView({block:"nearest"});
-    const framed=await new Promise(resolve=>{
-      const expire=()=>finish(false);
+  function paintFrames(){
+    return new Promise(resolve=>{
       let first,second,timer;
       function finish(value){
         clearTimeout(timer);cancelAnimationFrame(first);cancelAnimationFrame(second);
-        document.removeEventListener("visibilitychange",expire);resolve(value);
+        document.removeEventListener("visibilitychange",hidden);resolve(value);
       }
-      document.addEventListener("visibilitychange",expire,{once:true});
-      timer=setTimeout(expire,1500);
-      first=requestAnimationFrame(()=>{second=requestAnimationFrame(()=>finish(true));});
+      const hidden=()=>{if(document.hidden)finish("hidden");};
+      document.addEventListener("visibilitychange",hidden);
+      timer=setTimeout(()=>finish("frame_timeout"),1500);
+      first=requestAnimationFrame(()=>{second=requestAnimationFrame(()=>finish(null));});
     });
-    const point=paintPoint(s,id,bubble);
-    const shown=framed && point && await api().presentation_visible(point.x*devicePixelRatio,point.y*devicePixelRatio) && paintPoint(s,id,bubble);
-    if(!shown)bubble.remove();
-    return shown?"presented":"unknown";
+  }
+  function timelineReady(s,id,node){
+    if(s!==currentSession()||id!==epoch)return "session_changed";
+    if(document.hidden)return "hidden";
+    if(!node?.isConnected||!timeline.contains(node))return "detached";
+    return node.getClientRects().length?null:"outside";
+  }
+  async function confirmInlineMain(person,s,id,turn){
+    const reply=turn.inline_reply;
+    const group=renderedTurns.get(turn.id);
+    if(!group)return false;
+    const nodes=Array.from(group.querySelectorAll("[data-original-fragment]"));
+    function mounted(){
+      return nodes.length===reply.items.length && nodes.every((node,i)=>
+        !timelineReady(s,id,node) && node.dataset.originalFragment===reply.items[i].id &&
+        node.textContent===reply.items[i].text);
+    }
+    if(!mounted()||await paintFrames()||!mounted())return false;
+    const result=await api().live_confirm_inline_main(person.id,s.id,turn.id,reply.publication,
+      reply.revision,reply.items.map(item=>[item.id,item.body_hash]));
+    return result.confirmed;
+  }
+  async function paint(s,id,offer,timelineMain=false){
+    const bubble=paintSlot();
+    bubble.dataset.fragment=offer.fragment;
+    let written=false,confirmed=false;
+    try{
+      const before=timelineMain?timelineReady(s,id,bubble):await visibility(s,id,bubble);
+      if(before)return {state:"not_presented",reason:before};
+      bubble.textContent=offer.text;
+      written=true;
+      bubble.style.opacity="";
+      bubble.scrollIntoView({block:"nearest"});
+      const frame=await paintFrames();
+      const reason=frame || (timelineMain?timelineReady(s,id,bubble):await visibility(s,id,bubble));
+      confirmed=!reason;
+      return {state:confirmed?"presented":"unknown",reason:reason||"confirmed"};
+    }catch(error){
+      return {state:written?"unknown":"not_presented",reason:"bridge_error"};
+    }finally{
+      if(!confirmed)bubble.remove();
+    }
   }
   const memoryStateNames={off:"未开启",waiting_configuration:"等待角色记忆或模型配置",pending:"待整理",
     processing:"正在整理",waiting_quota:"等待后台额度",processed:"已处理",quarantined:"冲突待核",
@@ -1513,7 +1564,7 @@ window.pcarLive = (() => {
     const box=panel("历史消息");
     const source=event.source || {};
     el("p",[source.speaker,source.number && "#"+source.number,
-      event.created_at || "时间待核",source.line && "文件第 "+source.line+" 行"].filter(Boolean).join(" · "),box);
+      (event.timestamp?.precision==="minute" && source.raw_time?source.raw_time:event.created_at) || "时间待核",source.line && "文件第 "+source.line+" 行"].filter(Boolean).join(" · "),box);
     const body=el("p",event.text,box); body.className="import-original";
     if(source.sections?.length>1 || source.sections?.length===1 && source.sections[0].kind!=="body"){
       const kinds={body:"正文",quote:"引用",forward:"转发",attachment:"附件",code:"代码",system:"系统"};
@@ -1553,25 +1604,40 @@ window.pcarLive = (() => {
   }
   function turnNode(t){
     const group=document.createElement("div");group.style.display="contents";
-    const show=(role,text,id)=>stamp(makeBubble(group,role,text),"native",id,t.position);
-    for(const m of t.input_members||[])if(m.text)show("user",m.text,m.id);
+    const show=(role,text,id,time)=>stamp(makeBubble(group,role,text,time),"native",id,t.position);
+    for(const m of t.input_members||[])if(m.text)show("user",m.text,m.id,m.timestamp);
     const plans=t.desktop_publications||[];
     const notices=plans.filter(v=>v.phase==="search_notice");
-    if(t.search_notice&&!notices.some(v=>v.kind==="speech"))show("persona",t.search_notice.text,t.search_notice.event_id);
-    else for(const plan of notices)for(const m of plan.visible)show("persona",m.text,m.id);
+    if(t.search_notice&&!notices.some(v=>v.kind==="speech"))show("persona",t.search_notice.text,t.search_notice.event_id,t.search_notice.timestamp);
+    else for(const plan of notices)for(const m of plan.visible)show("persona",m.text,m.id,m.receipt_id?{recorded_at:m.presented_at,source:"presented"}:null);
     const main=plans.find(v=>v.phase==="main");
-    if(main){for(const m of main.visible)show("persona",m.text,m.id);}
+    const awaitingNotice=notices.some(plan=>plan.background_lookup && ["pending","partial"].includes(plan.state));
+    if(t.inline_reply && !awaitingNotice){
+      const seen=new Map((main?.visible||[]).map(item=>[item.id,item]));
+      for(const item of t.inline_reply.items){
+        const prior=seen.get(item.id);
+        const time=prior?.receipt_id?{recorded_at:prior.presented_at,source:"presented"}:
+          {recorded_at:t.inline_reply.received_at,source:"reply_received"};
+        show("persona",item.text,item.id,time).dataset.originalFragment=item.id;
+      }
+    }else if(main){for(const m of main.visible)show("persona",m.text,m.id,m.receipt_id?{recorded_at:m.presented_at,source:"presented"}:null);}
     else if(t.status==="completed" && t.reply){
       const parts=t.display_bubbles||[t.display_reply||t.reply];
-      show("persona",parts[0],t.reply_event_id);
-      for(const part of parts.slice(1))makeBubble(group,"persona",part);
+      show("persona",parts[0],t.reply_event_id,parts.length===1?{recorded_at:t.reply_recorded_at,source:"event_recorded"}:null);
+      for(const part of parts.slice(1))makeBubble(group,"persona",part,null);
     }
     if(t.feedback_available)button(group,"这条不像",()=>feedback(currentPerson().id,t.id));
     if(t.lookup_confirmation)button(group,"确认本轮查找范围",async()=>{
       const pid=currentPerson().id,s=currentSession(),box=panel("本轮查找范围");
-      el("p","选取本轮消息中允许发给搜索服务的原文，也可以跳过本次查找。",box);
-      const field=el("textarea",null,el("label","查找片段",box));
-      for(const m of t.input_members||[])button(box,"选用 · "+m.text.slice(0,36),()=>{field.value=m.text;field.focus();});
+      const proposed=t.lookup_target_status==="needs_public_scope";
+      const invalid=t.lookup_target_status==="invalid";
+      const clarify = proposed || invalid || t.lookup_target_status==="ambiguous" || t.lookup_target_status==="needs_consent";
+      el("p",proposed?"这是按语境找到的查找目标。确认或编辑后，仅将此次确认的内容用于本轮公开查找。":
+        invalid?"这次没能定位要查的资料。可以填入对象和想核对的内容，或跳过查找继续聊天。":
+        clarify?"你指的是哪个公开对象？可以在这里补充查找目标。":"选取本轮消息中允许发给搜索服务的原文，也可以跳过本次查找。",box);
+      const field=el("textarea",null,el("label",clarify?"公开查找目标":"查找片段",box));
+      if(proposed)field.value=t.lookup_proposal||"";
+      if(!clarify)for(const m of t.input_members||[])button(box,"选用 · "+m.text.slice(0,36),()=>{field.value=m.text;field.focus();});
       async function resume(text){
         if(currentPerson()?.id!==pid||currentSession()!==s)return;
         await api().live_lookup_confirm(pid,s.id,t.id,t.lookup_confirmation,newId(),text);
@@ -1580,17 +1646,56 @@ window.pcarLive = (() => {
       button(box,"确认并继续本轮",()=>resume(field.value.trim()));
       button(box,"跳过本次查找",()=>resume(null));
     });
+    if(t.retained_lookup)el("small","本轮沿用了上轮查回的资料。",group);
     for(const [show,kind,title] of [[t.role_long_detail,"long","查看角色长文"],[t.research_detail,"research","查看本轮查找资料"]]){
       if(show)button(group,title,async()=>{
         const pid=currentPerson().id,s=currentSession();
         const data=await api().live_reply_detail(pid,s.id,t.id,kind);
+        const citations=kind==="research"&&t.used_sources?await api().live_reply_detail(pid,s.id,t.id,"citations"):[];
         if(currentPerson()?.id!==pid||currentSession()!==s)return;
         const box=panel(title);
-        el("p",kind==="long"?data.body:data.notes,box).style.whiteSpace="pre-wrap";
-        for(const source of data.sources||[]){
-          const item=el("details",null,box);el("summary",source.title,item);
+        if(citations.length){
+          const used=el("details",null,box);
+          el("summary","这条回复引用的原文",used);
+          for(const item of citations){
+            el("p",item.claim,used);el("blockquote",item.quote,used);
+            el("small",[item.title,item.url].filter(Boolean).join(" · "),used);
+          }
+        }
+        if(kind==="research" && t.public_lookup){
+          const names={native:"原生检索",search:"公开搜索",fetch:"读取网页"};
+          const states={received:"已返回",sending:"等待回执",unsent:"确认未发送",unknown:"结果待核对",failed:"失败"};
+          for(const call of t.public_lookup.calls)el("small",names[call.step]+" · "+states[call.state]+
+            (call.results!=null?" · "+call.results+" 条来源":""),box);
+          if(data.question)el("p","公开查询 · "+data.question,box);
+          if(t.public_lookup.outcome==="partial_evidence")el("p","本轮资料只覆盖了问题的一部分。",box);
+          if(data.updated_at)el("p","资料核验于 "+new Date(data.updated_at).toLocaleString(),box);
+        }
+        if(data.queries){
+          const coverage={complete:"可答",partial:"部分可答",missing:"缺资料",unconfirmed:"判断未完成",clarify:"所指待明确"};
+          const tools={not_dispatched:"仅查本地",acquired:"补查已取得资料",empty:"补查未取得资料",failed:"补查失败"};
+          for(const query of data.queries){
+            el("p",query.text,box);
+            el("small",[coverage[query.result],tools[query.tool],query.sources.length?"来源 "+query.sources.join("、"):""].filter(Boolean).join(" · "),box);
+          }
+        }else{
+          el("p",kind==="research"?data.notes:data.body,box).style.whiteSpace="pre-wrap";
+        }
+        for(const [index,source] of (data.sources||[]).entries()){
+          const item=el("details",null,box);el("summary",data.queries?(index+1)+" · "+source.title:source.title,item);
           el("small",[source.date,source.url].filter(Boolean).join(" · "),item);
           el("p",source.content||source.summary||"",item).style.whiteSpace="pre-wrap";
+          if(source.qualification)el("small",source.qualification,item);
+        }
+        if(data.original){
+          const old=el("details",null,box);
+          el("summary","查看本轮当时的修订",old);
+          el("p",data.original.question+" · "+new Date(data.original.at).toLocaleString(),old);
+          for(const source of data.original.sources){
+            el("small",[source.title,source.date,source.url].filter(Boolean).join(" · "),old);
+            el("p",source.text,old);
+            if(source.qualification)el("small",source.qualification,old);
+          }
         }
       });
     }
@@ -1604,8 +1709,8 @@ window.pcarLive = (() => {
       for(const source of material.sources)el("p",[source.title,source.url].filter(Boolean).join(" · "),sources);
     });
     if(["queued","running"].includes(t.status))button(group,"停止本轮",()=>api().live_cancel(t.id));
-    if(t.error_code){
-      const labels={desktop_network_wait:"网络暂时不可用，消息已保存，连接恢复后会自动继续。",service_restarted:"本轮已中断，原结果待核对，可以继续聊天。",
+    if(t.error_code && !(t.inline_reply && t.error_code==="desktop_presentation_unknown")){
+      const labels={upstream_error:"本轮模型请求失败。",upstream_no_reply:"模型超过 180 秒未回复。",desktop_network_wait:"网络暂时不可用，消息已保存，连接恢复后会自动继续。",service_restarted:"本轮已中断，原结果待核对，可以继续聊天。",
         desktop_storage_wait:"消息已保存，正在等待本机恢复写入。",
         local_knowledge_store_unavailable:"本机知识资料暂时无法读取，本轮消息已保留。",
         local_knowledge_embedding_unavailable:"本机语义检索模型暂时不可用，本轮消息已保留。",
@@ -1620,9 +1725,16 @@ window.pcarLive = (() => {
         reply_decision_required:"本轮尚未取得可用的接话决策。",
         reply_review_pending:"本轮已生成草稿，等待独立复核。",
         private_lookup_confirmation_required:"请确认这条消息的查找范围。",
+        lookup_target_invalid:"检索对象未能对应到本会话的来源，本轮查找已停止。",
+        lookup_target_input_budget_exceeded:"本轮语境超过检索对象模型的输入容量。",
         private_lookup_scope_changed:"本轮资料授权已变化。",
         search_notice_not_fully_presented:"查前发言尚未确认显示。",
         private_reply_review_rejected:"本轮修复后仍未通过复核，可以继续聊天。",
+        lookup_reply_format_invalid:"正文已生成，格式未能处理。",
+        private_reply_model_changed:"本轮正文因模型连接更换而中断。",
+        private_chat_review_version_changed:"本轮绑定的回复装配已更换，处理已停止。",
+        lookup_reply_citation_invalid:"已收到回复，正文引用无法与资料对上。",
+        lookup_reply_unbound:"已收到回复，其中的查证说法缺少本轮依据。",
         private_reply_reference_unavailable:"引用资料已变化，本轮已停止。",
         private_reply_source_changed:"本轮资料已变化，请根据当前对话继续。",
         private_reply_transport_unavailable:"候选回复服务待接入，本轮已保存。",
@@ -1639,18 +1751,69 @@ window.pcarLive = (() => {
         desktop_instance_changed:"原消息属于其他实例，本轮已停止。"};
       const auth=["provider_http_401","provider_http_403","model_not_configured"].includes(t.error_code);
       const limited=t.error_code==="provider_http_429";
-      el("small",auth?"本轮的模型连接未通过验证。":limited?"模型服务暂时限流，本轮已停止。":
+      const result=t.research_progress;
+      const noScope=result?.tool==="not_dispatched" && result.coverage!=="complete" &&
+        ["ambiguous","invalid","input_budget"].includes(result.target_status);
+      const stoppedAfterSearch=result?.tool==="acquired" &&
+        ["private_reply_model_changed","private_chat_review_version_changed"].includes(t.error_code);
+      const interruptedAfterSearch=t.error_code==="private_reply_model_changed"?
+        "本轮已查回资料，正文因模型连接切换而中断。":"本轮已查回资料，正文因回复版本更换而中断。";
+      el("small",stoppedAfterSearch?interruptedAfterSearch:
+        t.lookup_scope_unresolved||noScope?"这轮没能确定查找范围，搜索没有发起。":
+        auth?"本轮的模型连接未通过验证。":limited?"模型服务暂时限流，本轮已停止。":
         labels[t.error_code]||(/unknown|unconfirmed/.test(t.error_code)?"本轮结果待核对，可以继续聊天。":"本轮未完成，原消息已保留。"),group);
+      if(t.stage_retry){
+        const pid=currentPerson().id, session=currentSession(), version=t.stage_retry.version, op=newId();
+        button(group,"重试",async()=>{
+          if(currentPerson()?.id!==pid || currentSession()!==session)return;
+          const result=await api().live_stage_retry(pid,session.id,t.id,version,op);
+          if(result.state==="awaiting_receipt")notify("正在核对原请求的结果。");
+          session.version=null;arm(0);
+        });
+      }
     }else if(["queued","running"].includes(t.status)){
-      const studyPhase={knowledge_studying:"正在整理查到的资料",knowledge_study_received:"正在核对资料出处",knowledge_study_committed:"资料已保存，正在重新检索",
+      const studyPhase={background_search_notice_saved:"查前消息已保存，正在处理查询",research_assessing:"正在核对已有资料能否回答本轮问题",
+        research_preparing_notice:"已有资料还不够，正在准备补查",
+        knowledge_selection:"工具已返回，正在核对资料",knowledge_no_matches:"本轮未取得可回答的新资料",knowledge_studying:"正在整理查到的资料",knowledge_study_received:"正在核对资料出处",knowledge_study_committed:"资料已保存，正在重新检索",
         knowledge_study_insufficient:"已查回资料，正在准备回复",knowledge_study_read:"已完成本地检索，正在准备回复"};
-      el("small",studyPhase[t.phase]||(t.phase==="knowledge_waiting_quota"?"正在等待可用额度":t.phase==="knowledge_search_notice"?"正在等待查前发言显示":
+      const renew=t.research_quota?.next_epoch*1000;
+      const quotaLabel=Number.isFinite(renew)&&renew>Date.now()?"额度预计 "+new Date(renew).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"})+" 恢复":"正在等待模型调用额度";
+      el("small",t.research_quota?quotaLabel:studyPhase[t.phase]||(t.phase==="knowledge_waiting_quota"?"正在等待可用额度":t.phase==="knowledge_search_notice"?"查前消息显示后会自动开始搜索":
         t.status==="queued"?"已受理，正在等待回复":"正在回复"),group);
     }
     return group;
   }
-  function makeBubble(parent,role,text){
-    const p=el("p",text,parent);p.className="bubble "+(role==="user"?"own":"reply");return p;
+  const clocks = new Map();
+  function markTime(node, time) {
+    const at=time?.recorded_at;
+    const date=at?new Date(at):null;
+    if(!date || !Number.isFinite(date.getTime())){
+      node.dataset.clock="时间待核";
+      node.title="时间待核";
+      return;
+    }
+    const precision=time.precision || "second";
+    const source={received:"受理",presented:"显示确认",reply_received:"回复生成",imported:"来源",event_recorded:"事件记录"}[time.source];
+    if(!clocks.has(precision)){
+      const options=precision==="day"?{dateStyle:"short"}:
+        {hour:"2-digit",minute:"2-digit",hourCycle:"h23",...(precision==="minute"?{}:{second:"2-digit"})};
+      clocks.set(precision,new Intl.DateTimeFormat("zh-CN",options));
+    }
+    const local=clocks.get(precision).format(date);
+    node.dataset.clock=(time.source==="event_recorded"?"记录 ":"")+local;
+    const original=precision==="minute"?at.replace(/(:\d\d):00(?=Z|[+-]\d\d:\d\d$|$)/,"$1"):at;
+    node.title=source+"时间 · "+date.toLocaleDateString("zh-CN")+" "+local+" · "+
+      clocks.get(precision).resolvedOptions().timeZone+" · "+original;
+    node.setAttribute("aria-description",node.title);
+  }
+  function makeBubble(parent,role,text,time){
+    const node=time?.recorded_at?button(parent,text,()=>{
+      const box=panel("消息时间");
+      el("p",node.title,box);
+    }):el("p",text,parent);
+    node.className="bubble "+(role==="user"?"own":"reply");
+    if(time!==undefined)markTime(node,time);
+    return node;
   }
   function updateTurnNodes(s,cards){
     const thread=timeline.querySelector(".conversation-inner");
@@ -1694,12 +1857,14 @@ window.pcarLive = (() => {
     });
     let day=null;
     for(const event of s.past){
-      const nextDay=event.created_at?.slice(0,10)||"日期待核";
+      const sourceDate=event.created_at?new Date(event.created_at):null;
+      const nextDay=sourceDate && Number.isFinite(sourceDate.getTime())?sourceDate.toLocaleDateString("zh-CN"):"日期待核";
       if(nextDay!==day){el("div",nextDay+" · 导入历史",thread).className="date-divider";day=nextDay;}
       const node=button(thread,event.text,()=>historyDetails(s,event));
       stamp(node,"import",event.id,event.seq);
       node.className=event.role==="note"?"button ghost history-actions":"bubble "+(event.role==="user"?"own":"reply");
-      node.title="查看来源与引用 · "+(event.created_at||"时间待核");
+      markTime(node,event.timestamp);
+      node.title="查看来源与引用 · "+node.title;
     }
     if(s.older)button(thread,"查看更早的对话",()=>nativePage(s,true));
     for(const t of s.turns){
@@ -1708,10 +1873,10 @@ window.pcarLive = (() => {
     if(s.newer)button(thread,"查看较新的对话",()=>nativePage(s,false));
     const held=s.inputBuffer?.batch?.members||[];
     const heldIds=new Set(held.map(item=>item.request_id));
-    for(const item of held)makeBubble(thread,"user",item.text).dataset.awaitingConfirmation="";
+    for(const item of held)makeBubble(thread,"user",item.text,{recorded_at:item.received_at,source:"received"}).dataset.awaitingConfirmation="";
     for(const item of s.outbox||[]){
       if(heldIds.has(item.id))continue;
-      const own=makeBubble(thread,"user",item.text);
+      const own=makeBubble(thread,"user",item.text,item.received_at?{recorded_at:item.received_at,source:"received"}:undefined);
       own.dataset.submissionState=item.state;
       const labels={accepted:"已受理，正在等待回复",waiting_capacity:"已受理，正在等待空闲位置。",blocked:"本条消息待核对，可以继续聊天。",
         stopped:"已保留原消息，本轮已停止。",unconfirmed:"正在核对发送结果"};
@@ -1722,7 +1887,7 @@ window.pcarLive = (() => {
   }
   const bufferPanel=byId("input-buffer"),bufferStatus=byId("input-buffer-status");
   const privacyButton=byId("session-privacy");
-  const recipientLabels={main:"主回复",organization:"后台整理",selector:"选材",jev:"Jev 决策",native_web:"原生联网模型",search_fetch:"联网检索与抓取"};
+  const recipientLabels={main:"主回复",organization:"后台整理",selector:"选材",jev:"Jev 决策",lookup_target:"检索对象解析",native_web:"原生联网模型",search_fetch:"联网检索与抓取"};
   async function privacyPanel(){
     const person=currentPerson(),session=currentSession();
     if(!person || !session)return;
@@ -1733,8 +1898,33 @@ window.pcarLive = (() => {
     const mode=state.enabled?(state.candidate?"已开启全流程授权":"已登记授权，将用于新版回复链"):
       state.registered?"授权绑定已变化，当前使用标准模式":"当前使用标准模式";
     el("p",mode,box);
-    el("p","此授权供新版双人私聊链使用。开启后，本会话已有和新增的原话、人物资料、引用、导入记录、记忆及文件内容均可交给以下接收方。联网查询可以包含私人信息。你可以随时关闭。",box);
+    const singleRetrieval=Number.isInteger(state.retrieval_history_turns);
+    el("p",singleRetrieval
+      ? `开启后，原双人私聊链按原授权使用人物和会话资料。检索取材由官方 DeepSeek Flash 完成，读取本轮原话、获准引用和本会话最近最多 ${state.retrieval_history_turns} 个可读回合。判断材料时接收本地原文。公开补查另由下方授权控制。`
+      : "此授权供新版双人私聊链使用。开启后，本会话已有和新增的原话、人物资料、引用、导入记录、记忆及文件内容均可交给以下接收方。联网查询可以包含私人信息。你可以随时关闭。",box);
     for(const [role,url] of Object.entries(state.recipients))el("p",[recipientLabels[role],state.models[role],url].filter(Boolean).join(" · "),box);
+    const context=state.public_lookup;
+    if(state.enabled && state.candidate && (context?.available || context?.enabled)){
+      const automatic=context.protocol==="desktop-public-lookup-scope-v3";
+      const automaticText=singleRetrieval
+        ? "先按译问查本地。开启后，只把有公开依据、仍缺资料的查询交给联网接收方，取得资料后回到本地库再判断。"
+        : "开启后，直接发送消息即可。模型判断是否需要查证，并用当前消息中选出的公开对象、待查属性和时效片段组成查询。补查也可沿用本会话中已核对的公开主题。查询片段会发给上方的联网接收方。";
+      if(singleRetrieval && context.semantic_review)el("p","涉及别名、改述或私聊线索时，官方 DeepSeek Flash 可用本轮相关原话和必要依据核对哪些译问可以外发。",box);
+      el("p",automatic?automaticText:"语境补查使用本会话已核对的公开主题，核准的公开对象、待查属性和时效会发给上方的联网接收方。",box);
+      async function saveContext(scope,enabled){
+        if(!sameSession())return;
+        await api().live_privacy(person.id,state.session_id,{enabled,operation_id:newId(),
+          revision:scope.revision,protocol:scope.protocol,recipient_hash:scope.recipient_hash});
+        if(sameSession() && dialog.contains(box)){dialog.close();arm(0);}
+      }
+      const label=automatic?(context.enabled?"关闭自动联网查证":"同意本会话自动联网查证"):
+        (context.enabled?"关闭语境补查授权":"同意本会话按语境补查公开资料");
+      button(box,label,()=>saveContext(context,!context.enabled));
+      if(context.upgrade){
+        el("p",automaticText,box);
+        button(box,"同意本会话自动联网查证",()=>saveContext(context.upgrade,true));
+      }
+    }
     async function save(enabled){
       if(!sameSession())return;
       await api().live_privacy(person.id,state.session_id,{enabled,operation_id:newId(),revision:state.revision,
@@ -1751,11 +1941,24 @@ window.pcarLive = (() => {
   const bufferSettings=byId("input-buffer-settings"),bufferConfirm=byId("input-buffer-confirm"),bufferCancel=byId("input-buffer-cancel");
   const bufferModes={legacy_per_message:"逐条发送",natural_batch:"定时缓冲",manual:"无限缓冲"};
   const modeOf=settings=>settings.manual?"manual":settings.mode;
+  const manualReady=()=>Boolean(active && currentSession()?.inputBuffer?.manual &&
+    currentSession()?.inputBuffer?.batch?.members.length && !bufferPanel.hidden &&
+    !bufferConfirm.hidden && !bufferConfirm.disabled && !message.disabled);
+  function updateManualHint(){
+    const s=currentSession();
+    const hint=manualReady() && document.activeElement===message && !composing && !message.value.trim();
+    message.placeholder=hint?"再次按下回车即可发送":s?.readOnly?"已封存的会话可供查阅":
+      ready()?"输入消息":"准备完成后即可输入消息";
+  }
+  message.addEventListener("focus",updateManualHint);
+  message.addEventListener("blur",updateManualHint);
+  message.addEventListener("compositionstart",updateManualHint);
+  message.addEventListener("compositionend",updateManualHint);
   function renderInputBuffer(){
     const s=currentSession(), settings=s?.inputBuffer, batch=settings?.batch;
     privacyButton.hidden=!active||!ready()||!s;
     bufferPanel.hidden=!active||!ready()||!settings||s.readOnly;
-    if(bufferPanel.hidden)return;
+    if(bufferPanel.hidden){updateManualHint();return;}
     const mode=modeOf(settings),count=batch?.members.length||0;
     const label=count?count+" 条待确认":mode==="natural_batch"?`定时缓冲 · ${settings.quiet_ms/1000} 秒`:bufferModes[mode];
     if(bufferStatus.textContent!==label)bufferStatus.textContent=label;
@@ -1765,6 +1968,14 @@ window.pcarLive = (() => {
     bufferSettings.disabled=busy||unchecked;
     bufferConfirm.disabled=busy||unchecked||!state.connected;
     bufferCancel.disabled=busy||unchecked;
+    updateManualHint();
+  }
+  function manualEnter(repeat){
+    if(!active || !currentSession()?.inputBuffer?.manual)return false;
+    if(repeat)return true;
+    if(message.value.trim())return false;
+    if(!composing && document.activeElement===message && manualReady())run(()=>finishBuffer("confirm"))();
+    return true;
   }
   async function editInputBuffer(){
     const person=currentPerson(),s=currentSession(),settings=s?.inputBuffer;
@@ -1798,6 +2009,7 @@ window.pcarLive = (() => {
       const quiet=mode.value==="natural_batch"?Number(seconds.value)*1000:settings.quiet_ms;
       const key=JSON.stringify([selected,quiet,manual]);
       if(!opByChoice.has(key))opByChoice.set(key,newId());
+      s.bufferRevision=(s.bufferRevision||0)+1;
       s.bufferWorking=true;updateSendButton();
       try{
         const policy=await api().live_set_buffer(person.id,selected,quiet,manual,settings.version,opByChoice.get(key));
@@ -1815,6 +2027,7 @@ window.pcarLive = (() => {
     if(action==="cancel"&&!confirm("取消本轮？暂存的消息将从聊天窗口移除。"))return;
     const key=JSON.stringify([batch.id,batch.revision,action]);
     if(s.bufferIntent?.key!==key)s.bufferIntent={key,id:newId()};
+    s.bufferRevision=(s.bufferRevision||0)+1;
     s.bufferWorking=true;updateSendButton();
     try{
       const result=await api().live_batch_action(person.id,s.id,batch.id,batch.revision,s.bufferIntent.id,action);
@@ -1830,23 +2043,27 @@ window.pcarLive = (() => {
   bufferSettings.onclick=run(editInputBuffer);
   bufferConfirm.onclick=run(()=>finishBuffer("confirm"));
   bufferCancel.onclick=run(()=>finishBuffer("cancel"));
-  byId("public-search-send").addEventListener("click",()=>run(()=>send(true))());
-  byId("long-reply-send").addEventListener("click",()=>run(()=>send(false,true))());
-  async function send(publicSearch=false,longRequested=false){
+  byId("long-reply-send").addEventListener("click",()=>run(()=>send(true))());
+  async function send(longRequested=false){
     const p=currentPerson(),s=currentSession(),value=message.value;
     if(stopped||!p||!s||s.readOnly||!value.trim()||s.sending||s.bufferWorking||selectionToken!==null||pendingDraft(s)||linkState!=="online")return;
     if(!state.connected){connection();return;}
+    s.bufferRevision=(s.bufferRevision||0)+1;
     s.sending=true;updateSendButton();
     const ref=s.reference?.id || null;
     const request=newId(), revision=s.draftRevision ||= newId();
     try{
-      const question=publicSearch?(message.value.slice(message.selectionStart,message.selectionEnd).trim()||value):false;
       const policy=s.inputBuffer?{version:s.inputBuffer.version}:null;
-      const args=[p.id,s.id,value,request,ref?{kind:"event",id:ref}:null,revision,question,policy];
+      const args=[p.id,s.id,value,request,ref?{kind:"event",id:ref}:null,revision,false,policy];
       if(longRequested)args.push(true);
       const accepted=await api().live_submit(...args);
       if(accepted.state==="rejected")throw new FormError(bufferErrors[accepted.reason]);
       if(!s.outbox?.some(item=>item.id===accepted.id))s.outbox=[...(s.outbox||[]),accepted];
+      if(accepted.input_buffer && accepted.session_id===s.id){
+        s.inputBuffer=accepted.input_buffer;
+        const held=new Set(s.inputBuffer.batch.members.map(item=>item.request_id));
+        s.outbox=s.outbox.filter(item=>!held.has(item.id));
+      }
       let clearing=null;
       if(acceptedSubmission(accepted) && s.draftRevision===revision && (s.reference?.id||null)===ref){
         s.draft="";s.draftRevision=newId();s.reference=null;
@@ -1891,8 +2108,86 @@ window.pcarLive = (() => {
                      items=>saveProposal(items,fillTextProposals));
     button(box,"暂存并返回人物资料",async()=>{await write({...card,...read()});await profile();});
   }
+  const personaImages=new Map();
+  const imageKey=(pid,kind)=>JSON.stringify([pid,kind]);
+  function getPersonaImage(pid,kind){
+    const key=imageKey(pid,kind);
+    if(!personaImages.has(key) && active && api()?.live_persona_image){
+      const entry={url:null};
+      personaImages.set(key,entry);
+      entry.loading=api().live_persona_image(pid,kind).then(url=>{
+        if(personaImages.get(key)!==entry)return;
+        entry.url=url;
+        repaintPersonaImage(pid,kind);
+      }).catch(()=>{
+        if(personaImages.get(key)===entry)personaImages.delete(key);
+      });
+    }
+    return personaImages.get(key);
+  }
+  function avatar(node,pid){
+    node.dataset.personaAvatar=pid||"";
+    const url=pid?getPersonaImage(pid,"avatar")?.url:null;
+    if(node.dataset.personaImage===(url||""))return;
+    node.dataset.personaImage=url||"";
+    if(!url){node.innerHTML=icon("person");return;}
+    const image=document.createElement("img");
+    image.alt="";
+    image.onerror=()=>{if(image.isConnected)node.innerHTML=icon("person");};
+    image.src=url;
+    node.replaceChildren(image);
+  }
+  function appearance(pid){
+    avatar(byId("chat-avatar"),pid);
+    const url=pid && ready()?getPersonaImage(pid,"background")?.url:null;
+    timeline.classList.toggle("has-wallpaper",Boolean(url));
+    if(url)timeline.style.setProperty("--chat-wallpaper","url("+JSON.stringify(url)+")");
+    else timeline.style.removeProperty("--chat-wallpaper");
+  }
+  function repaintPersonaImage(pid,kind){
+    if(kind==="avatar"){
+      for(const node of document.querySelectorAll("[data-persona-avatar]")){
+        if(node.dataset.personaAvatar===pid)avatar(node,pid);
+      }
+    }else if(currentPerson()?.id===pid)appearance(pid);
+  }
+  function personaAppearance(box,pid){
+    const pane=groupBox(box,"聊天外观");
+    for(const [kind,label] of [["avatar","头像"],["background","聊天背景"]]){
+      const slot=el("div",null,pane);
+      el("strong",label,slot);
+      const preview=el("img",null,slot);
+      preview.className="persona-image-preview";
+      preview.dataset.kind=kind;
+      preview.alt=label+"预览";
+      function updatePreview(){
+        const url=personaImages.get(imageKey(pid,kind))?.url;
+        preview.hidden=!url;
+        if(url)preview.src=url;
+        else preview.removeAttribute("src");
+      }
+      updatePreview();
+      getPersonaImage(pid,kind)?.loading?.then(updatePreview);
+      async function change(method){
+        const result=await api()[method](pid,kind);
+        if(result.error)throw new FormError(result.error);
+        if(!result.changed)return;
+        personaImages.set(imageKey(pid,kind),{url:result.url});
+        updatePreview();
+        repaintPersonaImage(pid,kind);
+      }
+      button(slot,"选择"+label,()=>change("live_choose_persona_image"));
+      button(slot,"恢复默认"+label,()=>change("live_reset_persona_image"));
+    }
+  }
   async function profile(){
     const person=currentPerson(),pid=person.id,box=panel(person.profile.name);
+    if(api()?.live_choose_persona_image){
+      const portrait=el("span",null,box);
+      portrait.className="avatar";
+      avatar(portrait,pid);
+      personaAppearance(box,pid);
+    }
     for(const [field,label] of Object.entries(titles))el("p",label+" · "+[].concat(person.profile[field]||[]).join("、"),box);
     const memory=await api().live_memory(pid);
     button(box,memory.enabled?"暂停自动记忆":"开启自动记忆并整理历史",async()=>{
@@ -1971,15 +2266,53 @@ window.pcarLive = (() => {
       button(review,"保存连接并更新授权",commit);
     }
     button(box,"保存连接",()=>saveConnection("main","https://api.deepseek.com",model.value,key.value));
+    button(box,"主回复模型",mainReplySettings);
     button(box,"配置其他接收方",()=>{
       const pane=panel("模型接收方"),role=el("select",null,pane);
       role.setAttribute("aria-label","模型用途");
-      for(const purpose of ["jev","organization","selector"])role.add(new Option(recipientLabels[purpose],purpose));
+      for(const purpose of ["jev","organization","selector","lookup_target"])role.add(new Option(recipientLabels[purpose],purpose));
       const url=el("input",null,el("label","HTTPS 接口",pane)),name=el("input",null,el("label","模型名",pane));
       const secret=el("input",null,el("label","API Key",pane));
       url.type="url";secret.type="password";
       button(pane,"保存连接",()=>saveConnection(role.value,url.value.trim(),name.value.trim(),secret.value));
     });
+  }
+  async function mainReplySettings(){
+    const status=await api().live_main_reply(),box=panel("主回复模型");
+    const labels={ds_pro:"DeepSeek V4 Pro",openrouter_hydrogen:"Gemini 4 Hydrogen"};
+    el("p","当前正文 · "+labels[status.active],box);
+    const secret=el("input",null,el("label","OpenRouter API Key",box));
+    secret.type="password";secret.autocomplete="off";
+    el("p",status.has_key?"已录入密钥":"待录入密钥",box);
+    el("p","候选接收方 · "+status.endpoint,box);
+    el("p",status.ready?"Hydrogen 正文装配已就绪":"Hydrogen 正文装配待确认",box);
+    button(box,"保存密钥并启用候选",async()=>{
+      if(!secret.value.trim()&&!status.has_key)return;
+      const change={enabled:true};
+      if(secret.value.trim())change.api_key=secret.value.trim();
+      await api().live_main_reply(change);secret.value="";
+      await mainReplySettings();
+    });
+    const selected=el("select",null,el("label","新回合正文",box));
+    for(const [id,label] of Object.entries(labels))selected.add(new Option(label,id));
+    selected.value=status.active;selected.options[1].disabled=!status.ready;
+    button(box,"保存正文选择",async()=>{
+      await api().live_main_reply({active:selected.value});
+      await mainReplySettings();
+    });
+    const sid=currentSession()?.id,pid=state.current;
+    if(status.active==="openrouter_hydrogen" && sid && pid){
+      const privacy=await api().live_privacy(pid,sid);
+      const writer=privacy.main_reply_writer;
+      if(writer){
+        el("p",privacy.enabled?"当前会话已开启全流程授权":"请先在当前会话开启全流程授权",box);
+        button(box,writer.enabled?"撤回当前会话的 OpenRouter 正文授权":"授权当前会话给 OpenRouter 生成正文",async()=>{
+          if(!writer.enabled && !confirm("允许 OpenRouter 使用当前隔离会话及已审角色的必要可见材料生成 Gemini 4 Hydrogen 正文？\n装配 SHA-256："+status.bundle))return;
+          await api().live_main_reply_consent(pid,sid,!writer.enabled,writer.revision,writer.recipient_hash);
+          await mainReplySettings();
+        });
+      }
+    }
   }
   let checking=false,attached=false,lastHealth=null;
   const repairDialog=byId("repair-dialog");
@@ -2125,7 +2458,7 @@ window.pcarLive = (() => {
     }
     if(!quotaDialog.open && !manual && !waits.some(row=>row.state==="waiting"))return;
     presentedWaits=waits.map(row=>row.id);
-    const reasons={hourly:"每小时总额",daily:"24 小时总额",selector_project:"自动调用总额",selector:"选择与理解额度",
+    const reasons={hourly:"每小时总额",daily:"24 小时总额",lookup_target_hourly:"目标解析每小时额度",selector_project:"自动调用总额",selector:"选择与理解额度",
       background:"后台处理额度",learning:"表达学习额度"};
     const reached=[...new Set(waits.map(row=>reasons[row.reason]||"本机限额"))].join("、");
     byId("quota-description").textContent="已达到"+reached+"，当前有 "+waits.length+" 项工作暂停。临时放行后，PCAR 会继续本轮消息和这些任务的后续步骤，无需重发。新任务仍按原限额执行。";
@@ -2197,6 +2530,9 @@ window.pcarLive = (() => {
     arm(0);
   }
   window.addEventListener("online",wake);
+  window.addEventListener("focus",()=>{
+    if(active && !stopped && !checking && !document.hidden)arm(0);
+  });
   document.addEventListener("visibilitychange",()=>{if(!document.hidden)wake();});
   function connect(){
     if(active)return;
@@ -2209,6 +2545,7 @@ window.pcarLive = (() => {
   if(window.pywebview?.api)run(connect)();
   return {get active(){return active;},get offline(){return linkState!=="online";},get composing(){return composing;},
     get selecting(){return selectionToken!==null;},get pendingDraft(){return Boolean(pendingDraft(currentSession()));},
-    home:run(home),select:run(select),draw,capture,restore:restoreReading,reviseDraft,renderInputBuffer,send:run(send),profile:run(profile),importHistory:run(importHistory),
+    home:run(home),select:run(select),draw,capture,restore:restoreReading,reviseDraft,renderInputBuffer,manualEnter,
+    avatar,appearance,send:run(send),profile:run(profile),importHistory:run(importHistory),
     diagnostics,connection,stop,resume,wake,repairStatus,exitStatus};
 })();

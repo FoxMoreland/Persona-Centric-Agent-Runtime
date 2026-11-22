@@ -45,8 +45,8 @@ def candidate(db, turn_id):
 
 
 def stop(db, turn_id, reason):
-    db.execute("""UPDATE turns SET status='interrupted',error_code=?,updated_at=?
-        WHERE id=? AND cancelled_at IS NULL AND status!='completed'""", (reason,timestamp(),turn_id))
+    return db.execute("""UPDATE turns SET status='interrupted',error_code=?,updated_at=?
+        WHERE id=? AND cancelled_at IS NULL AND status!='completed'""", (reason,timestamp(),turn_id)).rowcount
 
 
 def recover(db, turn):
@@ -107,6 +107,16 @@ class PrivateReplyEntry:
         if (model['name'],model['base_url']) != (live['name'],live['base_url']) or not same_credential(model.get('encrypted_key'),live.get('encrypted_key')):
             raise RuntimeErrorBase('private_reply_model_changed')
         grant = session_privacy.current(db,self.config,cfg,pid,sid,session_privacy.recipients(self.config,cfg))
+        from . import main_reply
+        accepted_writer = model.get(main_reply.MARKER)
+        writer_grant = None
+        if accepted_writer:
+            writer = main_reply.resolve(self.config,cfg,accepted_writer)
+            writer_grant = session_privacy.writer_consent(db,self.config,cfg,pid,sid,accepted_writer)
+            if not grant['enabled'] or not writer_grant['enabled']:
+                raise RuntimeErrorBase('main_reply_session_authorization_required')
+            from .private_personas import guard_cloud_dispatch, OPENROUTER_WRITER_PERMISSION
+            guard_cloud_dispatch(self.store,pid,OPENROUTER_WRITER_PERMISSION,writer,db=db)
         if not grant['enabled']:
             from .private_personas import guard_cloud_dispatch
             guard_cloud_dispatch(self.store,pid,'main',model,db=db)
@@ -119,6 +129,8 @@ class PrivateReplyEntry:
                     'inputs':[(m['id'],text_hash(m['text'])) for m in members],
                     'profile':fingerprint(turn['profile_snapshot']), 'character':fingerprint(turn['character_snapshot']),
                     'model':fingerprint(turn['model_snapshot']), 'consent':grant}
+        if writer_grant:
+            contract['writer_consent'] = writer_grant
         return turn, contract
 
     def contract(self, turn_id, phase='main'):
@@ -220,13 +232,15 @@ class PrivateReplyEntry:
                     raise RuntimeErrorBase('desktop_owner_changed')
             meter=gate(db,self.store,'private_reply',turn_scope(turn))
             attempt = identifier()
+            from . import desktop_turn_retry as turn_retry
+            turn_retry.start(db,turn_id,attempt,'writer',fingerprint(contract))
             db.execute("""INSERT INTO private_reply_attempts
                 (id,decision_id,turn_id,phase,draft,state,started_at) VALUES(?,?,?,?,?,'sending',?)""",
                 (attempt,choice['id'],turn_id,phase,draft,timestamp()))
             db.execute("UPDATE turns SET status='running',error_code=NULL WHERE id=?", (turn_id,))
         parked=False
         try:
-            body, usage = await transport(attempt, json.loads(choice['decision_json']), contract)
+            body, usage = await turn_retry.observe(self.store,attempt,transport(attempt, json.loads(choice['decision_json']), contract))
             detail = None
             if proof and json.loads(choice['decision_json'])['mode']=='long_detail':
                 if (isinstance(body,dict) and set(body)=={'body','detail'} and
@@ -237,6 +251,7 @@ class PrivateReplyEntry:
             if not isinstance(body,str) or not body.strip() or not isinstance(usage,dict):
                 raise RuntimeErrorBase('private_reply_invalid_receipt')
             with self.store.connection(write=True) as db:
+                turn_retry.mark(db,attempt,"received")
                 db.execute("""UPDATE private_reply_attempts SET state='received',body=?,detail=?,body_sha256=?,
                     usage_json=?,received_at=? WHERE id=? AND state IN ('sending','unknown')""",
                     (body,detail,text_hash(body),encoded(usage),timestamp(),attempt))
@@ -249,10 +264,13 @@ class PrivateReplyEntry:
             from .private_transport_recovery import PrivateTransportParked,park
             with self.store.connection(write=True) as db:
                 parked=park(db,turn,attempt,'writer',fingerprint(contract),meter,error)
+                turn_retry.mark_error(db,attempt,error,parked)
                 if not parked and isinstance(error,ModelError):
                     diagnostics=error.diagnostics or {}
-                    fields=('phase','elapsed_ms','finish_reason','http_status','request_headers_sent',
-                            'response_headers_received','transport_profile','requested_model_echoed','output_characters')
+                    fields=('phase','elapsed_ms','connection_ms','finish_reason','http_status','request_headers_sent',
+                            'response_headers_received','transport_profile','requested_model_echoed','output_characters',
+                            'retry_not_before_epoch','reasoning_effort','stream','response_model','response_provider',
+                            'first_content_delta_ms','provider_terminal_error','openrouter_generation_id')
                     usage=dict(error.usage or {}, transport_error={'code':str(error),
                                **{key:diagnostics[key] for key in fields if key in diagnostics}})
                     db.execute("UPDATE private_reply_attempts SET usage_json=? WHERE id=? AND state='sending'",

@@ -58,6 +58,16 @@ class LocalKnowledge(unittest.IsolatedAsyncioTestCase):
         with self.store.connection(write=True) as db:library.withdraw(db,a)
         self.assertNotEqual(self.find('测试甲的属性乙',now='2026-05-01')[0],'hit')
 
+    def test_persona_source_withdrawal_applies_to_legacy_search(self):
+        from persona_runtime import persona_world
+        instance=self.config.load()['instance_id']
+        with self.store.connection(write=True) as db:
+            self.add(db)
+        self.assertEqual(self.find('测试甲的属性乙',instance=instance)[0],'hit')
+        with self.store.connection(write=True) as db:
+            persona_world.withdraw_source(db,instance,self.pid,'https://example.org/903')
+        self.assertNotEqual(self.find('测试甲的属性乙',instance=instance)[0],'hit')
+
     def test_catalogue_slots_and_scalar_conflicts(self):
         for value in ('第10章 710','第3章 703','第三章：703'):
             with self.store.connection(write=True) as db:self.add(db,value,predicate='章节目录')

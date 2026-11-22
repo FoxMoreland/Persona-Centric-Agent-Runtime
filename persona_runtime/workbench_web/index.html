@@ -8,10 +8,64 @@
   <script id="appearance-startup">
     const appearanceRoot = document.documentElement;
     const systemAppearance = matchMedia("(prefers-color-scheme: dark)");
+    const forcedColors = matchMedia("(forced-colors: active)");
+    const themeTokens = ["stage","surface","rail","panel","field","accent","accent-hover",
+                         "on-accent","focus","selected","hover","selection"];
+    const rgb = hex => hex.match(/\w\w/g).map(part => parseInt(part,16));
+    const blend = (from,to,weight) => from.map((value,i)=>Math.round(value+(to[i]-value)*weight));
+    function luminance(color) {
+      const linear=color.map(channel=>{
+        const value=channel/255;
+        return value<=.04045?value/12.92:((value+.055)/1.055)**2.4;
+      });
+      return .2126*linear[0]+.7152*linear[1]+.0722*linear[2];
+    }
+    function contrast(left,right) {
+      const levels=[luminance(left),luminance(right)].sort((a,b)=>b-a);
+      return (levels[0]+.05)/(levels[1]+.05);
+    }
+    function applyAccent(theme) {
+      const value=appearanceRoot.dataset.accent;
+      if(!/^#[0-9a-f]{6}$/i.test(value||"") || forcedColors.matches){
+        for(const token of themeTokens)appearanceRoot.style.removeProperty("--"+token);
+        return;
+      }
+      const seed=rgb(value), dark=theme==="dark";
+      const bases=dark?["#1a211e","#232c27","#1e2823","#27332c","#19241e"]:
+                       ["#e6e8de","#efeee4","#e4e9df","#e9ece1","#f3f1e7"];
+      const ink=rgb(dark?"#dce6dc":"#24352f"), muted=rgb(dark?"#a2b6aa":"#495e54");
+      function tint(base,weight,labels=[ink,muted]){
+        while(weight>0){
+          const result=blend(base,seed,weight);
+          if(labels.every(label=>contrast(label,result)>=4.5))return result;
+          weight-=.01;
+        }
+        return base;
+      }
+      const colors=bases.map(base=>tint(rgb(base),.08));
+      const [stage,surface,rail,panel,field]=colors;
+      const toward=dark?[255,255,255]:[0,0,0];
+      const selected=tint(surface,.18), hover=tint(surface,.10);
+      const selection=tint(surface,.26,[ink]);
+      function legible(weight,ratio) {
+        let adjusted=seed;
+        for(let step=0;step<=100;step++){
+          adjusted=blend(seed,toward,Math.min(1,weight+step/100));
+          if([...colors,selected,hover,selection].every(background=>contrast(adjusted,background)>=ratio))break;
+        }
+        return adjusted;
+      }
+      const accent=legible(0,4.5), accentHover=legible(.12,4.5), focus=legible(0,3);
+      const white=[255,255,255], black=[0,0,0];
+      const foreground=Math.min(contrast(white,accent),contrast(white,accentHover))>=4.5?white:black;
+      const palette=[stage,surface,rail,panel,field,accent,accentHover,foreground,focus,selected,hover,selection];
+      themeTokens.forEach((token,i)=>appearanceRoot.style.setProperty("--"+token,"rgb("+palette[i].join(", ")+")"));
+    }
     function applyAppearance() {
       const mode = appearanceRoot.dataset.appearance;
       const theme = mode === "system" ? (systemAppearance.matches ? "dark" : "light") : mode;
       appearanceRoot.dataset.theme = theme;
+      applyAccent(theme);
       return theme;
     }
     applyAppearance();
@@ -125,10 +179,24 @@
     .chat-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 clamp(14px, 3vw, 30px); border-bottom: 1px solid var(--line); }
     .chat-person { display: flex; align-items: center; gap: 10px; min-width: 0; }
     .chat-person h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; font-weight: 700; }
-    .avatar { width: 33px; height: 33px; display: inline-grid; place-items: center; flex: 0 0 auto; border-radius: 50%; background: var(--selected); color: var(--accent); }
+    .avatar { width: 33px; height: 33px; display: inline-grid; place-items: center; flex: 0 0 auto; border-radius: 50%; overflow: hidden; background: var(--selected); color: var(--accent); }
+    .avatar img { display: block; width: 100%; height: 100%; object-fit: cover; }
+    .appearance-accent { display: flex; align-items: center; gap: 8px; }
+    .appearance-accent input { width: 36px; height: 28px; padding: 1px; cursor: pointer; }
+    .persona-image-preview { display: block; width: 120px; height: 68px; object-fit: cover; border-radius: 8px; margin-block: 6px; }
+    .persona-image-preview[data-kind="avatar"] { width: 48px; height: 48px; border-radius: 50%; }
+    .persona-image-preview[hidden] { display: none; }
     .avatar.small { width: 29px; height: 29px; }
     .avatar.small .icon { width: 16px; height: 16px; }
     .timeline { overflow: auto; min-height: 0; padding: 28px clamp(12px, 4vw, 44px); scrollbar-width: thin; }
+    .timeline.has-wallpaper {
+      background-image: linear-gradient(color-mix(in srgb, var(--surface) 62%, transparent),
+                                        color-mix(in srgb, var(--surface) 62%, transparent)), var(--chat-wallpaper);
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+    }
+    @media (forced-colors: active) { .timeline.has-wallpaper { background-image: none; } }
     .timeline.first { display: grid; align-items: center; justify-items: center; }
     .onboarding { width: min(100%, 548px); padding: clamp(18px, 3.2vw, 31px); background: var(--panel); border: 1px solid var(--line); border-radius: 16px; }
     .onboarding h2 { font-size: clamp(22px, 2.6vw, 29px); line-height: 1.25; font-weight: 700; letter-spacing: -.025em; }
@@ -151,7 +219,10 @@
     .icon-button:hover { background: var(--hover); }
     .conversation-inner { width: min(100%, 730px); margin: 0 auto; display: grid; align-content: start; gap: 13px; }
     .date-divider { justify-self: center; color: var(--muted); font-size: 12px; margin: 7px 0 9px; }
+    .has-wallpaper :is(.date-divider, .chat-empty, .outbox-status) { background: var(--surface); border-radius: 9px; padding: 3px 9px; }
     .bubble { width: fit-content; max-width: min(82%, 555px); padding: 11px 15px; border-radius: 14px; background: var(--neutral-bubble); overflow-wrap: anywhere; white-space: pre-wrap; }
+    .bubble[data-clock]::after { content: attr(data-clock); display: block; margin-top: 3px; color: var(--muted); font-size: 11px; line-height: 1.3; font-variant-numeric: tabular-nums; }
+    .bubble.own[data-clock]::after { text-align: end; }
     .bubble.own { justify-self: end; background: var(--selected); border-end-end-radius: 5px; }
     .bubble.reply { border-end-start-radius: 5px; }
     button.bubble { border: 0; font: inherit; color: inherit; text-align: start; cursor: pointer; }
@@ -275,6 +346,11 @@
                 <option value="dark">深色模式</option>
               </select>
             </label>
+            <div class="appearance-setting appearance-accent">
+              <label for="appearance-accent">主题主色</label>
+              <input id="appearance-accent" type="color" value="#2e604f">
+              <button class="button ghost" type="button" id="appearance-reset">恢复默认</button>
+            </div>
             <button class="rail-row" data-menu="connection">模型连接</button>
             <button class="rail-row" data-menu="advanced">高级设置</button>
             <button class="rail-row" data-menu="help">使用帮助</button>
@@ -285,7 +361,7 @@
         <button class="scrim" id="scrim" aria-label="关闭侧栏"></button>
         <main class="conversation" aria-labelledby="current-person">
           <header class="chat-header">
-            <div class="chat-person"><span class="avatar"><svg class="icon" aria-hidden="true"><use href="#i-person"/></svg></span><h1 id="current-person">尚未选择人物</h1></div>
+            <div class="chat-person"><span class="avatar" id="chat-avatar"><svg class="icon" aria-hidden="true"><use href="#i-person"/></svg></span><h1 id="current-person">尚未选择人物</h1></div>
             <div>
               <button id="session-privacy" class="button ghost" type="button" hidden>会话授权</button>
               <button id="profile-button" class="button ghost" hidden>人物资料</button>
@@ -304,7 +380,6 @@
             <form class="composer off" id="composer" autocomplete="off">
               <textarea id="message" rows="1" aria-label="输入消息" placeholder="准备完成后即可输入消息" maxlength="1500" disabled></textarea>
               <button class="button primary" id="send" disabled>发送</button>
-              <button class="button" type="button" id="public-search-send" title="发送消息并查找选中的公开问题；未选中时使用整条输入" hidden disabled>公开查找</button>
               <button class="button" type="button" id="long-reply-send" title="发送并明确请求完整长文" hidden disabled>请求长文</button>
             </form>
           </div>
@@ -461,7 +536,9 @@
       container.replaceChildren();
       if (!state.people.length) emptyList(container, "还没有人物");
       for (const person of state.people) {
-        container.append(listButton(person.profile.name, person.id === state.current, () => selectPerson(person), true));
+        const row=listButton(person.profile.name, person.id === state.current, () => selectPerson(person), true);
+        window.pcarLive?.avatar?.(row.querySelector(".avatar"),person.id);
+        container.append(row);
       }
     }
 
@@ -547,12 +624,6 @@
       send.textContent=manual?"加入本轮":"发送";
       send.disabled = !ready() || session?.readOnly || !state.connected || window.pcarLive?.offline ||
         window.pcarLive?.selecting || window.pcarLive?.pendingDraft || session?.sending || session?.bufferWorking || !message.value.trim();
-      const lookup=byId("public-search-send");
-      lookup.hidden=!(window.pcarLive?.active && session?.publicSearchAvailable);
-      lookup.title=manual?"将公开查找加入本轮，确认发送后才会查找":"发送消息并查找选中的公开问题；未选中时使用整条输入";
-      lookup.disabled=lookup.hidden||send.disabled;
-      lookup.textContent=session?.sessionSearchGranted?"联网查找":"公开查找";
-      if(session?.sessionSearchGranted)lookup.title="按本会话授权查找所选内容；未选中时使用本条输入";
       const longReply=byId("long-reply-send");
       longReply.hidden=!(window.pcarLive?.active && session?.longReplyAvailable);
       longReply.disabled=longReply.hidden||send.disabled;
@@ -567,6 +638,7 @@
       renderPeople();
       renderSessions();
       byId("current-person").textContent = person?.profile.name ?? "尚未选择人物";
+      window.pcarLive?.appearance?.(person?.id);
       byId("profile-button").hidden = !person;
       if (ready()) renderMessages(session);
       else renderOnboarding();
@@ -880,8 +952,18 @@
     });
     byId("menu-toggle").addEventListener("click", () => showMenu(byId("app-menu").hidden));
     const appearanceMode = byId("appearance-mode");
+    const accentPicker = byId("appearance-accent"), accentReset = byId("appearance-reset");
+    let savedAccent = appearanceRoot.dataset.accent || null, accentRevision=0;
+    function showAccent(value) {
+      if(value)appearanceRoot.dataset.accent=value;
+      else delete appearanceRoot.dataset.accent;
+      accentPicker.value=value||"#2e604f";
+      updateAppearance();
+    }
+    accentPicker.value=savedAccent||"#2e604f";
     appearanceMode.value = appearanceRoot.dataset.appearance;
     appearanceMode.disabled = appearanceRoot.hasAttribute("data-native-workbench") && !window.pywebview?.api?.save_appearance;
+    accentPicker.disabled = accentReset.disabled = appearanceRoot.hasAttribute("data-native-workbench") && !window.pywebview?.api?.save_accent;
     let saveAppearance = Promise.resolve();
     let syncWindowAppearance = Promise.resolve();
     function updateAppearance() {
@@ -906,12 +988,32 @@
         }
       });
     });
+    function commitAccent(value) {
+      const revision=++accentRevision;
+      showAccent(value);
+      saveAppearance=saveAppearance.then(async()=>{
+        try {
+          await window.pywebview?.api?.save_accent?.(value);
+          savedAccent=value;
+        } catch {
+          if(revision===accentRevision)showAccent(savedAccent);
+          notify("主题色暂时无法保存，请重试。");
+        }
+      });
+    }
+    accentPicker.addEventListener("input",()=>{
+      ++accentRevision;
+      showAccent(accentPicker.value);
+    });
+    accentPicker.addEventListener("change",()=>commitAccent(accentPicker.value));
+    accentReset.addEventListener("click",()=>commitAccent(null));
     systemAppearance.addEventListener("change", () => {
       if (appearanceRoot.dataset.appearance === "system") updateAppearance();
     });
-    matchMedia("(forced-colors: active)").addEventListener("change", updateAppearance);
+    forcedColors.addEventListener("change", updateAppearance);
     window.addEventListener("pywebviewready", () => {
       appearanceMode.disabled = false;
+      accentPicker.disabled = accentReset.disabled = !window.pywebview?.api?.save_accent;
       updateAppearance();
     }, { once: true });
     if (window.pywebview?.api) updateAppearance();
@@ -961,8 +1063,10 @@
       updateSendButton();
     });
     message.addEventListener("keydown", event => {
-      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229 &&
+          !window.pcarLive?.composing) {
         event.preventDefault();
+        if(window.pcarLive?.manualEnter?.(event.repeat))return;
         byId("composer").requestSubmit();
       }
     });

@@ -63,6 +63,16 @@ class RevisionTests(InstanceTest):
                 self.assertEqual((outcome,[r['value'] for r in rows]),('hit',[val]),question)
                 self.assertTrue(rows[0]['url'].endswith(val))
 
+    def test_companion_reads_rumors_and_independent_disagreements(self):
+        with self.store.connection(write=True) as db:
+            for value,state in (('701','rumor'),('702','rumor'),('703','announced')):
+                self.admit(db,value,'https://example.org/'+value,value,'2026-03-01',state=state)
+            status,rows=self.find(db,alternatives=True)
+            self.assertEqual(status,'hit')
+            self.assertEqual({(r['kind'],r['value']) for r in rows},
+                             {('rumor','701'),('rumor','702'),('announced','703')})
+            self.assertEqual({r['value'] for r in self.find(db,'甲属性乙的公告',alternatives=True)[1]},{'703'})
+
     def test_versions_expiry_and_conflict(self):
         with self.store.connection(write=True) as db:
             a=self.admit(db,'701','https://example.org/1','a','2026-01-01',state='observed',conditions=['1.9版'])
@@ -163,6 +173,29 @@ class RevisionTests(InstanceTest):
                 self.assertEqual([f['value'] for f in self.find(db)[1]],[expected] if expected else [])
                 self.assertEqual(self.find(db,'截至2026年2月1日甲属性乙')[1][0]['id'],a)
                 self.assertEqual(db.execute('pragma integrity_check').fetchone()[0],'ok')
+
+    def test_restore_keeps_world_withdrawals_and_disabled_sharing(self):
+        from persona_runtime import persona_world,session_privacy
+        instance=self.config.load()['instance_id']
+        url='https://example.org/1'
+        scope=session_privacy._public_key(instance,self.pid,self.sid)
+        with self.store.connection(write=True) as db:
+            persona_world.set_enabled(db,instance,self.pid,True)
+            db.execute('INSERT INTO knowledge_control VALUES(?,?)',(scope,json.dumps({'revision':1,'enabled':True})))
+        backups=Backups(self.paths)
+        backups.create(200000)
+        with self.store.connection(write=True) as db:
+            persona_world.withdraw_source(db,instance,self.pid,url)
+            persona_world.set_enabled(db,instance,self.pid,False)
+            db.execute('UPDATE knowledge_control SET value=? WHERE key=?',
+                       (json.dumps({'revision':2,'enabled':False}),scope))
+        restored=self.base/'world-restore'
+        backups.restore(restored)
+        with closing(sqlite3.connect(restored/'runtime.sqlite3')) as db:
+            self.assertFalse(persona_world.enabled(db,instance,self.pid))
+            self.assertTrue(persona_world.withdrawn(db,instance,self.pid,url,'0'*64))
+            self.assertEqual(json.loads(db.execute('SELECT value FROM knowledge_control WHERE key=?',(scope,)).fetchone()[0]),
+                             {'revision':2,'enabled':False})
 
     def test_restore_distinguishes_a_locked_live_index_from_an_unavailable_one(self):
         from unittest.mock import patch

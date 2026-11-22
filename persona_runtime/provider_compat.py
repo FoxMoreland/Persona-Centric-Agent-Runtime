@@ -103,6 +103,10 @@ def _format(model):
 
 
 def describe_request(model):
+    from .provider_policy import is_openrouter_writer
+    if is_openrouter_writer(model):
+        return {'version':VERSION,'profile':'openrouter-hydrogen-v1','response_format':'text',
+                'thinking':'enabled','reasoning_effort':'low'}
     if '_native_web_profile' in model:
         from .deepseek_native_contract import describe
         return describe(model)
@@ -125,6 +129,17 @@ def describe_request(model):
 
 
 def build_request(model,messages):
+    from .provider_policy import is_openrouter_writer
+    if is_openrouter_writer(model):
+        if type(model.get('_openrouter_stream')) is not bool or model.get('max_tokens')!=8192:
+            raise ValueError('openrouter_writer_contract_invalid')
+        wire = describe_request(model)
+        payload = {'model':model['name'],'messages':messages,'max_tokens':model['max_tokens'],
+                   'stream':model['_openrouter_stream'],'reasoning':{'effort':'low','exclude':True}}
+        if model.get('_json_output'):
+            payload['response_format'] = {'type':'json_object'}
+            wire['response_format'] = 'json_object'
+        return payload,wire
     if '_native_web_profile' in model:
         from .deepseek_native_contract import build_request as native_request
         return native_request(model,messages)
@@ -152,15 +167,17 @@ def build_request(model,messages):
     return payload,contract
 
 
-def usage_fields(value,*,deepseek=False,grok=False):
+def usage_fields(value,*,deepseek=False,grok=False,openrouter=False):
     if not isinstance(value,dict):return None
     names=('prompt_tokens','completion_tokens','total_tokens')
     if deepseek:names+=('prompt_cache_hit_tokens','prompt_cache_miss_tokens')
     result={k:v for k,v in value.items() if k in names and type(v) is int and v>=0}
-    if deepseek or grok:
+    if deepseek or grok or openrouter:
         for outer,inner in (('prompt_tokens_details','cached_tokens'),('completion_tokens_details','reasoning_tokens')):
             item=value.get(outer)
             if isinstance(item,dict) and type(item.get(inner)) is int and item[inner]>=0:result[outer]={inner:item[inner]}
+    if openrouter and type(cost:=value.get('cost')) in (int,float) and 0 <= cost < float('inf'):
+        result['openrouter_cost'] = cost
     if deepseek and 'server_tool_use' in value:
         from .deepseek_native_contract import TOOL_COUNTS,DISPLAY_COUNTS
         supplied=value['server_tool_use'] if isinstance(value['server_tool_use'],dict) else {}
@@ -169,11 +186,21 @@ def usage_fields(value,*,deepseek=False,grok=False):
     return result
 
 
-def response_metadata(data,*,grok=False):
+def response_metadata(data,*,grok=False,openrouter=False):
     """Public identifiers only. Never return reasoning_content or other text."""
     result={}
     if isinstance(data.get('model'),str) and data['model'] in CURRENT_DEEPSEEK|LEGACY_DEEPSEEK:result['response_model']=data['model']
     if grok and isinstance(data.get('model'),str) and re.fullmatch(r'grok-4\.7(?:[-._a-zA-Z0-9]{0,64})',data['model']):result['response_model']=data['model']
+    if openrouter:
+        from .main_reply import MODEL
+        if data.get('model') == MODEL:
+            result['response_model'] = MODEL
+        provider = data.get('provider')
+        if isinstance(provider,str) and re.fullmatch(r'[a-zA-Z0-9 ._-]{1,64}',provider):
+            result['response_provider'] = provider
+        generation = data.get('id')
+        if isinstance(generation,str) and re.fullmatch(r'gen-[a-zA-Z0-9_-]{1,96}',generation):
+            result['openrouter_generation_id'] = generation
     value=data.get('system_fingerprint')
     if isinstance(value,str) and re.fullmatch(r'[a-fA-F0-9]{16,128}',value):result['system_fingerprint']=value
     elif grok and isinstance(value,str) and re.fullmatch(r'fp_[a-fA-F0-9]{8,128}',value):result['system_fingerprint']=value

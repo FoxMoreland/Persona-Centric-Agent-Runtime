@@ -32,7 +32,9 @@ def context(targets):
                 origins = [s for s in origins if s != 'recent']
             if origins:
                 entry = {'role':item['role'], 'source':origins, 'text':item['text']}
-                if item.get("imported_history") and item.get("recorded_at"):
+                if item.get("message_times"):
+                    entry["message_times"] = item["message_times"]
+                elif item.get("imported_history") and item.get("recorded_at"):
                     entry["recorded_at"] = item["recorded_at"]
                 state.append(entry)
         if len(json.dumps(state, ensure_ascii=False, separators=(',', ':'))) <= MAX_CONTEXT:

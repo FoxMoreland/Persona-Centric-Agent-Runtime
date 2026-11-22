@@ -45,6 +45,8 @@ def collect_context_materials(engine, conn, turn, evidence=None, *, ablated=Fals
     history = []
     history_rows = []
     history_items=[];initial_removed=[]
+    from . import message_time
+    timed = message_time.enabled(turn)
     from .history_context import fit_speech, project_speech
     from .scene_policy import BASELINE
     context_policy = json.loads(turn.get("context_policy_snapshot") or "{}") or {}
@@ -59,7 +61,11 @@ def collect_context_materials(engine, conn, turn, evidence=None, *, ablated=Fals
                 from .archive import turn_scope
                 entry=group(conn,previous,turn_scope(conn,previous),{'kind':'turn','id':previous['id']})
                 if entry['status']=='found':
-                    pair, _ = project_speech(chronological(entry),native_bursts)
+                    speech = chronological(entry)
+                    pair, _ = project_speech(speech,native_bursts)
+                    if timed:
+                        history_items.append({'group':entry,'speech_rows':speech,'native_bursts':native_bursts,
+                                              'pair':pair,'kind':'recent'})
                     history.append(pair)
                     history_rows.append(previous['ordinal'])
                 continue
@@ -68,6 +74,10 @@ def collect_context_materials(engine, conn, turn, evidence=None, *, ablated=Fals
             reply=(''+spoken['text']+'\n\n' if spoken else '')+event[0]
             history.append([{'role':'user','content':input_text(conn,previous)},{'role':'assistant','content':reply}])
             history_rows.append(previous['ordinal'])
+            if timed:
+                replies = ([{'id':spoken['event_id']}] if spoken else []) + [{'id':previous['reply_event_id']}]
+                history_items.append({'group':{'turn_id':previous['id'],'members':load_turn_input(conn,previous),
+                                               'replies':replies}, 'pair':history[-1], 'kind':'recent'})
     else:
         used=0
         for item in evidence['items']:
@@ -137,6 +147,17 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
     recall_plan=recall_selection(conn,turn)
     from .recall_runtime import project as project_recall
     recall_items=project_recall(recall_plan['selected'],conn) if recall_plan else []
+    from . import message_time
+    from .history_context import delivery_bindings, time_block
+    timed = message_time.enabled(turn)
+    current_members = load_turn_input(conn, turn) if timed else []
+    stamps = message_time.event_times(conn, [e['id'] for e in current_members]) if timed else {}
+    if timed:
+        for item in history_items:
+            group = item['group']
+            ids = [e['id'] for e in group['members'] + group['replies']]
+            stamps.update(message_time.event_times(conn, ids, group['turn_id']))
+    bindings = None
     pending = materials.get('pending_conflicts', [])
     memory_times=[]
     from .automatic_memory import available
@@ -255,15 +276,15 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
             PromptBlock('character',character_body,'character_context','companion-character-v1' if is_minimal else 'character-render-v1')]+(
             [PromptBlock('expression_realization',voice_text,'dialogue_voice',expression_renderer)] if voice_after_character else [])+[
             PromptBlock('memory_summary',reference,'context_m4','companion-memory-v1' if is_minimal else 'voice-memory-v2' if voice else 'memory-v1'),
-            PromptBlock('recall_support',render_recall(recall_items,conn),'recall_runtime','recall-runtime-v1'),
+            PromptBlock('recall_support',render_recall(recall_items,conn,delivery_times=timed),'recall_runtime','recall-runtime-v1'),
             PromptBlock('explicit_references',reference_block,'references','reference-render-v1'),
             PromptBlock('reply_protocol',protocol,'reply_batch+dialogue_voice',format_renderer),
             *([PromptBlock('dialogue_context',experimental_context,'dialogue_pipeline','dialogue-context-v1')] if experimental_context else []),
             *experimental_blocks,
             PromptBlock('capsule',capsule_text,'decision_capsule','decision-capsule-voice-v2' if voice else 'decision-capsule-v1')]
-        if is_native:
-            from .history_context import time_block
-            stamp = time_block(history_items)
+        if is_native or timed:
+            bindings = delivery_bindings(history_items, stamps, current_members) if timed else None
+            stamp = time_block(history_items, bindings)
             if stamp:
                 blocks.append(stamp)
         result,assembly=assemble(blocks,[event for pair in history for event in pair],{'role':'user','content':text})
@@ -295,7 +316,7 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
                 history[0] = item["pair"]
                 removed.append({"kind":"history_event", "id":old_event["id"], "reason":"input_budget"})
                 continue
-            if evidence is not None:history_items.pop(0)
+            if history_items:history_items.pop(0)
             history.pop(0)
             removed.append({'kind': 'history', 'ordinal': history_rows.pop(0), 'reason': 'input_budget'})
         elif memories:
@@ -388,7 +409,8 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
                 history=[i['pair'] for i in history_items]
                 history_rows=[evidence['orders'][i['group']['turn_id']] for i in history_items]
                 blocks=[b for b in blocks if b.name!="history_recorded_at"]
-                if stamp := time_block(history_items):
+                bindings = delivery_bindings(history_items, stamps, current_members) if timed else None
+                if stamp := time_block(history_items, bindings):
                     blocks.append(stamp)
             study_record={'version':study['version'],'study_id':study['study_id'],'arm':study['arm'],
                           'character_version':study['character_version'],'field_projected':projected,
@@ -432,7 +454,7 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
         'searched_layers':recall_plan['searched_layers'],'cold_status':recall_plan['cold_status']} if recall_plan else
         {'version':'recall-runtime-v1','selection_id':None,'selected_ids':[],'fallback':'index_warming'}
         if recall_accepted(conn,turn)[0]['data']['enabled'] else None)
-    return result, {**({'style_study':study_record} if study_record is not None else {}),**({'recall_support':recall_meta} if recall_meta else {}),**({'companion':read_companion(turn)} if is_minimal else {}),'prompt_assembly':assembly,'input_batch_id':turn.get('input_batch_id'),'input_event_ids':[m['id'] for m in load_turn_input(conn,turn)],'raw_message_count':len(load_turn_input(conn,turn)),
+    return result, {**({'message_time_bindings':bindings} if timed else {}),**({'style_study':study_record} if study_record is not None else {}),**({'recall_support':recall_meta} if recall_meta else {}),**({'companion':read_companion(turn)} if is_minimal else {}),'prompt_assembly':assembly,'input_batch_id':turn.get('input_batch_id'),'input_event_ids':[m['id'] for m in load_turn_input(conn,turn)],'raw_message_count':len(load_turn_input(conn,turn)),
                     'references':reference_manifest,'reply_mode':reply_mode,'dialogue_voice':voice_meta,
                     'behavior':{'resolver':behavior['resolver'],'signals':[item['act'] for item in behavior['signals']],
                                 'uncertainty':behavior['uncertainty'],'character_version_id':character['version_id'] if character else None,

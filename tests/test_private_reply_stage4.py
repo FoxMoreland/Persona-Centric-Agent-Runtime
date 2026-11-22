@@ -294,6 +294,7 @@ class CandidateRecovery(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(ModelError) as err:await task()
                     failure=err.exception
                     self.assertEqual(pause_before_send(str(failure),failure.diagnostics,failure.usage),'network')
+                    self.assertGreaterEqual(failure.diagnostics['elapsed_ms'],0)
 
     async def test_jev_local_socket_refusal_and_lost_response(self):
         from aiohttp import web

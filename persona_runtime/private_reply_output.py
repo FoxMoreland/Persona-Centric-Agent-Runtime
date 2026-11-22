@@ -16,7 +16,9 @@ SEARCH_SPEECH_VERSION = 'phase-scoped-search-speech-v2'
 ADVISORY_VERSIONS = (ADVISORY_VERSION, SEMANTIC_REVIEW_VERSION, FACT_REVIEW_VERSION)
 
 
-def limits(phase, mode, *, compact_notice=False):
+def limits(phase, mode, *, compact_notice=False, conversation=False):
+    if conversation and phase=='main' and mode in ('chat','short_answer'):
+        return {'phase':phase,'mode':mode,'output_fields':['body']}
     single_bubble = phase == 'search_notice' or mode in ('short_answer', 'long_detail')
     short_notice = compact_notice and phase == 'search_notice'
     return {
@@ -33,6 +35,13 @@ def assess(body, detail, contract, *, advisory=False):
     from .private_lookup import sentence_count
     failed = []
     sentence_total = sentence_count(body)
+    if 'max_bubble_chars' not in contract:
+        from .conversation_bubbles import frames
+        bubbles=frames(body)
+        lengths=[s['end']-s['start'] for s in bubbles]
+        return {'failed_constraints':[], 'observed_counts':{
+            'body_characters':len(body),'sentences':sentence_total,'bubbles':len(bubbles),
+            'bubble_characters':lengths,'protected_overlength':[i for i,n in enumerate(lengths) if n>MAX_BUBBLE_CHARS]}}
     if contract['sentences_per_bubble'] == 1 and (sentence_total != 1 or '\n' in body.strip() or '\r' in body.strip()):
         failed.append('sentences_per_bubble')
     if 'detail' in contract['output_fields'] and not detail:

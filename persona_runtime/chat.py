@@ -43,10 +43,12 @@ def model_tls_context():
 
 
 class ChatCompletionsClient:
-    def __init__(self, *, ssl_context=None, allow_loopback_fixture=False, allow_private_compatible_writer=False):
+    def __init__(self, *, ssl_context=None, allow_loopback_fixture=False, allow_private_compatible_writer=False,
+                 allow_openrouter_writer=False):
         self.ssl_context=ssl_context
         self.allow_loopback_fixture=allow_loopback_fixture
         self.allow_private_compatible_writer=allow_private_compatible_writer
+        self.allow_openrouter_writer=allow_openrouter_writer
 
     async def route_reachable(self,model):
         """Check the configured route without sending headers, credentials or messages."""
@@ -54,7 +56,8 @@ class ChatCompletionsClient:
         from .network_proxy import outbound_proxy
         from .provider_policy import require_generation_provider
         require_generation_provider(model,allow_loopback_fixture=self.allow_loopback_fixture,
-                                    allow_private_compatible_writer=self.allow_private_compatible_writer)
+                                    allow_private_compatible_writer=self.allow_private_compatible_writer,
+                                    allow_openrouter_writer=self.allow_openrouter_writer)
         try:route=urlsplit(outbound_proxy(model['base_url']) or model['base_url'])
         except ModelError as error:
             if str(error)=='system_proxy_required':return False
@@ -73,14 +76,22 @@ class ChatCompletionsClient:
             return await DeepSeekNativeClient(ssl_context=self.ssl_context).complete(model,messages)
         if not model["base_url"] or not model["name"]:
             raise ModelError("model_not_configured")
-        from .provider_policy import is_private_compatible_writer, require_generation_provider
+        from .provider_policy import is_openrouter_writer, is_private_compatible_writer, require_generation_provider
         try:require_generation_provider(model,allow_loopback_fixture=self.allow_loopback_fixture,
-                                        allow_private_compatible_writer=self.allow_private_compatible_writer)
+                                        allow_private_compatible_writer=self.allow_private_compatible_writer,
+                                        allow_openrouter_writer=self.allow_openrouter_writer)
         except ValueError as error:
             raise ModelError(str(error),diagnostics={'request_headers_sent':False,'response_headers_received':False}) from None
+        hydrogen = is_openrouter_writer(model)
         headers = {"Content-Type": "application/json"}
+        if hydrogen and not model['encrypted_key']:
+            raise ModelError('model_not_configured')
         if model["encrypted_key"]:
-            headers["Authorization"] = "Bearer " + unprotect(model["encrypted_key"])
+            try:
+                headers["Authorization"] = "Bearer " + unprotect(model["encrypted_key"])
+            except (OSError,ValueError):
+                if not hydrogen:raise
+                raise ModelError('model_not_configured',diagnostics={'request_headers_sent':False}) from None
         from .provider_compat import build_request,endpoint,usage_fields,response_metadata,is_grok47,request_timeout
         try:
             payload,wire=build_request(model,messages);url=endpoint(model)
@@ -96,7 +107,10 @@ class ChatCompletionsClient:
                      'response_headers_received': False}
         trace = aiohttp.TraceConfig()
         async def connecting(*_): transport['phase'] = 'connecting'
-        async def connected(*_): transport['phase'] = 'awaiting_headers'
+        async def connected(*_):
+            transport['phase'] = 'awaiting_headers'
+            if hydrogen:
+                transport['connection_ms'] = round((time.monotonic()-started)*1000,3)
         async def sent(*_):
             transport['request_headers_sent'] = True
             transport['phase'] = 'awaiting_headers'
@@ -109,6 +123,8 @@ class ChatCompletionsClient:
                     'transport_profile':wire['profile'],'response_format':wire['response_format'],
                     'thinking':wire['thinking']}
             if wire.get('reasoning_effort'):result['reasoning_effort']=wire['reasoning_effort']
+            if hydrogen:
+                result.update(stream=payload['stream'],requested_model=model['name'])
             if wire.get('generation_version'):
                 result.update(generation_version=wire['generation_version'],timeout_policy='none',
                               output_limit='omitted',stream=True,
@@ -129,7 +145,12 @@ class ChatCompletionsClient:
                                        headers=headers, json=payload, allow_redirects=False, proxy=proxy) as response:
                     transport.update(phase='reading_body', response_headers_received=True)
                     if response.status != 200:
-                        raise ModelError(f"provider_http_{response.status}", diagnostics={**diagnostic(),'http_status':response.status})
+                        details={**diagnostic(),'http_status':response.status}
+                        if hydrogen and response.status==429:
+                            from .main_reply import retry_not_before
+                            if until := retry_not_before(response.headers.get('Retry-After')):
+                                details['retry_not_before_epoch']=until
+                        raise ModelError(f"provider_http_{response.status}", diagnostics=details)
                     if payload['stream']:
                         from .chat_stream import read_stream
                         return await read_stream(response,model,diagnostic,started=started)
@@ -141,10 +162,12 @@ class ChatCompletionsClient:
                     transport['phase'] = 'parsing_response'
                     data = json.loads(raw)
                     if isinstance(data,dict) and data.get('error') is not None:
-                        usage=usage_fields(data.get('usage'),deepseek=wire['profile']=='deepseek-chat-v1',grok=is_grok47(model))
+                        usage=usage_fields(data.get('usage'),deepseek=wire['profile']=='deepseek-chat-v1',grok=is_grok47(model),openrouter=hydrogen)
                         raise ModelError('provider_aborted',usage=usage,diagnostics={**diagnostic(),
                             'http_status':response.status,'provider_terminal_error':True})
                     choice=data['choices'][0]
+                    if hydrogen and (len(data['choices'])!=1 or choice.get('index',0)!=0):
+                        raise ModelError('provider_invalid_response',diagnostics=diagnostic())
                     text = choice["message"]["content"]
                     finish=choice.get('finish_reason')
                     diagnostics={**diagnostic(),'http_status':response.status,
@@ -154,7 +177,18 @@ class ChatCompletionsClient:
                         diagnostics['requested_model_echoed'] = data.get('model') == model['name']
                     deepseek=wire['profile']=='deepseek-chat-v1'
                     grok=is_grok47(model)
-                    usage=usage_fields(data.get('usage'),deepseek=deepseek,grok=grok)
+                    usage=usage_fields(data.get('usage'),deepseek=deepseek,grok=grok,openrouter=hydrogen)
+                    if hydrogen:
+                        message = choice['message']
+                        diagnostics.update(response_metadata(data,openrouter=True),
+                                           reasoning_present=any(bool(message.get(k)) for k in ('reasoning','reasoning_details','reasoning_content')))
+                        code = ('provider_unexpected_response_model' if data.get('model')!=model['name'] else
+                                'provider_tool_call_not_supported' if message.get('tool_calls') or message.get('function_call')
+                                or finish in ('tool_calls','function_call') else
+                                {'length':'provider_output_truncated','content_filter':'provider_content_filtered',
+                                 'aborted':'provider_aborted','insufficient_system_resource':'provider_insufficient_system_resource'}.get(finish))
+                        if code or finish!='stop':
+                            raise ModelError(code or 'provider_invalid_response',usage=usage,diagnostics=diagnostics)
                     if deepseek or grok:
                         diagnostics.update(response_metadata(data,grok=grok),reasoning_present=bool(choice['message'].get('reasoning_content')))
                         if grok:
@@ -170,6 +204,8 @@ class ChatCompletionsClient:
                             raise ModelError('provider_tool_call_not_supported',usage=usage,diagnostics=diagnostics)
                     if not isinstance(text, str) or not text.strip():
                         raise ModelError('provider_content_filtered' if finish=='content_filter' else 'provider_empty_response',usage=usage,diagnostics=diagnostics)
+                    if hydrogen:
+                        diagnostics['first_content_delta_ms'] = diagnostics['elapsed_ms']
                     return ModelCompletion(text,usage,diagnostics)
         except ModelError:
             raise
@@ -472,6 +508,14 @@ class ChatEngine:
                 candidate_route = channel=='desktop' and selected(conn,self.config.load()['instance_id'],persona_id)
                 if candidate_route:
                     bind(conn,turn_id,self.config.load()['instance_id'],candidate_route)
+                if channel=='desktop':
+                    from .desktop_turn_retry import admission_scope
+                    from .main_reply import admit, MARKER
+                    if accepted_writer := admit(self.config,self.config.load(),candidate_route):
+                        model[MARKER] = accepted_writer
+                        conn.execute('UPDATE turns SET model_snapshot=? WHERE id=?',(json.dumps(model),turn_id))
+                    conn.execute('INSERT INTO desktop_turn_checkpoints VALUES(?,?)',
+                                 (turn_id,admission_scope(conn,self.config,persona_id,session_id)))
                 if SCENE_KEY in accepted_context and not candidate_route:raise RuntimeErrorBase('scene_workbench_required')
                 accepted_context.pop('import_style',None)
                 from .companion import freeze_auxiliary
@@ -748,6 +792,7 @@ class ChatEngine:
         if initial['status']!='queued' or initial.get('cancelled_at'):return
         async with self.locks[initial["persona_id"]]:
             attempt_id = None
+            watch_main = False
             usage = None
             reference_manifest = None
             companion = None
@@ -801,7 +846,14 @@ class ChatEngine:
                     with self.store.connection(write=True) as conn:
                         phase = "custom_pipeline" if self.dialogue_pipeline else "preparing"
                         desktop_recovery.transition(conn, accepted_turn, self.desktop_owner, phase)
-                if self.dialogue_pipeline is not None:
+                with self.store.connection() as conn:
+                    retry_input = conn.execute('''SELECT p.prepared_json FROM desktop_retry_preparation p
+                        JOIN desktop_stage_attempts a ON p.turn_id=a.turn_id WHERE p.turn_id=? AND a.stage='generation'
+                        AND a.operation IS NOT NULL LIMIT 1''',(turn_id,)).fetchone() if accepted_turn['channel']=='desktop' else None
+                if retry_input:
+                    prepared=json.loads(retry_input[0])
+                    prepared["manifest"]["context_id"]=identifier()
+                elif self.dialogue_pipeline is not None:
                     prepared=await self.dialogue_pipeline.prepare(self,turn_id)
                 elif companion and companion['mode']=='minimal':
                     prepared=await self._prepare_context(turn_id)
@@ -861,6 +913,14 @@ class ChatEngine:
                         conn.execute("INSERT INTO attempts VALUES (?,?,?,'running',NULL,NULL,?)",
                                      (attempt_id, turn_id, time.time(), turn["model_snapshot"]))
                         context_id=self.cognitive.persist(conn,prepared['manifest'],turn=turn,attempt_id=attempt_id)
+                    watch_main = bool(state and not direct_on and not study and not evaluation
+                                      and conn.execute('SELECT 1 FROM desktop_turn_checkpoints WHERE turn_id=?',(turn_id,)).fetchone())
+                    if watch_main:
+                        from . import desktop_turn_retry as stage_retry
+                        conn.execute('INSERT OR IGNORE INTO desktop_retry_preparation VALUES(?,?)',
+                                     (turn_id,json.dumps(prepared,ensure_ascii=False)))
+                        if not conn.execute('SELECT 1 FROM desktop_stage_attempts WHERE attempt_id=?',(attempt_id,)).fetchone():
+                            stage_retry.start(conn,turn_id,attempt_id,'generation',wire_hash)
                     if state:
                         phase = "main_pending" if not direct_on and self.generation_executor is None else "main"
                         desktop_recovery.transition(conn, turn, self.desktop_owner, phase, attempt=attempt_id, wire=wire_hash)
@@ -929,7 +989,7 @@ class ChatEngine:
                     usage=audit
                     self.expression.save_main(turn,attempt_id,value,audit,physical,expression_context,validation_error)
                     if self.generation_audit_sink:self.generation_audit_sink(audit)
-                completion = await generation_executor(self.client,
+                generation = generation_executor(self.client,
                     dict(model,_reply_mode=turn.get('reply_mode_snapshot'),_expression_snapshot=turn.get('expression_snapshot')),messages,
                     validate=validate_generation,
                     save=save_generation_audit,before_attempt=before_generation_attempt,
@@ -938,6 +998,10 @@ class ChatEngine:
                     **({'resume_audit':resume_audit} if resume_audit else {}),
                     **({'save_completion':save_main_completion} if expression_on or scene_on else
                        {'save_valid_completion':save_main_completion} if save_plain else {}))
+                completion = await stage_retry.observe(self.store,attempt_id,generation) if watch_main else await generation
+                if watch_main:
+                    with self.store.connection(write=True) as conn:
+                        stage_retry.mark(conn,attempt_id,'received')
                 usage = completion[1]
                 if (expression_context or {}).get('details',{}).get('knowledge',{}).get('translation',{}).get('handoff_version'):
                     with self.store.connection() as db:
@@ -958,6 +1022,8 @@ class ChatEngine:
                     current=db.execute("SELECT * FROM turns WHERE id=?",(turn_id,)).fetchone()
                     state=desktop_recovery.contract(db,current)
                     if not state or state['owner']!=self.desktop_owner or current['cancelled_at'] or current['status']!='running':return
+                    if watch_main:
+                        stage_retry.mark(db,attempt_id,'unsent')
                     if wait.meter:db.execute("DELETE FROM model_call_meter WHERE id=? AND started=?",wait.meter)
                     db.execute("UPDATE attempts SET usage_json=?,status='failed',error_code=? WHERE id=?",
                                (json.dumps(wait.audit),str(wait),attempt_id))
@@ -1029,6 +1095,9 @@ class ChatEngine:
                     conn.execute("UPDATE turns SET status=?,error_code=?,usage_json=?,updated_at=? WHERE id=?",
                                  ("interrupted" if interrupted else "failed", code, encoded, timestamp(), turn_id))
                     if attempt_id and not saved_plain:
+                        if watch_main:
+                            from .desktop_turn_retry import mark_error
+                            mark_error(conn,attempt_id,error,False)
                         if getattr(error,'diagnostics',None):
                             details=dict(turn.get('_context_details',{}));details['reply_provider']=error.diagnostics
                             details['reply_validation']=getattr(error,'output_validation',None) or {'status':'rejected','reason':code}
@@ -1203,6 +1272,9 @@ class ChatEngine:
                 if study_key in accepted_context:raise RuntimeErrorBase('style_study_new_position_required')
                 from .companion import freeze_auxiliary
                 auxiliary=freeze_auxiliary(self.config.load()['character_selector'],accepted_context)
+                from .message_time import KEY as TIME_KEY
+                if TIME_KEY not in json.loads(frozen_row[0] or '{}'):
+                    accepted_context.pop(TIME_KEY, None)
                 conn.execute('UPDATE turns SET context_policy_snapshot=?,selector_model_snapshot=?,execution_revision=execution_revision+1 WHERE id=?',(json.dumps(accepted_context),json.dumps(auxiliary),turn_id))
                 if 'companion' in accepted_context:
                     from .companion import freeze_model

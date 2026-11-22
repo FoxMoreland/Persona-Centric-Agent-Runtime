@@ -70,7 +70,7 @@ class SpeechPublication:
                 'source_usage':json.loads(source_usage[0]) if source_usage and source_usage[0] is not None else None,
                 'run':dict(run) if run else None,'publication':self.plan(persona_id,session_id,utterance_id)}
 
-    def publish(self,db,unit,kind,body,segments,reason,*,replace_unoffered=False,enforce_bubble_limit=True):
+    def publish(self,db,unit,kind,body,segments,reason,*,replace_unoffered=False,enforce_bubble_limit=True,conversation=False):
         if unit['source_kind']=='maibot_private_reply' and (kind!=unit['source_kind'] or body!=unit['body'] or replace_unoffered):
             raise ExpressionAssetError('private_reply_unreviewed')
         if not enforce_bubble_limit and unit['source_kind']!='maibot_private_reply':
@@ -96,7 +96,12 @@ class SpeechPublication:
                 pieces.append(s);cursor=s['end']
             if cursor!=len(body):raise ValueError()
         except (ValueError,KeyError,TypeError):pieces=[{'start':0,'end':len(body),'kind':'chat','required':True,'delay_ms':0}]
-        if enforce_bubble_limit:
+        if conversation:
+            if unit['source_kind'] not in ('maibot_private_reply','scene_reply') or unit['phase']!='main':
+                raise ExpressionAssetError(LIMIT_VIOLATION)
+            from .conversation_bubbles import frames
+            pieces=frames(body)
+        elif enforce_bubble_limit:
             pieces = limit_ranges(body, pieces)
         pid=old['id'] if old else identifier();revision=old['revision']+1 if old else 1
         if old:
@@ -109,6 +114,9 @@ class SpeechPublication:
         record(db,unit['turn_id'],'desktop_publication_changed')
         plan={'utterance_id':unit['id'],'body_hash':text_hash(body),'bubbles':pieces,
               'bubble_limit':MAX_BUBBLE_CHARS if enforce_bubble_limit else None}
+        if conversation:
+            plan.update(bubble_limit=MAX_BUBBLE_CHARS,conversation_bubbles=1,
+                        protected_overlength=[i for i,piece in enumerate(pieces) if piece['end']-piece['start']>MAX_BUBBLE_CHARS])
         db.execute('INSERT INTO expression_speech_versions VALUES(?,?,?)',(pid,revision,encoded(plan)))
         for i,s in enumerate(pieces):
             part=body[s['start']:s['end']]
@@ -155,6 +163,10 @@ class SpeechPublication:
             db=stack.enter_context(self.store.connection(write=True))
             unit=self._owner(db,persona_id,session_id,utterance_id)
             if self.store.current(db)!=persona_id:raise ExpressionAssetError('speech_persona_not_selected')
+            from .private_lookup import waiting_for_notice_display
+            if (unit['phase']=='main' and unit['source_kind']=='maibot_private_reply'
+                    and waiting_for_notice_display(db,unit['turn_id'])):
+                return {'state':'waiting','new_offer':False}
             pub=db.execute('SELECT * FROM expression_speech_publications WHERE id=? AND utterance_id=?',(publication_id,utterance_id)).fetchone()
             if not pub or pub['revision']!=revision or pub['state'] in ('closed','complete'):raise ExpressionAssetError('speech_plan_changed')
             try:
@@ -178,9 +190,13 @@ class SpeechPublication:
             if not item:raise ExpressionAssetError('speech_fragment_missing')
             if item['state']!='pending':return {'id':item['id'],'state':item['state'],'new_offer':False}
             if len(item['text']) > MAX_BUBBLE_CHARS:
-                plan=db.execute("SELECT json_type(plan_json,'$.bubble_limit') FROM expression_speech_versions "
-                                "WHERE publication_id=? AND revision=?",(publication_id,revision)).fetchone()
-                if unit['source_kind']!='maibot_private_reply' or not plan or plan[0]!='null':
+                row=db.execute("SELECT plan_json FROM expression_speech_versions WHERE publication_id=? AND revision=?",
+                               (publication_id,revision)).fetchone()
+                plan=json.loads(row[0]) if row else {}
+                legacy_advisory='bubble_limit' in plan and plan['bubble_limit'] is None
+                protected_atom=plan.get('conversation_bubbles')==1 and ordinal in plan.get('protected_overlength',[])
+                allow_advisory=legacy_advisory and unit['source_kind']=='maibot_private_reply'
+                if not (allow_advisory or protected_atom):
                     self._stop(db, unit, pub, LIMIT_VIOLATION)
                     return {'state':'stopped','reason':LIMIT_VIOLATION,'new_offer':False}
             if db.execute("SELECT 1 FROM expression_speech_items WHERE publication_id=? AND revision=? AND ordinal<? AND state!='presented'",(publication_id,revision,ordinal)).fetchone():
@@ -191,13 +207,14 @@ class SpeechPublication:
                     'kind':item['kind'],'required':bool(item['required']),'delay_ms':item['delay_ms']}
 
     def acknowledge(self,persona_id,session_id,utterance_id,fragment_id,lease_id,presenter_id,receipt_id,body_hash,state='presented',
-                    *,webview=False,publication_id=None,revision=None,ordinal=None):
+                    *,webview=False,publication_id=None,revision=None,ordinal=None,reason=None):
         text(receipt_id,'receipt_id',200)
         if state not in ('presented','not_presented','unknown'):raise ExpressionAssetError('speech_receipt_state_invalid')
         if webview and presenter_id!="webview-v2."+receipt_id:
             raise ExpressionAssetError('speech_receipt_identity_mismatch')
         with self.store.connection() as db:unit=self._owner(db,persona_id,session_id,utterance_id)
-        if unit['source_kind']=='main_receipt':return self._legacy().acknowledge(persona_id,session_id,unit['turn_id'],fragment_id,lease_id,presenter_id,receipt_id,body_hash,state)
+        if unit['source_kind']=='main_receipt':return self._legacy().acknowledge(persona_id,session_id,unit['turn_id'],fragment_id,lease_id,presenter_id,receipt_id,body_hash,state,
+                webview=webview,publication_id=publication_id,revision=revision,ordinal=ordinal,reason=reason)
         with self.store.connection(write=True) as db:
             previous=db.execute('SELECT * FROM expression_speech_receipts WHERE id=?',(receipt_id,)).fetchone()
             if previous:
@@ -228,6 +245,8 @@ class SpeechPublication:
                     return {"state":"closed","already_applied":False}
             if pub['state'] in ('closed','complete'):raise ExpressionAssetError('speech_publication_closed')
             if item['state'] not in ('offered','unknown'):raise ExpressionAssetError('speech_receipt_conflict')
+            from .desktop_presentation import record_paint
+            record_paint(db,receipt_id,fragment_id,state,reason)
             now=timestamp()
             db.execute('INSERT INTO expression_speech_receipts VALUES(?,?,?,?,?,?,?)',(receipt_id,fragment_id,lease_id,presenter_id,body_hash,state,now))
             db.execute('UPDATE expression_speech_items SET state=?,receipt_id=? WHERE id=?',(state,receipt_id,fragment_id))
@@ -255,6 +274,47 @@ class SpeechPublication:
             else:self._close(db,unit,pub,'complete' if not unit['cancelled_at'] else 'cancelled_by_user')
             return {'state':state,'already_applied':False}
 
+    def confirm_inline_main(self,persona_id,session_id,turn_id,publication_id,revision,fragments):
+        """Settle a freshly rendered copy of the same reviewed body. Retain the first observation."""
+        from . import desktop_recovery
+        from .private_lookup import recovered_main
+        from .workbench_timeline import require_session
+        with self.store.connection(write=True) as db:
+            require_session(db,persona_id,session_id)
+            pub=db.execute("""SELECT p.* FROM expression_speech_publications p JOIN expression_speech_units u
+                ON u.id=p.utterance_id WHERE p.id=? AND p.revision=? AND u.persona_id=? AND u.session_id=?
+                AND u.turn_id=? AND u.phase='main' AND u.source_kind='maibot_private_reply'""",
+                (publication_id,revision,persona_id,session_id,turn_id)).fetchone()
+            if not pub:
+                raise ExpressionAssetError('speech_presentation_scope_mismatch')
+            if pub['state']=='complete':
+                return {'confirmed':True}
+            turn=dict(db.execute('SELECT * FROM turns WHERE id=?',(turn_id,)).fetchone())
+            desktop_recovery.validate_turn(db,turn)
+            from .private_lookup import waiting_for_notice_display
+            if waiting_for_notice_display(db,turn_id):
+                return {'confirmed':False}
+            original=recovered_main(db,self.store,turn,fragments=True)
+            if not original['confirmable'] or self.store.current(db,required=False)!=persona_id:
+                return {'confirmed':False}
+            items=original['items']
+            if (original['publication']!=publication_id or original['revision']!=revision
+                    or fragments!=[[i['id'],i['body_hash']] for i in items]):
+                raise ExpressionAssetError('speech_receipt_identity_mismatch')
+            unit=self._owner(db,persona_id,session_id,pub['utterance_id'])
+            now=timestamp()
+            for item in items:
+                lease,receipt=identifier(),identifier()
+                presenter='webview-inline.'+receipt
+                db.execute("INSERT INTO expression_speech_receipts VALUES(?,?,?,?,?,'presented',?)",
+                           (receipt,item['id'],lease,presenter,item['body_hash'],now))
+                db.execute("""UPDATE expression_speech_items SET state='presented',receipt_id=?,presenter_id=?,
+                           lease_id=?,offered_at=? WHERE id=?""",(receipt,presenter,lease,now,item['id']))
+                db.execute("INSERT INTO expression_speech_visible VALUES(?,?,?,?,?,?,?)",
+                           (item['id'],unit['id'],publication_id,item['ordinal'],item['text'],receipt,now))
+            self._close(db,unit,pub,'complete')
+            return {'confirmed':True}
+
     def _close(self,db,unit,pub,reason):
         rows=db.execute('SELECT ordinal,text FROM expression_speech_visible WHERE publication_id=? ORDER BY ordinal',(pub['id'],)).fetchall()
         # 历史只接纳连续的已确认前缀。未知片段之前的内容不能越过未确认边界。
@@ -274,7 +334,9 @@ class SpeechPublication:
             db.execute('UPDATE turns SET status=?,error_code=?,updated_at=? WHERE id=?',
                 ('completed' if event else 'interrupted',None if complete else reason,timestamp(),unit['turn_id']))
         db.execute('UPDATE expression_speech_units SET closed_at=? WHERE id=?',(timestamp(),unit['id']))
-        if unit['source_kind']=='maibot_private_reply' and unit['phase']=='search_notice':
+        from .private_lookup import background_lookup
+        if (unit['source_kind']=='maibot_private_reply' and unit['phase']=='search_notice'
+                and not background_lookup(db,unit['turn_id'])):
             db.execute("""UPDATE turns SET status=?,error_code=?,updated_at=? WHERE id=? AND cancelled_at IS NULL""",
                        ('queued' if complete else 'interrupted',None if complete else 'search_notice_not_fully_presented',
                         timestamp(),unit['turn_id']))

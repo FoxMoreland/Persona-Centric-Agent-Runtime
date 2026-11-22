@@ -1,4 +1,5 @@
 """Explicit local WebView operations; credentials and file paths remain in the host."""
+import sqlite3
 from threading import RLock
 
 from .config import ConfigStore
@@ -7,7 +8,7 @@ from .desktop_client import LocalClient
 from .storage import Store
 from .import_library import ImportLibrary, require
 from .tk_notice import CONTRACT
-from .models import PersonaSpec
+from .models import PersonaSpec, RuntimeErrorBase
 
 
 class WorkbenchData:
@@ -117,6 +118,39 @@ class WorkbenchData:
         return {"people":self._client.manage("persona.list"),"connected":bool(config.get("has_key") and config.get("base_url")),
                 "model":config["name"]}
 
+    def live_persona_image(self, pid, kind):
+        from .workbench_appearance import image_path, image_url
+        paths = self._config.paths
+        return image_url(image_path(paths, pid, kind), kind)
+
+    def live_choose_persona_image(self, pid, kind):
+        from webview import FileDialog
+        from .workbench_appearance import image_path, image_url, prepare_image, store_image
+
+        self._require_open()
+        paths = self._config.paths
+        image_path(paths, pid, kind)
+        names = self._window().create_file_dialog(
+            FileDialog.OPEN, allow_multiple=False, file_types=("图片 (*.png;*.jpg;*.jpeg;*.webp)",))
+        if not names:
+            return {"changed": False}
+        try:
+            prepared = prepare_image(names[0], kind)
+        except RuntimeErrorBase as error:
+            return {"changed": False, "error": str(error)}
+        self._require_open()
+        with self._selection_lock:
+            path = image_path(paths, pid, kind)
+            store_image(paths, path, prepared)
+            return {"changed": True, "url": image_url(path, kind)}
+
+    def live_reset_persona_image(self, pid, kind):
+        from .workbench_appearance import image_path
+        self._require_open()
+        with self._selection_lock:
+            image_path(self._config.paths, pid, kind).unlink(missing_ok=True)
+        return {"changed": True, "url": None}
+
     def live_select(self,pid,fresh=False,view_session_id=None):
         self._require_open()
         with self._selection_lock:
@@ -144,6 +178,17 @@ class WorkbenchData:
         return self._client.manage("desktop.privacy.connection",role=role,base_url=base_url,
                                    name=name,key=key,confirm=confirm)
 
+    def live_main_reply(self, change=None):
+        self._require_open()
+        if change is None:
+            return self._client.manage('desktop.main_reply.status')
+        return self._client.manage('desktop.main_reply.configure',**change)
+
+    def live_main_reply_consent(self,pid,sid,enabled,revision,recipient_hash):
+        self._require_open()
+        return self._client.manage('desktop.main_reply.consent',persona_id=pid,session_id=sid,
+                                   enabled=enabled,revision=revision,recipient_hash=recipient_hash)
+
     def live_page(self,pid,sid,version=None,before=None,after=None,anchor=None):
         return self._client.manage("desktop.timeline.snapshot",pid=pid,sid=sid,version=version,before=before,after=after,anchor=anchor)
 
@@ -163,8 +208,17 @@ class WorkbenchData:
     def live_retrieved_notes(self,pid,sid,tid):
         return self._client.manage("desktop.retrieval.notes",pid=pid,sid=sid,tid=tid)
 
+    def live_confirm_inline_main(self,pid,sid,tid,publication,revision,fragments):
+        self._require_open()
+        return self._client.manage("expression.v2.inline_main",persona_id=pid,session_id=sid,turn_id=tid,
+                                   publication_id=publication,revision=revision,fragments=fragments)
+
     def live_reply_detail(self,pid,sid,tid,kind):
         return self._client.manage("desktop.lookup.detail",pid=pid,sid=sid,tid=tid,kind=kind)
+
+    def live_stage_retry(self,pid,sid,tid,expected,op):
+        self._require_open()
+        return self._client.manage("desktop.stage.retry",pid=pid,sid=sid,tid=tid,expected=expected,op=op)
 
     def live_lookup_confirm(self,pid,sid,tid,expected,op,text=None):
         self._require_open()
@@ -201,6 +255,17 @@ class WorkbenchData:
         if first and result["state"]=="accepted" and draft_revision:
             empty={"previous":draft_revision,"revision":request_id,"text":"","reference":None}
             self._submissions.draft(pid,sid,empty)
+        if result.get("awaiting_confirmation"):
+            from .workbench_timeline import input_buffer, require_session
+            try:
+                with Store(self._config.paths).connection() as db:
+                    require_session(db, pid, sid)
+                    buffer = input_buffer(db, pid, sid)
+                if buffer["batch"] and buffer["batch"]["id"] == result["batch_id"]:
+                    result["input_buffer"] = buffer
+            except (sqlite3.Error, OSError, RuntimeErrorBase):
+                # The accepted message remains in the outbox until the regular refresh catches up.
+                pass
         return result|{"session_id":sid}
 
     def live_submissions(self, pid, sid):
@@ -228,8 +293,8 @@ class WorkbenchData:
         self._require_open()
         return self._presentation.begin(page,claim_id,kind,args)
 
-    def presentation_decide(self, page, claim_id, state):
-        return self._presentation.decide(page,claim_id,state)
+    def presentation_decide(self, page, claim_id, state, reason=None):
+        return self._presentation.decide(page,claim_id,state,reason)
 
     def presentation_reconcile(self):
         return self._presentation.reconcile()

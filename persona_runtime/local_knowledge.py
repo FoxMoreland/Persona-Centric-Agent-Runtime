@@ -80,9 +80,34 @@ def _grant(db,instance,pid,sid,revision):
     return row['operation_hash'] if row and row['enabled'] and row['revision']==revision else None
 
 
+def _body_key(instance,pid,digest):
+    return 'private.persona_world.content.'+fingerprint([instance,pid,digest])
+
+
+def register_world_body(db,instance,pid,doc_id):
+    owner=db.execute("SELECT sha256 FROM local_knowledge_documents WHERE id=? AND persona_id=? AND body!=''",
+                     (doc_id,pid)).fetchone()
+    if owner:
+        db.execute('INSERT OR IGNORE INTO knowledge_control VALUES(?,?)',
+                   (_body_key(instance,pid,owner[0]),encoded(doc_id)))
+
+
+def document_body(db, doc):
+    """Resolve storage only. Callers check the requesting document's permissions and receipts."""
+    if doc['body']:
+        return doc['body']
+    row = db.execute("""SELECT owner.body FROM knowledge_control link
+        JOIN local_knowledge_documents owner ON owner.id=json_extract(link.value,'$')
+        WHERE link.key=? AND owner.persona_id=? AND owner.sha256=? AND owner.body!=''""",
+        ('private.persona_world.body.' + doc['id'], doc['persona_id'], doc['sha256'])).fetchone()
+    if not row or hashlib.sha256(row[0].encode()).hexdigest()!=doc['sha256']:
+        raise RuntimeErrorBase('local_knowledge_body_unavailable')
+    return row[0]
+
+
 def put_document(db, *, scope, url, title, body, receipt, acquired_at, source_kind,
                  persona_id=None, session_id=None, consent_revision=0, instance=None, published_at=None,reuse_content=False,
-                 versioned=False):
+                 versioned=False, shared_body=False):
     """The caller explicitly admits material into this scope. Historical sources use admit_legacy."""
     kinds=('page_content','search_content','native_search_summary','search_summary','source_claim')
     if scope not in _SCOPES or (source_kind not in kinds and not (versioned and source_kind=='user_correction')):
@@ -119,6 +144,18 @@ def put_document(db, *, scope, url, title, body, receipt, acquired_at, source_ki
             ORDER BY acquired_at,id LIMIT 1""",fields[:10]).fetchone()
         if old:return old['id']
     doc_id = fingerprint(fields)
+    if shared_body:
+        key=_body_key(instance,persona_id,fields[7])
+        db.execute('INSERT OR IGNORE INTO knowledge_control VALUES(?,?)',(key,encoded(doc_id)))
+        owner=json.loads(db.execute('SELECT value FROM knowledge_control WHERE key=?',(key,)).fetchone()[0])
+        if owner!=doc_id:
+            existing=db.execute('SELECT body FROM local_knowledge_documents WHERE id=? AND persona_id=? AND sha256=?',
+                                (owner,persona_id,fields[7])).fetchone()
+            if not existing or existing[0]!=body:
+                raise RuntimeErrorBase('local_knowledge_body_unavailable')
+            db.execute('INSERT OR IGNORE INTO knowledge_control VALUES(?,?)',
+                       ('private.persona_world.body.'+doc_id,encoded(owner)))
+            body=''
     db.execute("""INSERT INTO local_knowledge_documents
         (id,scope,persona_id,session_id,consent_revision,grant_hash,url,title,sha256,source_kind,published_at,acquired_at,receipt,body)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING""", (doc_id,*fields,body))
@@ -132,11 +169,12 @@ def put_fact(db, document_id, *, subject, predicate, value, quote, start, end, a
     doc = db.execute('SELECT * FROM local_knowledge_documents WHERE id=?',(document_id,)).fetchone()
     if doc and db.execute('SELECT 1 FROM knowledge_control WHERE key=?',('private.study.withdrawn_document.'+document_id,)).fetchone():
         raise RuntimeErrorBase('local_knowledge_document_withdrawn')
-    if not doc or type(start) is not int or type(end) is not int or not 0<=start<end<=len(doc['body']):
+    body=document_body(db,doc) if doc else ''
+    if type(start) is not int or type(end) is not int or not 0<=start<end<=len(body):
         raise RuntimeErrorBase('local_knowledge_invalid_span')
     quote = _text(quote,2000)
     value = _text(value,600)
-    if doc['body'][start:end]!=quote or (evidence_state!='source_excerpt' and _norm(value) not in _norm(quote)):
+    if body[start:end]!=quote or (evidence_state!='source_excerpt' and _norm(value) not in _norm(quote)):
         raise RuntimeErrorBase('local_knowledge_evidence_mismatch')
     if unit is not None and _norm(_text(unit,64)) not in _norm(quote):
         raise RuntimeErrorBase('local_knowledge_evidence_mismatch')
@@ -278,7 +316,9 @@ def turn_document(db,pid,sid,turn_id,source_id,*,instance=None,consent=None,acti
             published=f'{year:04}-{month:02}-{day:02}'
         try:published=_utc(published)
         except RuntimeErrorBase:published=None
-    doc=put_document(db,scope='session',persona_id=pid,session_id=sid,consent_revision=revision,
+    from . import persona_world
+    share_body=versioned and persona_world.public_body(db,instance,pid,turn_id,source)
+    doc=put_document(db,scope='session',persona_id=pid,session_id=sid,consent_revision=revision,shared_body=share_body,
         instance=instance,reuse_content=study_receipt,versioned=versioned,
         url=source['url'],title=source['title'],body=source.get('content') or source.get('summary'),
         published_at=published,acquired_at=record[0],source_kind=source['kind'],receipt=turn_id)
@@ -303,11 +343,11 @@ def _matches(text, choices):
     return None
 
 
-def search(db,pid,sid,consent,question,*,instance=None,now=None,after_commit=None,fact_id=None,versioned=False,intent_question=None,for_selection=False):
+def search(db,pid,sid,consent,question,*,instance=None,now=None,after_commit=None,fact_id=None,versioned=False,intent_question=None,for_selection=False,alternatives=False):
     """Legacy structured reader for previously bound turns. New workbench reads use semantic_knowledge."""
     try:
         return _search(db,pid,sid,consent,question,instance=instance,now=now,after_commit=after_commit,fact_id=fact_id,
-                       versioned=versioned,intent_question=intent_question,for_selection=for_selection)
+                       versioned=versioned,intent_question=intent_question,for_selection=for_selection,alternatives=alternatives)
     except sqlite3.DatabaseError as exc:
         raise storage_error(exc) from exc
 
@@ -395,7 +435,7 @@ def compatible_launch_sites(facts):
     return (len(scope)==1 and len(names)==2 and names[0].endswith('发射中心') and names[1].startswith(names[0])
             and names[1][len(names[0]):] in ('发射场','载人航天发射场'))
 
-def _search(db,pid,sid,consent,question,*,instance,now,after_commit,fact_id=None,versioned=False,intent_question=None,for_selection=False):
+def _search(db,pid,sid,consent,question,*,instance,now,after_commit,fact_id=None,versioned=False,intent_question=None,for_selection=False,alternatives=False):
     """Only claim a hit when an in-scope entity, attribute and all requested qualifiers agree."""
     if not enabled(db,pid):return 'disabled',[]
     text=_norm(question)
@@ -443,7 +483,11 @@ def _search(db,pid,sid,consent,question,*,instance,now,after_commit,fact_id=None
     rows=db.execute(sql,(expr,pid,sid,revision,grant,text,text))
     matches=[]
     reason='miss'
+    from . import persona_world
+    check_withdrawals=instance and persona_world.has_withdrawals(db,instance,pid)
     for row in rows:
+        if check_withdrawals and persona_world.withdrawn(db,instance,pid,row['url'],row['sha256']):
+            continue
         spec=json.loads(row['spec_json'])
         if versioned and spec.get('verification'):
             row=dict(row)
@@ -461,11 +505,14 @@ def _search(db,pid,sid,consent,question,*,instance,now,after_commit,fact_id=None
             if len(versions)>1:continue
             _,rest=revisions.query_parts(rest)
         for condition in conditions:
+            from .knowledge_study import source_description
+            if source_description(spec['state'],_norm(condition)):
+                rest=rest.replace(_norm(condition),' ')
+                continue
             rest=revisions.match_condition(rest,condition) if versioned else _matches(rest,[condition])
             if rest is None:break
         if rest is None:continue
         if spec['state']=='rumor' and not versioned:
-            if not re.search('爆料|传闻',rest):continue
             rest=re.sub('爆料|传闻',' ',rest)
         if re.search(r'\w',_FILLER.sub('',rest)):continue
         if historical and not spec['valid_from'] and not versioned:continue
@@ -477,7 +524,8 @@ def _search(db,pid,sid,consent,question,*,instance,now,after_commit,fact_id=None
             if spec.get('verified_at',row['acquired_at'])>today:continue
             if historical and spec['state'] in ('rumor','announced') and (row['published_at'] or row['acquired_at'])>when:continue
             start=spec['valid_from'] or row['published_at'] or row['acquired_at']
-            if when<start or revisions.superseded(db,row['fact_id'],when,wanted_versions,state):continue
+            effective_state=spec['state'] if alternatives and not historical and not re.search('现在|当前|目前|最新|如今',selector) else state
+            if when<start or revisions.superseded(db,row['fact_id'],when,wanted_versions,effective_state):continue
             row=dict(row)
             effective=db.execute('SELECT value FROM knowledge_control WHERE key=?',('private.study.effective.'+row['fact_id'],)).fetchone()
             row['effective_since']=json.loads(effective[0]) if effective else start if row['previous_id'] else None
@@ -511,8 +559,7 @@ def _search(db,pid,sid,consent,question,*,instance,now,after_commit,fact_id=None
         options=dict(when=when,today=today,historical=bool(historical),
             archived_state=bool(state and re.search('原来|当时|之前|原先|此前|以前',selector)),
             current_only=bool(re.search('现在|当前|目前|最新|如今',selector)),
-            state=state,versions=wanted_versions,
-            allow_rumor=for_selection or bool(re.search('快要|即将|前瞻|下[个一]版本|预告',selector)))
+            state=state,versions=wanted_versions,alternatives=alternatives,question=selector)
         for level in sorted({item[0] for item in matches}):
             candidates=[(r,s,f) for priority,f,_,r,s in matches if priority==level]
             outcome,items=revisions.project(candidates,after_commit=None,fact_id=None,**options)
@@ -527,7 +574,7 @@ def _search(db,pid,sid,consent,question,*,instance,now,after_commit,fact_id=None
         if not (compatible_dates(facts) or compatible_launch_sites(facts)):
             from .knowledge_catalog import catalog_order
             order=catalog_order(facts)
-            if order is None:return 'conflict',[]
+            if order is None and not alternatives:return 'conflict',[]
     if after_commit:
         facts=[f for priority,f,fresh,_,_ in matches if priority==best and fresh]
     if fact_id is not None:

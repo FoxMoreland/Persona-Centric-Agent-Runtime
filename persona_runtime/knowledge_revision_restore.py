@@ -99,7 +99,10 @@ def _sync(dst,src,rows,config):
                 suppress.update(families[family])
                 continue
             doc=src.execute('SELECT * FROM local_knowledge_documents WHERE id=?',(r['id'],)).fetchone()
-            dst.execute('INSERT OR IGNORE INTO local_knowledge_documents VALUES('+','.join('?' for _ in doc)+')',tuple(doc))
+            document=dict(doc)
+            document['body']=library.document_body(src,doc)
+            dst.execute('INSERT OR IGNORE INTO local_knowledge_documents VALUES('+','.join('?' for _ in document)+')',
+                        tuple(document.values()))
             f=src.execute('SELECT id,document_id,previous_id,spec_json,entities,attributes,terms,withdrawn FROM local_knowledge_facts WHERE id=?',(ident,)).fetchone()
             dst.execute('INSERT INTO local_knowledge_facts(id,document_id,previous_id,spec_json,entities,attributes,terms,withdrawn) VALUES(?,?,?,?,?,?,?,?)',tuple(f))
             existing.add(ident)
@@ -142,7 +145,7 @@ def reconcile(database,live,config):
         dst.row_factory=sqlite3.Row
         if not dst.execute("SELECT 1 FROM sqlite_master WHERE name='local_knowledge_facts'").fetchone():return None
         rows=list(_rows(dst))
-        if not rows:return None
+        prefix='private.persona_world.v1.'
         dst.execute('PRAGMA foreign_keys=ON')
         src=None
         try:
@@ -157,9 +160,37 @@ def reconcile(database,live,config):
                 if src:src.close()
                 src=None
             with dst:
+                _restore_world_policy(dst,src,prefix)
+                if not rows:return None
                 result=_sync(dst,src,rows,config)
                 result['live_evidence_checked']=src is not None
                 if dst.execute('PRAGMA foreign_key_check').fetchone():raise sqlite3.IntegrityError('restored_local_evidence')
         finally:
             if src:src.close()
         return result
+
+
+def _restore_world_policy(dst,src,prefix):
+    """Retain stricter visibility from either image, including an unavailable live database."""
+    if src is not None:
+        for key,value in src.execute('SELECT key,value FROM knowledge_control WHERE key>=? AND key<?',
+                                     (prefix,prefix+'~')):
+            if '.revoked.' in key:
+                dst.execute('INSERT OR REPLACE INTO knowledge_control VALUES(?,?)',(key,value))
+    for (key,) in dst.execute("""SELECT key FROM knowledge_control WHERE key>=? AND key<?
+                                AND key LIKE '%.enabled'""",(prefix,prefix+'~')).fetchall():
+        live=src.execute('SELECT value FROM knowledge_control WHERE key=?',(key,)).fetchone() if src else None
+        if not live or live[0]!='true':
+            dst.execute('UPDATE knowledge_control SET value=? WHERE key=?',('false',key))
+    # An old public-query grant cannot authorize its acquisitions again after a restore.
+    scope_prefix='private.lookup.consent.'
+    scopes=dst.execute("""SELECT key,value FROM knowledge_control WHERE key>=? AND key<?
+                          AND json_type(value)='object' AND json_extract(value,'$.enabled')=1""",
+                       (scope_prefix,scope_prefix+'~')).fetchall()
+    for key,value in scopes:
+        live=src.execute('SELECT value FROM knowledge_control WHERE key=?',(key,)).fetchone() if src else None
+        if not live or live[0]!=value:
+            previous=json.loads(value)
+            previous['enabled']=False
+            previous['revision']=max(previous['revision'],json.loads(live[0])['revision'] if live else 0)
+            dst.execute('UPDATE knowledge_control SET value=? WHERE key=?',(encoded(previous),key))

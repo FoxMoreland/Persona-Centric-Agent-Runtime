@@ -129,6 +129,22 @@ class Delivery(unittest.IsolatedAsyncioTestCase):
     def acknowledge(self, args, part, receipt=None):
         return self.pub.acknowledge(*args,part['id'],part['lease_id'],'ID-PRESENTER',receipt or identifier(),part['body_hash'])
 
+    async def test_enrolled_scene_keeps_the_entire_daily_reply(self):
+        self.enable()
+        marker=self.paths.home/'private/ordinary-reply/registration.json'
+        marker.parent.mkdir(parents=True,exist_ok=True)
+        atomic_json(marker,{'instance':self.cfg.load()['instance_id'],'conversation_bubble_personas':[self.pid]})
+        self.main.output=('甲'*31+'。')*6
+        turn=self.send()
+        plan=await self.wait_for(turn,lambda v:v.get('scene_speech'))
+        parts=[]
+        for i in range(len(plan['items'])):
+            args,part=self.offer(self.chat.get(turn['id']),i)
+            self.assertLessEqual(len(part['body']),75)
+            parts.append(part['body'])
+            self.acknowledge(args,part)
+        self.assertEqual(''.join(parts),self.main.output)
+
     async def test_single_scene_and_only_confirmed_prefix_in_next_turn(self):
         self.enable()
         turn = self.send()
@@ -211,13 +227,16 @@ class Delivery(unittest.IsolatedAsyncioTestCase):
 
     async def test_reopened_page_with_no_paint_decision_isolates_unknown(self):
         host,args,tid,_,_=await self._presentation_host()
-        host.begin("802","808","speech",args)
+        offer=host.begin("802","808","speech",args)
         host.attach("809")
         self.assertFalse(host.decide("802","808","presented"))
         self.assertTrue(host.reconcile())
         current=self.chat.get(tid)["scene_speech"]
         self.assertEqual((current["state"],current["visible"]),("closed",[]))
         self.assertEqual(current["items"][0]["state"],"unknown")
+        with self.store.connection() as db:
+            diagnostic=json.loads(db.execute("SELECT value FROM knowledge_control WHERE key='desktop.paint.808'").fetchone()[0])
+        self.assertEqual(diagnostic,{'state':'unknown','reason':'renderer_lost','fragment':offer['fragment']})
         self.assertEqual(len(self.main.calls),1)
 
     async def test_terminal_receipt_does_not_block_another_turn(self):
