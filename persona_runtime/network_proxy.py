@@ -1,7 +1,25 @@
-"""Use the current Windows system proxy for every public outbound request."""
+"""Prefer the Windows system proxy, with a Community-only official API route."""
 import ipaddress
 import urllib.request
 from urllib.parse import urlsplit
+
+from . import community
+
+
+def official_direct(url):
+    parsed = urlsplit(url)
+    return (community.enabled() and parsed.scheme == 'https'
+            and parsed.netloc.lower() in ('api.deepseek.com', 'api.deepseek.com:443')
+            and not parsed.query and not parsed.fragment
+            and parsed.path.rstrip('/') in ('', '/v1', '/beta', '/chat/completions',
+                '/v1/chat/completions', '/beta/chat/completions',
+                '/v1/tools/search', '/v1/tools/fetch'))
+
+
+def route_name(url, proxy):
+    if proxy:
+        return 'system_proxy'
+    return 'official_direct' if official_direct(url) else 'local'
 
 
 def configured_proxy(scheme="https"):
@@ -44,6 +62,8 @@ def outbound_proxy(url):
         pass
     value = configured_proxy(parsed.scheme)
     if value is None:
+        if official_direct(url):
+            return None
         from .chat import ModelError
         raise ModelError("system_proxy_required", diagnostics={
             "request_headers_sent": False, "network_route": "system_proxy_unavailable"})

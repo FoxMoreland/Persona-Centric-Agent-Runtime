@@ -36,12 +36,17 @@ def is_official_deepseek(model):
 
 def require_generation_provider(model, *, allow_loopback_fixture=False, allow_reply_decision_tool=False,
                                 allow_private_compatible_writer=False, allow_openrouter_writer=False):
+    from . import community
     try:
         if '_reply_decision_tool' in model:
             if not allow_reply_decision_tool:raise ValueError()
             from .deepseek_reply_decision import model_profile
             model_profile(model)
             return
+        if community.enabled():
+            if is_official_deepseek(model):
+                return
+            raise ValueError()
         if allow_private_compatible_writer and is_private_compatible_writer(model):
             return
         if is_openrouter_writer(model):

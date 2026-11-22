@@ -275,7 +275,7 @@ class CardPublisher:
                 "plan_id":saved["plan"], "source_revision":saved["source_revision"],
                 "updated":proposed["material"] != saved["material"],
                 "revision":saved["revision"], "version":fingerprint([proposed,providers]),
-                "main":scene_policy.PRO, "jev_model":scene_policy.JEV,
+                "main":scene_policy.PRO, "jev_model":scene_policy.decision_name(),
                 "common":asset["common"], "scenes":asset["scenes"], "jev":asset["jev"]}
         return info, proposed, asset, providers
 

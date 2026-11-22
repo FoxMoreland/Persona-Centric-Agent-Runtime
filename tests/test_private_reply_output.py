@@ -145,6 +145,9 @@ class OutputHandoff(unittest.IsolatedAsyncioTestCase):
         self.assertIn('detail_required', json.loads(raw)['failed_constraints'])
 
     async def test_approved_short_answer_system_is_used_on_writer_wire(self):
+        from persona_runtime.archive import fingerprint
+        from persona_runtime.provider_compat import build_request
+
         nodes=('J1','J2.action','J2.stance','J2.task','J3','J4','J5','J6.mode','J6.coverage','J6.ending','J7')
         model = {k:self.config.load()['model'][k] for k in ('base_url','name')}
         bundle = {
@@ -158,20 +161,55 @@ class OutputHandoff(unittest.IsolatedAsyncioTestCase):
         path=self.paths.home/'output-v1.json'
         path.write_text(json.dumps(bundle),encoding='utf-8')
         received=[]
+        requests=[]
 
         class Writer:
             async def complete(self, actual, messages):
                 received.append(messages)
+                requests.append(build_request(actual,messages)[0])
+                if messages[0]['content'].splitlines()[0]=='702':
+                    return '{"body":"706","detail":"707"}', {}
                 return '706。', {}
 
-        adapter=ReviewedPrivateChatProviders(self.config,path,sha256(path.read_bytes()).hexdigest(),writer=Writer())
+        original_digest=sha256(path.read_bytes()).hexdigest()
+        adapter=ReviewedPrivateChatProviders(self.config,path,original_digest,writer=Writer())
         with self.assertRaisesRegex(RuntimeErrorBase,'private_reply_output_contract_missing'):
             await adapter.reply('707',{'phase':'main','mode':'short_answer'})
         for phase in ('main','search_notice'):
-            await adapter.reply('707',{'phase':phase,'mode':'short_answer',
-                                        'output_constraints':limits(phase,'short_answer')})
+            _,usage=await adapter.reply('707',{'phase':phase,'mode':'short_answer',
+                                                'output_constraints':limits(phase,'short_answer')})
+            self.assertNotIn('evidence_guidance',usage)
         self.assertEqual([m[0]['content'] for m in received],['704','701'])
         self.assertEqual(json.loads(received[0][1]['content'])['output_constraints'],limits('main','short_answer'))
+
+        path.write_text(json.dumps(bundle|{'insufficient_evidence_system':None}),encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeErrorBase,'private_chat_review_incomplete'):
+            ReviewedPrivateChatProviders(self.config,path,sha256(path.read_bytes()).hexdigest(),writer=Writer())
+        path.write_text(json.dumps(bundle|{'insufficient_evidence_system':'708'}),encoding='utf-8')
+        with self.assertRaisesRegex(RuntimeErrorBase,'private_chat_review_version_changed'):
+            ReviewedPrivateChatProviders(self.config,path,original_digest,writer=Writer())
+
+        candidate=ReviewedPrivateChatProviders(self.config,path,sha256(path.read_bytes()).hexdigest(),writer=Writer())
+        for phase,mode,status,system in (
+            ('main','short_answer','insufficient','704\n708'),
+            ('main','long_detail','insufficient','702\n708'),
+            ('main','chat','ordinary','700'),
+            ('main','short_answer','local_hit','704'),
+            ('search_notice','short_answer','insufficient','701'),
+        ):
+            with self.subTest(phase=phase,mode=mode,status=status):
+                packet={'phase':phase,'mode':mode,'output_constraints':limits(phase,mode),
+                        'research':{'status':status,'facts':[]}}
+                _,usage=await candidate.reply('707',packet)
+                self.assertEqual(received[-1][0]['content'],system)
+                self.assertEqual(json.loads(received[-1][1]['content']),packet)
+                if phase=='main':
+                    expected={'applied':status=='insufficient','request_sha256':fingerprint(requests[-1])}
+                    if expected['applied']:
+                        expected['note_sha256']=sha256(b'708').hexdigest()
+                    self.assertEqual(usage['evidence_guidance'],expected)
+                else:
+                    self.assertNotIn('evidence_guidance',usage)
 
     async def test_ordinary_writer_receives_phase_for_advisory_limits(self):
         self.providers.research=False
@@ -227,6 +265,7 @@ class OutputHandoff(unittest.IsolatedAsyncioTestCase):
             'main':model, 'search':model|{'name':'deepseek-flash'}, 'notice':model|{'name':'deepseek-flash'},
             'reply_system':'700', 'notice_system':'701', 'long_system':'702', 'search_system':'703',
             'short_answer_system':'704', 'post_search_system':'711', 'post_search_long_system':'712',
+            'insufficient_evidence_system':'725',
             'nodes':{node:{'instructions':'705','criteria':{}} for node in nodes},
         }
         bundle['knowledge_study']={'version':'source-facts-v1','model':bundle['search'],'instructions':'JSON'}
@@ -272,6 +311,8 @@ class OutputHandoff(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m[1][0]['content'] for m in received[-4:]],['711','711','711','704'])
         self.assertTrue(all('search_notice_presented' not in json.loads(m[1][1]['content'])
                             for m in received[-4:]))
+        await adapter.reply('707',main|{'research':{'status':'insufficient','retrieval':{'tool':'acquired'}}})
+        self.assertEqual(received[-1][1][0]['content'],'711\n725')
 
         from persona_runtime.provider_policy import PRIVATE_COMPATIBLE_WRITER, require_generation_provider
         from persona_runtime.session_privacy import recipients

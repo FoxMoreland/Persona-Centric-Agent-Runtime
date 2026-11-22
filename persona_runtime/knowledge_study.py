@@ -755,11 +755,19 @@ async def _semantic_reread(flow,turn,base,material,context):
         if target_proof:
             candidates=lookup_target.current_enough(candidates,target_proof)
         reviewed=public_lookup.active(db,tid)
+    query_bound=False
     if reviewed:
         by_id={f['id']:semantic.public_material(f) for f in candidates}
         facts=[by_id[ident] for ident in ids if ident in by_id]
     else:
         facts=await asyncio.to_thread(semantic.rank,flow.store.paths,question,candidates)
+        if not facts and not need and getattr(flow.providers,'community_route',False):
+            # Use the semantic order within this lookup's cited passages.
+            with flow.store.connection() as db:
+                cited=route.cited_lookup_passages(db,turn,base,tid,candidates)
+            if cited:
+                facts=await asyncio.to_thread(semantic.rank,flow.store.paths,question,cited,minimum_score=-1.0)
+                query_bound=bool(facts)
     if need:
         with flow.store.connection() as db:
             offered=research_contract.restore_offer(db,tid,need,'readback',facts[:semantic.PASSAGE_LIMIT],
@@ -778,8 +786,10 @@ async def _semantic_reread(flow,turn,base,material,context):
         _,live,actual=flow._snapshot(db,tid)
         if live!=base or actual!=material or (selected and route.pinned_research_passages(db,turn,base,eligibility,selected,target_proof)!=facts):
             raise RuntimeErrorBase('private_reply_source_changed')
+        if query_bound and route.cited_lookup_passages(db,turn,base,tid,facts)!=facts:
+            raise RuntimeErrorBase('private_reply_source_changed')
         db.execute('INSERT INTO knowledge_study_reads VALUES(?,?,?,?,?,?,?)',(tid,fingerprint(question),
-                   'hit' if facts else 'insufficient',encoded(selected),timestamp(),None,0))
+                   'hit' if facts else 'insufficient',encoded(selected),timestamp(),None,int(query_bound)))
         if need and facts:
             from . import persona_world
             if persona_world.enabled(db,base['instance'],turn['persona_id']):

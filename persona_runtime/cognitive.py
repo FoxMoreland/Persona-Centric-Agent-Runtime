@@ -261,8 +261,15 @@ class CognitiveService:
             return CognitiveService.persist(conn,manifest,task=task,attempt_id=attempt_id)
         if stage=='conversation_web_decision':
             from .knowledge_web_decision import request,VERSION
-            body=request(json.loads(task['model_snapshot']),payload['knowledge_processing']['input'])
-            manifest['provider_request_contract']={'version':VERSION,'kind':'need_web','configuration_source':'explicit_jev'}
+            from . import community
+            model = json.loads(task['model_snapshot'])
+            body = request(model, payload['knowledge_processing']['input'])
+            version, source = VERSION, 'explicit_jev'
+            if community.enabled() and model['base_url'] == community.DECISION_BASE:
+                from .community_decision import PROFILE, build
+                body = build(body, model['max_input_chars'])
+                version, source = PROFILE, 'community_official_key'
+            manifest['provider_request_contract']={'version':version,'kind':'need_web','configuration_source':source}
             if payload['knowledge_processing']['input'].get('decision_profile'):
                 manifest['provider_request_contract']['instruction_profile']=payload['knowledge_processing']['input']['decision_profile']
             manifest['native_request_hash']=fingerprint(body)

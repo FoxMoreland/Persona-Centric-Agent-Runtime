@@ -102,8 +102,13 @@ def card(paths, policy, scene):
 def configured_jev(paths):
     from .knowledge_routing import configured_model
     model = configured_model(paths)
-    require(model['name']==JEV,'jev_model_changed')
+    require(model['name']==decision_name(),'jev_model_changed')
     return model
+
+
+def decision_name():
+    from . import community
+    return community.FLASH if community.enabled() else JEV
 
 
 def cloud(store, db, policy, main):

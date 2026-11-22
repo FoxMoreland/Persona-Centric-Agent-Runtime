@@ -114,9 +114,10 @@ class WorkbenchData:
         return self._client.manage('desktop.network.wake')
 
     def live_people(self):
+        from . import community
         config=self._config.public()["model"]
         return {"people":self._client.manage("persona.list"),"connected":bool(config.get("has_key") and config.get("base_url")),
-                "model":config["name"]}
+                "model":config["name"], "community":community.enabled()}
 
     def live_persona_image(self, pid, kind):
         from .workbench_appearance import image_path, image_url

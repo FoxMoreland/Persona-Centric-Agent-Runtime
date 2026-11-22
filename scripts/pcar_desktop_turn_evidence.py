@@ -5,6 +5,7 @@ from contextlib import closing
 import json
 import math
 from pathlib import Path
+import re
 import sqlite3
 
 from .pcar_acceptance_check import safe_file
@@ -41,6 +42,25 @@ def lookup_call_evidence(row):
     if counts:
         call["provider_tool_counts"] = counts
     return call
+
+
+def private_reply_evidence(row):
+    """Export only the request and guidance digests from a received writer attempt."""
+    attempt = dict(row)
+    raw_usage = attempt.pop("usage_json")
+    if attempt["state"] != "received":
+        return attempt
+    try:
+        usage = json.loads(raw_usage or "{}")
+    except (TypeError, ValueError):
+        return attempt
+    guidance = usage.get("evidence_guidance") if isinstance(usage, dict) else None
+    if not isinstance(guidance, dict) or type(guidance.get("applied")) is not bool:
+        return attempt
+    digests = ("request_sha256", "note_sha256") if guidance["applied"] else ("request_sha256",)
+    if all(isinstance(guidance.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", guidance[key]) for key in digests):
+        attempt["evidence_guidance"] = {"applied": guidance["applied"], **{key: guidance[key] for key in digests}}
+    return attempt
 
 
 def collect(home: Path, request_id: str) -> dict:
@@ -95,9 +115,9 @@ def collect(home: Path, request_id: str) -> dict:
                 FROM local_knowledge_reads WHERE turn_id=?""",(turn_id,)).fetchone()
             report['local_knowledge_read']=dict(local) if local else None
         if schema >= 34:
-            report["private_reply_attempts"] = [dict(row) for row in db.execute(
+            report["private_reply_attempts"] = [private_reply_evidence(row) for row in db.execute(
                 """SELECT a.id,a.phase,a.draft,a.state,a.started_at,a.received_at,d.id decision_id,
-                          d.execution_revision FROM private_reply_attempts a JOIN private_reply_decisions d
+                          d.execution_revision,a.usage_json FROM private_reply_attempts a JOIN private_reply_decisions d
                           ON d.id=a.decision_id WHERE a.turn_id=? ORDER BY a.rowid""", (turn_id,))]
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='private_reply_nodes'").fetchone():
                 report["private_decisions"] = [dict(row) for row in db.execute(

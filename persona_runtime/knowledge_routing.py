@@ -7,6 +7,9 @@ from .knowledge_web_decision import VERSION,request,execute
 
 def configured_model(paths):
     from .config import ConfigStore
+    from . import community
+    if community.enabled():
+        return community.decision_model(ConfigStore(paths).load())
     try:value=json.loads((paths.home/'private/knowledge-router/config.json').read_text(encoding='utf-8'))
     except (OSError,ValueError):raise RuntimeErrorBase('jev_configuration_required') from None
     try:
@@ -27,8 +30,10 @@ class KnowledgeRouting:
     def __init__(self,engine):self.engine=engine
     def model(self):return configured_model(self.engine.store.paths)
     def policy(self,pid):
+        from . import community
         reader=self.engine.chat.knowledge.current_policy(pid)
-        return {'revision':reader['revision'],'data':{'enabled':reader['data']['enabled'],'purpose':'need_web','model_source':'jev','channels':['desktop']}}
+        source = 'deepseek-flash' if community.enabled() else 'jev'
+        return {'revision':reader['revision'],'data':{'enabled':reader['data']['enabled'],'purpose':'need_web','model_source':source,'channels':['desktop']}}
     def configuration(self):
         try:
             model=self.model();return {'base_url':model['base_url'],'name':model['name'],'key_configured':True,'purpose':'need_web','retired':False}

@@ -24,6 +24,7 @@ class DeepSeekNativeClient:
             url = official_endpoint(model)
         except ValueError as error:
             raise ModelError(str(error), diagnostics={'request_headers_sent': False}) from None
+        from .network_proxy import route_name
         proxy = outbound_proxy(url)
         try: key = unprotect(model['encrypted_key']) if model.get('encrypted_key') else ''
         except (ValueError, OSError):
@@ -33,7 +34,7 @@ class DeepSeekNativeClient:
         started = time.monotonic()
         parser = NativeResponse(stream=payload['stream'], started=started, progress=self.progress)
         transport = {'phase': 'request_setup', 'request_headers_sent': False,
-            'response_headers_received': False, 'network_route': 'system_proxy' if proxy else 'local',
+            'response_headers_received': False, 'network_route': route_name(url, proxy),
             'transport_profile': contract['profile'], 'thinking': contract['thinking'],
             'response_format': 'text'}
         trace = aiohttp.TraceConfig()

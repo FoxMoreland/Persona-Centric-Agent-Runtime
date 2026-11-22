@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from persona_runtime import import_prompts as prompts
+from persona_runtime import community, deepseek_card_budget, import_prompts as prompts
 from persona_runtime.config import ConfigStore, atomic_json
 from persona_runtime.corpus_files import digest
 from persona_runtime.import_card_job import CardJobs
@@ -158,3 +158,29 @@ class ImportPromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.transport.requests[-1]["messages"][0]["content"], card_contract["system"])
         self.cards.start(ident, current["revision"], pid, True)
         self.assertEqual(len(self.transport.requests), 3)
+
+    async def test_community_card_uses_flash_token_budget_on_existing_profiles(self):
+        self.config.update({"model": {"base_url": community.BASE, "api_key": "123"}})
+        data = self.library.add(b"## X\n301\n## Y\n302\n")
+        data = self.profiles.plan(data["id"], data["revision"], data["mapping"], {})
+        ident, plan = data["id"], data["plan"]["id"]
+        self.profiles.start(ident, data["revision"], plan, True)
+        await self.profiles.tasks[ident]
+        args = (ident, self.library.status(ident)["revision"], plan)
+        legacy = self.cards.preview(*args)
+
+        with patch.object(community, "enabled", return_value=True):
+            packet = self.cards.preview(*args)
+            budget = packet["max_input_tokens"]
+            self.assertEqual(budget, 832307)
+            self.assertEqual(packet["wire_hash"], legacy["wire_hash"])
+            self.cards._checked_model(legacy)
+            with patch.object(deepseek_card_budget, "input_tokens", return_value=budget + 1):
+                self.assertEqual(self.cards.status(ident)["state"], "capacity")
+                self.assertEqual(len(self.transport.requests), 2)
+            with patch.object(deepseek_card_budget, "input_tokens", return_value=budget):
+                self.cards.start(*args, True)
+                await self.cards.tasks[ident]
+                self.assertEqual(self.cards.status(ident)["state"], "ready")
+
+        self.assertEqual(self.transport.requests[2:], [packet["wire"]])

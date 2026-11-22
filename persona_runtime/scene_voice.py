@@ -77,6 +77,13 @@ def decision(raw):
     try:
         response = json.loads(raw, object_pairs_hook=unique)
         answer = response['answers']['scene']
+        from . import community
+        from .community_decision import PROFILE
+        if community.enabled() and response.get('decision_source') == PROFILE:
+            chosen = answer.get('choice')
+            if answer.get('type') == 'choice' and chosen in SCENES:
+                return chosen, 'selected'
+            return 'fallback', 'invalid'
         chosen, probabilities = answer['choice'], answer['probabilities']
         if (answer.get('type') != 'choice' or chosen not in SCENES or set(probabilities) != set(SCENES)
                 or any(type(p) not in (float, int) or not math.isfinite(p) or not 0 <= p <= 1

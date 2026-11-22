@@ -5,16 +5,17 @@ from types import SimpleNamespace
 import aiohttp
 
 from .chat import ModelError, model_tls_context
-from .network_proxy import outbound_proxy
+from .network_proxy import outbound_proxy, route_name
 from .security import unprotect
 
 TIMING_PROFILE = 'jev-request-body-to-response-v1'
 
 
 class JevTransport:
-    def __init__(self, model):
+    def __init__(self, model, *, endpoint=None, profile=TIMING_PROFILE):
         self.model = model
-        self.url = model['base_url'].rstrip('/') + '/systemone'
+        self.url = endpoint or model['base_url'].rstrip('/') + '/systemone'
+        self.profile = profile
         self.session = None
 
     async def close(self):
@@ -90,7 +91,8 @@ class JevTransport:
                                           'response_headers_received':status is not None,'effect_unknown':sent}) from None
         finally:
             diagnostics({
-                'profile':TIMING_PROFILE,'http':status,'total_ms':ms(start,receipt_at or loop.time()),
+                'profile':self.profile,'http':status,'total_ms':ms(start,receipt_at or loop.time()),
+                'network_route':route_name(self.url, proxy),
                 'before_send_ms':ms(start,trace.dispatched),
                 'connection_ms':ms(trace.connection_start,trace.connection_end),
                 'connection_reused':trace.reused,'time_to_headers_ms':ms(trace.dispatched,headers_at),

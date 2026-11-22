@@ -39,7 +39,9 @@ def parse(raw):
     try:
         value=json.loads(raw);answer=value['answers']['route'];choice=answer['choice']
         if choice not in ('web','none'):raise ValueError()
-        result={'need_web':choice=='web','choice':choice,'decision_source':'jev'}
+        from .community_decision import PROFILE
+        source = PROFILE if value.get('decision_source') == PROFILE else 'jev'
+        result={'need_web':choice=='web','choice':choice,'decision_source':source}
         number=lambda v:type(v) in (int,float) and math.isfinite(v)
         if number(answer.get('confidence')):result['confidence']=answer['confidence']
         if isinstance(answer.get('probabilities'),dict):
@@ -59,6 +61,20 @@ def usage(value):
 
 async def execute(model,body):
     from .chat import ModelCompletion,ModelError,model_tls_context
+    from . import community
+    if community.enabled():
+        from .community_decision import Transport
+        transport = Transport(model)
+        detail = {}
+        try:
+            status, raw = await transport.complete(
+                body, on_dispatch=lambda _: None, on_receipt=lambda _: None, diagnostics=detail.update)
+        finally:
+            await transport.close()
+        measured = usage(json.loads(raw)) if status == 200 else None
+        if status != 200:
+            raise ModelError('provider_http_' + str(status), usage=measured, diagnostics=detail)
+        return ModelCompletion(raw, measured, detail)
     from .network_proxy import outbound_proxy
     from .security import unprotect
     url=model['base_url'].rstrip('/')+'/systemone';proxy=outbound_proxy(url)

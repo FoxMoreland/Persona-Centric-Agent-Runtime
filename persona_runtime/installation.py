@@ -424,6 +424,9 @@ def configure_model(paths,role,*,base_url=None,name=None,key_stdin=False):
     from .config import ConfigStore
     from .security import protect
     from .character_embedding import private_directory
+    from . import community
+    if community.enabled() and role != 'main':
+        raise ValueError('社区版从主模型连接读取同一个 DeepSeek 官方 API Key。')
     secret=sys.stdin.readline().rstrip('\r\n') if key_stdin else getpass.getpass('API Key（隐藏输入）：')
     if not secret:raise ValueError('没有输入密钥，配置未改变。')
     cfg=ConfigStore(paths);cfg.initialize()

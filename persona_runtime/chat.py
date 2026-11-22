@@ -71,6 +71,9 @@ class ChatCompletionsClient:
         except (OSError,TimeoutError):return False
 
     async def complete(self, model, messages):
+        from . import community
+        if community.enabled() and not model.get('encrypted_key'):
+            raise ModelError('model_not_configured', diagnostics={'request_headers_sent':False})
         if '_native_web_profile' in model:
             from .deepseek_native_transport import DeepSeekNativeClient
             return await DeepSeekNativeClient(ssl_context=self.ssl_context).complete(model,messages)
@@ -132,9 +135,9 @@ class ChatCompletionsClient:
             return result
         # Keep the OS trust store and add the project's pinned public CA bundle
         # for every model purpose. Isolated probes and production use one path.
-        from .network_proxy import outbound_proxy
+        from .network_proxy import outbound_proxy, route_name
         proxy=outbound_proxy(url)
-        transport['network_route']='system_proxy' if proxy else 'local'
+        transport['network_route']=route_name(url, proxy)
         connector=aiohttp.TCPConnector(ssl=self.ssl_context or model_tls_context())
         if budget is not None and model.get('_request_deadline') is not None:
             budget=min(budget,max(.01,model['_request_deadline']-time.monotonic()-.1))

@@ -5,6 +5,7 @@ from unittest.mock import patch
 from persona_runtime import character_embedding, knowledge_coverage, knowledge_study, local_knowledge, semantic_knowledge
 from persona_runtime.models import RuntimeErrorBase
 from tests import test_knowledge_study as study_tests, test_knowledge_revisions as revision_tests
+from tests import test_local_knowledge as local_tests
 
 
 class SemanticRoute(unittest.IsolatedAsyncioTestCase):
@@ -167,6 +168,114 @@ class SemanticRoute(unittest.IsolatedAsyncioTestCase):
         with self.store.connection() as db:
             self.assertEqual(db.execute('SELECT outcome FROM local_knowledge_reads WHERE turn_id=?',(tid,)).fetchone()[0],
                              'not_requested')
+
+    async def test_community_local_read_survives_j4_decline_across_topics(self):
+        self.providers.community_route=True
+        self.providers.route='none'
+        with self.store.connection(write=True) as db:
+            first, second = [local_tests.LocalKnowledge.add(self, db, value) for value in ('903', '904')]
+
+        matches={'905':first,'906':second}
+
+        def rank(paths, question, rows):
+            return [semantic_knowledge.public_material(row) for row in rows if row['id']==matches.get(question)]
+
+        with patch.object(semantic_knowledge, 'rank', side_effect=rank):
+            tid=await self.submit('905')
+            self.assertEqual([f['id'] for f in self.providers.bodies[-1][1]['research']['facts']], [first])
+            self.show(tid, 'main')
+            next_turn=await self.submit('906')
+        self.assertEqual([f['id'] for f in self.providers.bodies[-1][1]['research']['facts']], [second])
+        with self.store.connection() as db:
+            self.assertEqual([tuple(row) for row in db.execute("""SELECT i.choice,i.state,r.outcome,j.result_json
+                FROM private_lookup_intents i JOIN local_knowledge_reads r ON r.turn_id=i.turn_id
+                JOIN private_reply_nodes j ON j.turn_id=i.turn_id AND j.node='J4' ORDER BY i.rowid""")],
+                [('none','none','hit','"none"')]*2)
+            self.assertFalse(db.execute('SELECT 1 FROM private_lookup_calls').fetchone())
+        unit=next(u for u in self.out.list(self.pid,self.sid,next_turn) if u['phase']=='main')
+        plan=self.out.plan(self.pid,self.sid,unit['id'])
+        with self.store.connection(write=True) as db:
+            local_knowledge.withdraw(db,second)
+        self.assertEqual(self.out.offer(self.pid,self.sid,unit['id'],plan['id'],plan['revision'],0,'902')['state'],
+                         'stopped')
+
+    async def test_community_ordinary_reply_after_local_miss_or_encoder_failure(self):
+        self.providers.community_route=True
+        self.providers.route='none'
+        with self.store.connection(write=True) as db:
+            local_tests.LocalKnowledge.add(self, db)
+        with patch.object(semantic_knowledge, 'rank',
+                          side_effect=[[], RuntimeErrorBase('local_knowledge_embedding_unavailable')]):
+            for text in ('905', '906'):
+                tid=await self.submit(text)
+                self.show(tid, 'main')
+                self.assertEqual(self.providers.bodies[-1][1]['research']['status'], 'ordinary')
+        with self.store.connection() as db:
+            self.assertEqual([row[0] for row in db.execute('SELECT outcome FROM local_knowledge_reads ORDER BY rowid')],
+                             ['miss','embedding_unavailable'])
+        self.assertFalse(self.providers.lookups)
+
+    async def test_community_local_read_respects_refresh_and_library_permissions(self):
+        self.providers.community_route=True
+        self.providers.route='none'
+        with self.store.connection(write=True) as db:
+            local_tests.LocalKnowledge.add(self, db)
+        with patch.object(semantic_knowledge, 'rank', side_effect=AssertionError('unexpected local read')):
+            self.show(await self.submit('https://example.org/903'), 'main')
+            local_tests.LocalKnowledge.policy(self, 'policy.', {'enabled':False,'channels':['desktop']})
+            self.show(await self.submit('903'), 'main')
+        with self.store.connection() as db:
+            self.assertEqual([row[0] for row in db.execute('SELECT outcome FROM local_knowledge_reads ORDER BY rowid')],
+                             ['not_requested','disabled'])
+        self.assertFalse(self.providers.lookups)
+
+    async def test_community_scoped_readback_and_followup_keep_cited_passages_only(self):
+        self.providers.community_route=True
+        self.providers.structured_study=True
+        cited='https://example.org/701'
+        uncited='https://example.org/702'
+
+        async def retrieve(step,attempt,query,model):
+            self.providers.lookups.append((step,attempt,query))
+            if step!='native':
+                return {'notes':'','sources':[],'tool_calls':0},{}
+            return {
+                'notes':'701',
+                'sources':[
+                    {'url':cited,'title':'701','summary':'711','kind':'native_search_summary'},
+                    {'url':uncited,'title':'702','summary':'722','kind':'native_search_summary'},
+                ],
+                'annotations':[{'url_citation':{'url':cited,'start_index':0,'end_index':3}}],
+                'tool_calls':1,
+            },{}
+
+        def rank(paths,question,rows,*,minimum_score=None,limit=6):
+            if minimum_score is None:
+                return []
+            self.assertEqual({r['url'] for r in rows},{cited})
+            return [semantic_knowledge.public_material(r) for r in rows[:limit]]
+
+        self.providers.retrieve=retrieve
+        with patch.object(semantic_knowledge,'rank',side_effect=rank):
+            cold=await self.cold()
+            self.show(cold,'main')
+            acquired=self.providers.bodies[-1][1]['research']['facts']
+            self.assertEqual([f['url'] for f in acquired],[cited])
+            calls=len(self.providers.lookups)
+            with patch.object(local_knowledge,'local_only',return_value=True), patch.object(
+                    semantic_knowledge,'related_questions',return_value=True):
+                followup=await self.submit('711')
+        self.assertEqual(self.providers.bodies[-1][1]['research']['facts'],acquired)
+        self.assertEqual(len(self.providers.lookups),calls)
+        with self.store.connection(write=True) as db:
+            self.assertEqual(db.execute("SELECT query_bound FROM knowledge_study_reads WHERE turn_id=?",(cold,)).fetchone()[0],1)
+            self.assertEqual(json.loads(db.execute("SELECT value FROM knowledge_control WHERE key=?",
+                                                  ('private.semantic.cited_origin.'+followup,)).fetchone()[0]),cold)
+            local_knowledge.withdraw_document(db,acquired[0]['source_ids'][0])
+        unit=next(u for u in self.out.list(self.pid,self.sid,followup) if u['phase']=='main')
+        plan=self.out.plan(self.pid,self.sid,unit['id'])
+        self.assertEqual(self.out.offer(self.pid,self.sid,unit['id'],plan['id'],plan['revision'],0,'902')['state'],
+                         'stopped')
 
 
 class SemanticEligibility(unittest.TestCase):

@@ -7,6 +7,7 @@ from copy import deepcopy
 
 from .archive import fingerprint
 from .character_embedding import safe_path
+from . import community, deepseek_card_budget
 from .corpus_files import digest
 from .corpus_learning_transport import CorpusCallFailure, CorpusLearningHTTPClient
 from .import_analysis_v2 import VERSION as PROFILE_VERSION, _unique_keys
@@ -66,6 +67,12 @@ def _source_hash(src, drafts, stats):
 
 class CapacityError(ValueError):
     pass
+
+
+def _token_limit(model, release):
+    if release and community.enabled() and model['name'] == community.FLASH:
+        return deepseek_card_budget.input_limit(model['max_tokens'])
+    return None
 
 
 def _checked_drafts(db, src, drafts):
@@ -186,13 +193,20 @@ class CardJobs:
         stats = {r:plan["roles"][r].get("stats",{}) for r in ROLES}
         payload,_ = build_source(drafts,stats)
         messages = [{"role":"system","content":contract["system"]},{"role":"user","content":encode(payload)}]
-        if sum(len(m["content"]) for m in messages) > model["max_input_chars"]:
+        token_limit = _token_limit(model, release)
+        if token_limit is None:
+            budget = {"max_input_chars": model["max_input_chars"]}
+            over_budget = sum(len(m["content"]) for m in messages) > model["max_input_chars"]
+        else:
+            budget = {"max_input_tokens": token_limit}
+            over_budget = deepseek_card_budget.input_tokens(messages) > token_limit
+        if over_budget:
             raise CapacityError("双人画像及模板超出输入容量，请缩小来源范围。")
         wire = build_request(model,messages)[0]
         packet = {"version":VERSION,"stage":"compose","document":ident,"plan_id":plan_id,
                   "source_revision":revision,"source_sha256":_source_hash(src,drafts,stats),
                   "contract_sha256":checksum,"model":model["name"],"base_url":model["base_url"],
-                  "max_input_chars":model["max_input_chars"],"wire":wire,"wire_hash":fingerprint(wire)}
+                  **budget,"wire":wire,"wire_hash":fingerprint(wire)}
         if release:
             packet["prompt_release"] = release
         frozen = {"packet":packet,"drafts":drafts,"stats":stats}
@@ -211,9 +225,13 @@ class CardJobs:
                 "成卡模板已变化。")
         model = self._model(contract, release)
         wire = packet["wire"]
+        if "max_input_tokens" in packet:
+            same_budget = _token_limit(model, release) == packet["max_input_tokens"]
+        else:
+            same_budget = model["max_input_chars"] == packet["max_input_chars"]
         require(wire["messages"][0]["content"] == contract["system"]
                 and packet["wire_hash"] == fingerprint(wire) and build_request(model,wire["messages"])[0] == wire
-                and model["base_url"] == packet["base_url"] and model["max_input_chars"] == packet["max_input_chars"],
+                and model["base_url"] == packet["base_url"] and same_budget,
                 "成卡模型或请求内容已变化。")
         return model
 

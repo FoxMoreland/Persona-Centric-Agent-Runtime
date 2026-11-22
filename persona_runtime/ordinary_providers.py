@@ -9,7 +9,7 @@ from functools import partial
 from pathlib import Path
 import re
 
-from .archive import encoded
+from .archive import encoded, fingerprint
 from .chat import ChatCompletionsClient
 from .knowledge_routing import configured_model, binding as jev_binding
 from .knowledge_web_decision import usage
@@ -17,6 +17,7 @@ from .models import RuntimeErrorBase
 from .provider_compat import build_request
 from .scene_jev import JevTransport
 from .provider_policy import DEEPSEEK_TEXT_RELAY, is_official_deepseek
+from . import community
 
 
 OFFICIAL_DEEPSEEK_ROUTE = 'deepseek-official-jev-ef-v1'
@@ -108,6 +109,11 @@ class ReviewedPrivateChatProviders:
         document.pop('notice_review',None)
         self.research=document.get('protocol')=='maibot-private-v3'
         self.grounded_search = document.get('research_context_version') == 'search-evidence-v2'
+        self.insufficient_evidence_system = document.get('insufficient_evidence_system')
+        if 'insufficient_evidence_system' in document and not (
+                self.research and isinstance(self.insufficient_evidence_system, str)
+                and self.insufficient_evidence_system.strip()):
+            raise RuntimeErrorBase('private_chat_review_incomplete')
         from .local_knowledge import VERSION as LOCAL_LOOKUP_VERSION
         local_version=document.get('local_lookup_version')
         from .knowledge_revisions import VERSION as REVISION_VERSION
@@ -199,7 +205,10 @@ class ReviewedPrivateChatProviders:
             self.bundle = document | {'scope': {'instance': activation['instance'],
                                                'personas': self.retrieval_spec['persona_ids']}}
         self.generation_route=document.get('generation_route')
-        if 'generation_route' in document and self.generation_route!=OFFICIAL_DEEPSEEK_ROUTE:
+        self.community_route = self.generation_route == community.ROUTE
+        expected_route = community.ROUTE if community.enabled() else OFFICIAL_DEEPSEEK_ROUTE
+        if ('generation_route' in document and self.generation_route != expected_route
+                or community.enabled() and not self.community_route):
             raise RuntimeErrorBase('private_chat_review_recipient_changed')
         self.text_flash_account=document.get('text_flash_account')
         if self.text_flash_account not in (None,'organization'):
@@ -321,8 +330,10 @@ class ReviewedPrivateChatProviders:
                 raise RuntimeErrorBase('private_chat_review_recipient_changed')
             self.notice_model()
         if self.generation_route:
+            decision = ({'base_url': community.DECISION_BASE, 'name': community.FLASH}
+                        if self.community_route else {'base_url': DEEPSEEK_TEXT_RELAY, 'name': 'jev-1.14'})
             if (self.text_flash_account!='organization' or research_account!='native_web'
-                    or document.get('jev')!={'base_url':DEEPSEEK_TEXT_RELAY,'name':'jev-1.14'}
+                    or document.get('jev')!=decision
                     or main_target.get('name')!='deepseek-v4-pro' or not is_official_deepseek(main_target)):
                 raise RuntimeErrorBase('private_chat_review_recipient_changed')
             self._model('main')
@@ -330,7 +341,11 @@ class ReviewedPrivateChatProviders:
             self._check_selector(settings)
         self.writer=writer or ChatCompletionsClient(allow_private_compatible_writer=self.compatible_writer)
         self.hydrogen_writer=writer or ChatCompletionsClient(allow_openrouter_writer=True)
-        self.jev_factory=jev_factory
+        if self.community_route:
+            from .community_decision import Transport
+            self.jev_factory = Transport if jev_factory is JevTransport else jev_factory
+        else:
+            self.jev_factory = jev_factory
         self.connections={}
 
     async def close(self):
@@ -371,7 +386,8 @@ class ReviewedPrivateChatProviders:
     def target_model(self, settings=None):
         model = (self.config.load() if settings is None else settings).get('lookup_target_model')
         if (not model or self.bundle['lookup_target']['model']!={k:model[k] for k in ('base_url','name')}
-                or model['name'] in (self.bundle['main']['name'],self.bundle['jev']['name'])
+                or model['name']==self.bundle['main']['name']
+                or not getattr(self,'community_route',False) and model['name']==self.bundle['jev']['name']
                 or (self.generation_route and (not is_official_deepseek(model)
                     or model['name'] not in ('deepseek-v4-flash','deepseek-flash')))):
             raise RuntimeErrorBase('private_chat_review_recipient_changed')
@@ -513,6 +529,13 @@ class ReviewedPrivateChatProviders:
             return None,audit
         answer=answers[node]
         choice=answer.get('choice')
+        if getattr(self,'community_route',False):
+            from .community_decision import PROFILE
+            if (result.get('decision_source') != PROFILE or answer.get('type') != 'choice'
+                    or choice not in options):
+                return None,audit
+            return choice,audit|{'usage':usage(result),'decision_source':PROFILE,
+                                 'provider_receipt_sha256':result.get('provider_receipt_sha256')}
         weights=answer.get('probabilities',{})
         if (answer.get('type')!='choice' or choice not in options or not isinstance(weights,dict) or set(weights)!=set(options)
                 or any(type(v) not in (int,float) or not math.isfinite(v) or not 0<=v<=1 for v in weights.values())
@@ -619,6 +642,10 @@ class ReviewedPrivateChatProviders:
             packet=partwise.packet
             system=self.conversation_systems['partwise_post_search_system']
             model=model|{'_json_output':True}
+        note=self.insufficient_evidence_system if packet.get('phase')=='main' else None
+        note_applied=bool(note and research.get('status')=='insufficient')
+        if note_applied:
+            system+='\n'+note
         messages=[{'role':'system','content':system},
                   {'role':'user','content':encoded(packet)}]
         if sum(len(m['content']) for m in messages)>model['max_input_chars']:
@@ -633,11 +660,16 @@ class ReviewedPrivateChatProviders:
         response=await (self.hydrogen_writer if hydrogen else self.writer).complete(model,messages)
         raw,usage=response
         usage=dict(usage or {},requested_model=model['name'])
+        usage.pop('evidence_guidance',None)
+        if note:
+            evidence={'applied':note_applied,'request_sha256':fingerprint(request)}
+            if note_applied:
+                evidence['note_sha256']=sha256(note.encode()).hexdigest()
+            usage['evidence_guidance']=evidence
         if hydrogen:
             from .generation_retry import safe_diagnostics
             usage['writer_transport'] = safe_diagnostics(getattr(response,'diagnostics',None))
         if self.notice_context_profiles and packet.get('phase')=='search_notice':
-            from .archive import fingerprint
             usage['request_sha256']=fingerprint(request)
         echoed=(getattr(response,'diagnostics',None) or {}).get('requested_model_echoed')
         if self.compatible_writer and type(echoed) is bool:

@@ -241,7 +241,12 @@ class SceneRuntime:
             diagnostics = {}
             try:
                 if self.transport is None or self.transport.model!=model:
-                    self.transport = JevTransport(model)
+                    from . import community
+                    if community.enabled():
+                        from .community_decision import Transport
+                        self.transport = Transport(model)
+                    else:
+                        self.transport = JevTransport(model)
                     self.connections.append(self.transport)
                 status, raw = await self.transport.complete(wire,on_dispatch=on_dispatch,on_receipt=on_receipt,
                                                            diagnostics=diagnostics.update)

@@ -13,6 +13,24 @@ UNUSED_LOOKUP_NOTE='fixture-unused-lookup-note-799'
 
 
 class LookupCallEvidence(unittest.TestCase):
+    def test_writer_reconciles_only_received_guidance_fingerprints(self):
+        from scripts.pcar_desktop_turn_evidence import private_reply_evidence
+
+        trace={"applied":True,"request_sha256":"a"*64,"note_sha256":"b"*64}
+        row={"id":"701","state":"received","usage_json":None}
+        usage={"evidence_guidance":trace|{"raw_text":"702"},"credentials":"703"}
+        report=private_reply_evidence(row|{"usage_json":json.dumps(usage)})
+        self.assertEqual(report,{"id":"701","state":"received","evidence_guidance":trace})
+        self.assertEqual(private_reply_evidence(row),{"id":"701","state":"received"})
+        self.assertEqual(private_reply_evidence(row|{"usage_json":"{"}),{"id":"701","state":"received"})
+        unknown=private_reply_evidence(row|{"state":"unknown","usage_json":json.dumps(usage)})
+        self.assertNotIn("evidence_guidance",unknown)
+        usage["evidence_guidance"]["note_sha256"]="704"
+        self.assertNotIn("evidence_guidance",private_reply_evidence(row|{"usage_json":json.dumps(usage)}))
+        usage["evidence_guidance"]["applied"]=False
+        inactive=private_reply_evidence(row|{"usage_json":json.dumps(usage)})
+        self.assertEqual(inactive["evidence_guidance"],{"applied":False,"request_sha256":"a"*64})
+
     def test_native_receipt_preserves_timing_and_tool_counts_only(self):
         from scripts.pcar_desktop_turn_evidence import lookup_call_evidence
 

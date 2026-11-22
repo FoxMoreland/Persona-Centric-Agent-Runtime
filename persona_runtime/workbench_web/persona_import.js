@@ -1231,7 +1231,8 @@ window.pcarLive = (() => {
     const token=++epoch;
     const result=await api().live_people();
     if(token!==epoch||stopped)return;
-    state.connected=result.connected;state.model=result.model;
+    state.connected=result.connected;state.model=result.model;state.community=!!result.community;
+    if(state.community)recipientLabels.jev="DeepSeek Flash 决策";
     if(!reconnect)saveReading();
     state.people=result.people.filter(p=>!p.deleted).map(p=>({id:p.id,profile:{name:p.name},sessions:[]}));
     const chosen=state.people.find(p=>p.id===prefer) || state.people.find(p=>result.people.find(q=>q.id===p.id)?.selected) || state.people[0];
@@ -1626,7 +1627,7 @@ window.pcarLive = (() => {
       show("persona",parts[0],t.reply_event_id,parts.length===1?{recorded_at:t.reply_recorded_at,source:"event_recorded"}:null);
       for(const part of parts.slice(1))makeBubble(group,"persona",part,null);
     }
-    if(t.feedback_available)button(group,"这条不像",()=>feedback(currentPerson().id,t.id));
+    if(!state.community && t.feedback_available)button(group,"这条不像",()=>feedback(currentPerson().id,t.id));
     if(t.lookup_confirmation)button(group,"确认本轮查找范围",async()=>{
       const pid=currentPerson().id,s=currentSession(),box=panel("本轮查找范围");
       const proposed=t.lookup_target_status==="needs_public_scope";
@@ -1646,80 +1647,20 @@ window.pcarLive = (() => {
       button(box,"确认并继续本轮",()=>resume(field.value.trim()));
       button(box,"跳过本次查找",()=>resume(null));
     });
-    if(t.retained_lookup)el("small","本轮沿用了上轮查回的资料。",group);
-    for(const [show,kind,title] of [[t.role_long_detail,"long","查看角色长文"],[t.research_detail,"research","查看本轮查找资料"]]){
-      if(show)button(group,title,async()=>{
-        const pid=currentPerson().id,s=currentSession();
-        const data=await api().live_reply_detail(pid,s.id,t.id,kind);
-        const citations=kind==="research"&&t.used_sources?await api().live_reply_detail(pid,s.id,t.id,"citations"):[];
-        if(currentPerson()?.id!==pid||currentSession()!==s)return;
-        const box=panel(title);
-        if(citations.length){
-          const used=el("details",null,box);
-          el("summary","这条回复引用的原文",used);
-          for(const item of citations){
-            el("p",item.claim,used);el("blockquote",item.quote,used);
-            el("small",[item.title,item.url].filter(Boolean).join(" · "),used);
-          }
-        }
-        if(kind==="research" && t.public_lookup){
-          const names={native:"原生检索",search:"公开搜索",fetch:"读取网页"};
-          const states={received:"已返回",sending:"等待回执",unsent:"确认未发送",unknown:"结果待核对",failed:"失败"};
-          for(const call of t.public_lookup.calls)el("small",names[call.step]+" · "+states[call.state]+
-            (call.results!=null?" · "+call.results+" 条来源":""),box);
-          if(data.question)el("p","公开查询 · "+data.question,box);
-          if(t.public_lookup.outcome==="partial_evidence")el("p","本轮资料只覆盖了问题的一部分。",box);
-          if(data.updated_at)el("p","资料核验于 "+new Date(data.updated_at).toLocaleString(),box);
-        }
-        if(data.queries){
-          const coverage={complete:"可答",partial:"部分可答",missing:"缺资料",unconfirmed:"判断未完成",clarify:"所指待明确"};
-          const tools={not_dispatched:"仅查本地",acquired:"补查已取得资料",empty:"补查未取得资料",failed:"补查失败"};
-          for(const query of data.queries){
-            el("p",query.text,box);
-            el("small",[coverage[query.result],tools[query.tool],query.sources.length?"来源 "+query.sources.join("、"):""].filter(Boolean).join(" · "),box);
-          }
-        }else{
-          el("p",kind==="research"?data.notes:data.body,box).style.whiteSpace="pre-wrap";
-        }
-        for(const [index,source] of (data.sources||[]).entries()){
-          const item=el("details",null,box);el("summary",data.queries?(index+1)+" · "+source.title:source.title,item);
-          el("small",[source.date,source.url].filter(Boolean).join(" · "),item);
-          el("p",source.content||source.summary||"",item).style.whiteSpace="pre-wrap";
-          if(source.qualification)el("small",source.qualification,item);
-        }
-        if(data.original){
-          const old=el("details",null,box);
-          el("summary","查看本轮当时的修订",old);
-          el("p",data.original.question+" · "+new Date(data.original.at).toLocaleString(),old);
-          for(const source of data.original.sources){
-            el("small",[source.title,source.date,source.url].filter(Boolean).join(" · "),old);
-            el("p",source.text,old);
-            if(source.qualification)el("small",source.qualification,old);
-          }
-        }
-      });
-    }
-    if(t.has_retrieved_notes)button(group,"查看本轮检索资料",async()=>{
-      const pid=currentPerson().id,sid=currentSession().id;
-      const material=await api().live_retrieved_notes(pid,sid,t.id);
-      if(currentPerson()?.id!==pid||currentSession()?.id!==sid)return;
-      const box=panel("本轮检索资料");
-      const notes=el("p",material.notes,box);notes.style.whiteSpace="pre-wrap";
-      const sources=el("details",null,box);el("summary","资料来源（"+material.sources.length+"）",sources);
-      for(const source of material.sources)el("p",[source.title,source.url].filter(Boolean).join(" · "),sources);
-    });
+    if(t.role_long_detail)turnDetailButton(group,t,"long","查看角色长文");
+    if(!state.community)turnResearchActions(group,t);
     if(["queued","running"].includes(t.status))button(group,"停止本轮",()=>api().live_cancel(t.id));
     if(t.error_code && !(t.inline_reply && t.error_code==="desktop_presentation_unknown")){
       const labels={upstream_error:"本轮模型请求失败。",upstream_no_reply:"模型超过 180 秒未回复。",desktop_network_wait:"网络暂时不可用，消息已保存，连接恢复后会自动继续。",service_restarted:"本轮已中断，原结果待核对，可以继续聊天。",
         desktop_storage_wait:"消息已保存，正在等待本机恢复写入。",
         local_knowledge_store_unavailable:"本机知识资料暂时无法读取，本轮消息已保留。",
         local_knowledge_embedding_unavailable:"本机语义检索模型暂时不可用，本轮消息已保留。",
-        knowledge_study_failed:"资料已查回，整理请求失败，可查看本轮资料。",
+        knowledge_study_failed:state.community?"资料已查回，整理请求失败。":"资料已查回，整理请求失败，可查看本轮资料。",
         knowledge_study_unknown:"资料已查回，整理请求的回执待核对。",
-        knowledge_study_input_too_large:"资料已查回，整理模型本次可接收的空间不足。可查看本轮资料。",
+        knowledge_study_input_too_large:state.community?"资料已查回，整理模型本次可接收的空间不足。":"资料已查回，整理模型本次可接收的空间不足。可查看本轮资料。",
         desktop_connection_changed:"等待期间模型连接已更换，本轮已停止，原消息仍可查看。",
         desktop_reply_superseded:"已接收新消息，上一轮发言已结束。",
-        knowledge_repeated_notice:"资料已查回，本轮回复重复了查前提示。可以打开检索资料。",
+        knowledge_repeated_notice:state.community?"资料已查回，本轮回复重复了查前提示。":"资料已查回，本轮回复重复了查前提示。可以打开检索资料。",
         reply_bubble_limit:"本轮发言因气泡超限已停止。",
         reply_bubble_detail_required:"本轮含有无法在气泡内完整显示的内容。",
         reply_decision_required:"本轮尚未取得可用的接话决策。",
@@ -1778,10 +1719,77 @@ window.pcarLive = (() => {
         knowledge_study_insufficient:"已查回资料，正在准备回复",knowledge_study_read:"已完成本地检索，正在准备回复"};
       const renew=t.research_quota?.next_epoch*1000;
       const quotaLabel=Number.isFinite(renew)&&renew>Date.now()?"额度预计 "+new Date(renew).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"})+" 恢复":"正在等待模型调用额度";
-      el("small",t.research_quota?quotaLabel:studyPhase[t.phase]||(t.phase==="knowledge_waiting_quota"?"正在等待可用额度":t.phase==="knowledge_search_notice"?"查前消息显示后会自动开始搜索":
+      const stage=state.community?"":studyPhase[t.phase]||
+        (t.phase==="knowledge_search_notice"?"查前消息显示后会自动开始搜索":"");
+      el("small",t.research_quota?quotaLabel:stage||(t.phase==="knowledge_waiting_quota"?"正在等待可用额度":
         t.status==="queued"?"已受理，正在等待回复":"正在回复"),group);
     }
     return group;
+  }
+  function turnDetailButton(group,t,kind,title){
+    button(group,title,async()=>{
+      const pid=currentPerson().id,s=currentSession();
+      const data=await api().live_reply_detail(pid,s.id,t.id,kind);
+      const citations=kind==="research"&&t.used_sources?await api().live_reply_detail(pid,s.id,t.id,"citations"):[];
+      if(currentPerson()?.id!==pid||currentSession()!==s)return;
+      const box=panel(title);
+      if(citations.length){
+        const used=el("details",null,box);
+        el("summary","这条回复引用的原文",used);
+        for(const item of citations){
+          el("p",item.claim,used);el("blockquote",item.quote,used);
+          el("small",[item.title,item.url].filter(Boolean).join(" · "),used);
+        }
+      }
+      if(kind==="research" && t.public_lookup){
+        const names={native:"原生检索",search:"公开搜索",fetch:"读取网页"};
+        const states={received:"已返回",sending:"等待回执",unsent:"确认未发送",unknown:"结果待核对",failed:"失败"};
+        for(const call of t.public_lookup.calls)el("small",names[call.step]+" · "+states[call.state]+
+          (call.results!=null?" · "+call.results+" 条来源":""),box);
+        if(data.question)el("p","公开查询 · "+data.question,box);
+        if(t.public_lookup.outcome==="partial_evidence")el("p","本轮资料只覆盖了问题的一部分。",box);
+        if(data.updated_at)el("p","资料核验于 "+new Date(data.updated_at).toLocaleString(),box);
+      }
+      if(data.queries){
+        const coverage={complete:"可答",partial:"部分可答",missing:"缺资料",unconfirmed:"判断未完成",clarify:"所指待明确"};
+        const tools={not_dispatched:"仅查本地",acquired:"补查已取得资料",empty:"补查未取得资料",failed:"补查失败"};
+        for(const query of data.queries){
+          el("p",query.text,box);
+          el("small",[coverage[query.result],tools[query.tool],query.sources.length?"来源 "+query.sources.join("、"):""].filter(Boolean).join(" · "),box);
+        }
+      }else{
+        el("p",kind==="research"?data.notes:data.body,box).style.whiteSpace="pre-wrap";
+      }
+      for(const [index,source] of (data.sources||[]).entries()){
+        const item=el("details",null,box);el("summary",data.queries?(index+1)+" · "+source.title:source.title,item);
+        el("small",[source.date,source.url].filter(Boolean).join(" · "),item);
+        el("p",source.content||source.summary||"",item).style.whiteSpace="pre-wrap";
+        if(source.qualification)el("small",source.qualification,item);
+      }
+      if(data.original){
+        const old=el("details",null,box);
+        el("summary","查看本轮当时的修订",old);
+        el("p",data.original.question+" · "+new Date(data.original.at).toLocaleString(),old);
+        for(const source of data.original.sources){
+          el("small",[source.title,source.date,source.url].filter(Boolean).join(" · "),old);
+          el("p",source.text,old);
+          if(source.qualification)el("small",source.qualification,old);
+        }
+      }
+    });
+  }
+  function turnResearchActions(group,t){
+    if(t.retained_lookup)el("small","本轮沿用了上轮查回的资料。",group);
+    if(t.research_detail)turnDetailButton(group,t,"research","查看本轮查找资料");
+    if(t.has_retrieved_notes)button(group,"查看本轮检索资料",async()=>{
+      const pid=currentPerson().id,sid=currentSession().id;
+      const material=await api().live_retrieved_notes(pid,sid,t.id);
+      if(currentPerson()?.id!==pid||currentSession()?.id!==sid)return;
+      const box=panel("本轮检索资料");
+      const notes=el("p",material.notes,box);notes.style.whiteSpace="pre-wrap";
+      const sources=el("details",null,box);el("summary","资料来源（"+material.sources.length+"）",sources);
+      for(const source of material.sources)el("p",[source.title,source.url].filter(Boolean).join(" · "),sources);
+    });
   }
   const clocks = new Map();
   function markTime(node, time) {
@@ -2245,9 +2253,14 @@ window.pcarLive = (() => {
     button(box,"查看字段与原话依据",async()=>openImport(await action("status",{ident:binding.document}),binding.role));
   }
   function connection(afterSave=null){
-    const box=panel("模型连接"),model=el("select",null,box);
-    for(const name of ["deepseek-v4-pro","deepseek-flash"])model.add(new Option(name,name));
-    model.value=state.model;const key=el("input",null,box);key.type="password";key.placeholder="官方 DeepSeek API Key";
+    const box=panel(state.community?"DeepSeek 官方连接":"模型连接");
+    const model=state.community?null:el("select",null,box);
+    if(model){
+      for(const name of ["deepseek-v4-pro","deepseek-flash"])model.add(new Option(name,name));
+      model.value=state.model;
+    }
+    const key=el("input",null,box);key.type="password";key.placeholder="官方 DeepSeek API Key";
+    key.autocomplete="off";
     async function saveConnection(role,address,name,secret){
       const preview=await api().live_connection_change(role,address,name,secret);
       async function commit(){
@@ -2265,7 +2278,9 @@ window.pcarLive = (() => {
       for(const s of preview.sessions)el("p",s.name+" · "+new Date(s.created_at).toLocaleString(),review);
       button(review,"保存连接并更新授权",commit);
     }
-    button(box,"保存连接",()=>saveConnection("main","https://api.deepseek.com",model.value,key.value));
+    button(box,"保存连接",()=>saveConnection("main","https://api.deepseek.com",
+      model?.value||"deepseek-v4-pro",key.value.trim()));
+    if(state.community)return;
     button(box,"主回复模型",mainReplySettings);
     button(box,"配置其他接收方",()=>{
       const pane=panel("模型接收方"),role=el("select",null,pane);
@@ -2420,10 +2435,23 @@ window.pcarLive = (() => {
     for(const [name,item] of Object.entries(lastHealth?.maintenance||{})){
       el("p",(names[name]||"后台任务")+"将在 "+new Date(item.next_epoch*1000).toLocaleTimeString()+" 自动重试。",box);
     }
-    const latest=currentSession()?.latest;
+    const session=currentSession();
+    const latest=session?.latest;
     if(latest){
       el("p","当前会话最近一轮 · "+latest.id,box);
       if(latest.error_code)el("p","诊断代码 · "+latest.error_code,box);
+    }
+    if(state.community){
+      const turns=session?.turns?.filter(t=>t.research_detail||t.has_retrieved_notes||t.retained_lookup||t.feedback_available)||[];
+      if(turns.length){
+        const details=groupBox(box,"会话资料与反馈");
+        for(const t of turns.slice().reverse()){
+          const label=t.input_members?.[0]?.text || t.id;
+          const round=groupBox(details,label.length>40?label.slice(0,40)+"…":label);
+          turnResearchActions(round,t);
+          if(t.feedback_available)button(round,"这条不像",()=>feedback(currentPerson().id,t.id));
+        }
+      }
     }
     if(linkState!=="online" && nextCheck)el("p","下次自动检查 · "+new Date(nextCheck).toLocaleTimeString(),box);
   }

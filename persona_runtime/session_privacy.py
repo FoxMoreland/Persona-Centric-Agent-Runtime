@@ -263,6 +263,10 @@ def update(store, config, persona_id, session_id, enabled, revision, recipient_h
 
 
 def _change(db, config, role, base_url, name, key):
+    from . import community
+    single_key = community.enabled()
+    if single_key and (role != 'main' or base_url != community.BASE or name != community.PRO):
+        raise RuntimeErrorBase('community_official_key_required')
     parsed = urlsplit(base_url)
     if (role not in ('main','jev','organization','selector','lookup_target') or parsed.scheme != 'https' or not parsed.hostname or
             parsed.username or parsed.password or parsed.query or parsed.fragment or
@@ -289,6 +293,11 @@ def _change(db, config, role, base_url, name, key):
     if role == 'main':
         if cfg['organization']['reuse_chat']:
             after['organization'] = binding
+        if single_key:
+            for purpose in ('organization', 'native_web', 'selector', 'lookup_target'):
+                if purpose in before:
+                    after[purpose] = dict(before[purpose], **binding)
+            after['jev'] = dict(binding, endpoint=community.DECISION_BASE)
     _search_destinations(after, cfg.get('private_research_account','main'))
     affected = []
     if before != after:

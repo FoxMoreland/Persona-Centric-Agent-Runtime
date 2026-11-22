@@ -13,6 +13,7 @@ import time
 from urllib.parse import unquote
 
 from .app_runtime import AppRuntime
+from . import community
 from .config import atomic_json
 from .workbench_import import WorkbenchData
 from .workbench_appearance import ACCENT, APPEARANCE_FILE, APPEARANCE_MODES, appearance_settings
@@ -24,7 +25,8 @@ from .workbench_instance import acquire_or_wake, next_wakeup, wait_for_previous_
 
 WEBVIEW_VERSION = "6.2.1"
 STARTUP_TIMEOUT = 25
-WINDOW_TITLE = "PCAR 新版工作台"
+WINDOW_TITLE = ("PCAR 社区测试版" if community.field_test_enabled()
+                else "PCAR 社区版" if community.enabled() else "PCAR 新版工作台")
 WINDOW_COLORS = {
     "light": ("#e6e8de", "#ebece2", "#24352f"),
     "dark": ("#1a211e", "#252f29", "#dce6dc"),
@@ -486,6 +488,7 @@ def run(paths):
             wait_for_previous_components(controller, lease)
             stage = "webview_runtime"
             host.run(webview, html)
+        return {"shutdown": controller.exit_request, "workbench_ready": host.runtime is not None}
     except Exception as error:
         report_failure(paths, error, stage)
         raise

@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 from .models import RuntimeErrorBase, identifier
 from .security import protect, unprotect
+from . import community
 
 SPEECH_BASELINE_MODEL = "deepseek-v4-pro"
 SELECTOR_TIMEOUT_MAX = 240
@@ -104,6 +105,8 @@ class ConfigStore:
                     (value["character_selector"],{"hourly_limit":300,"daily_limit":2000})):
                 if all(section.get(k)==v for k,v in old.items()):
                     section.update(dict.fromkeys(old,0))
+        if community.enabled():
+            community.apply_models(value)
         self.validate(value)
         record=self.quota_override()
         if record.get('status')=='active' and record.get('purpose')=='development' and record.get('instance_id',value['instance_id'])==value['instance_id']:
@@ -221,7 +224,7 @@ class ConfigStore:
                 require_generation_provider(target)
             except ValueError:
                 raise RuntimeErrorBase('invalid_lookup_target_model') from None
-            if not isinstance(target['encrypted_key'],str) or not target['encrypted_key']:
+            if not isinstance(target['encrypted_key'],str) or not (target['encrypted_key'] or community.enabled()):
                 raise RuntimeErrorBase('invalid_lookup_target_model')
             for field,low,high in (('timeout',1,300),('max_tokens',1,32768),
                                    ('hourly_limit',0,10000),('max_input_chars',1000,200000)):
@@ -234,7 +237,7 @@ class ConfigStore:
                 if not isinstance(native, dict) or set(native) != set(DEFAULTS['model']):
                     raise ValueError()
                 official_endpoint(native)
-                if not isinstance(native['encrypted_key'], str) or not native['encrypted_key']:
+                if not isinstance(native['encrypted_key'], str) or not (native['encrypted_key'] or community.enabled()):
                     raise ValueError()
                 for field, low, high in (('timeout',1,300),('max_tokens',1,32768),
                                          ('hourly_limit',0,10000),('max_input_chars',1000,200000)):
@@ -272,6 +275,8 @@ class ConfigStore:
         allowed.add('main_reply')
         if not isinstance(changes, dict) or not set(changes) <= allowed:
             raise RuntimeErrorBase("Unknown configuration field")
+        if community.enabled():
+            community.validate_changes(changes)
         for key, change in changes.items():
             if key == 'main_reply':
                 from .main_reply import update
@@ -326,10 +331,14 @@ class ConfigStore:
             else:
                 value[key] = change
         self.validate(value)
+        if community.enabled():
+            community.remove_derived_secrets(value)
         atomic_json(self.file, value)
         return self.public()
 
     def copy_selector_model(self):
+        if community.enabled():
+            return self.public()
         value=self.load()
         for key in ('base_url','name','encrypted_key'):
             value['character_selector'][key]=value['model'][key]
