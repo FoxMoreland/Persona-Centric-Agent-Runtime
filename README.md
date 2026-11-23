@@ -6,7 +6,7 @@ PCAR（Persona-Centric Agent Runtime）是一款开源桌面 AI 伴侣工作台�
 
 **社区版 1.0 支持 Windows 11 x64 一键安装。** 打开工作台，填入一把 DeepSeek 官方 API Key，即可开始聊天或从记录建卡。
 
-[下载社区版 1.0](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/community-v1.0.0) · [从聊天记录自动建卡](#从聊天记录自动建卡) · [社区版使用指南](docs/user/社区版.md) · [下载与开始](#下载与开始)
+[下载安卓 APK](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/community-android-v1.1.1/PCAR.apk) · [下载 Windows 社区版 1.0](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/community-v1.0.0) · [从聊天记录自动建卡](#从聊天记录自动建卡) · [社区版使用指南](docs/user/社区版.md) · [下载与开始](#下载与开始)
 
 ## 从聊天记录自动建卡
 
@@ -34,7 +34,15 @@ PCAR（Persona-Centric Agent Runtime）是一款开源桌面 AI 伴侣工作台�
 
 ## 下载与开始
 
-### 社区版 1.0
+### 安卓社区版 1.1.1
+
+[下载 PCAR.apk](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/community-android-v1.1.1/PCAR.apk) · [安卓发行页](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/community-android-v1.1.1)
+
+适用于 **Android 12 及以上的 ARM64 手机**。下载安装后，打开「设置 → DeepSeek 官方连接」，填入 **一个 DeepSeek 官方 API Key** 即可开始使用。运行环境和本地向量检索模型都已随包提供。
+
+可以导入微信或 DeepSeek 聊天记录，在预览中核对人设后保存角色并开聊。建卡只需名称和人物介绍，空白选填项和待核对的冲突字段会从提示词中省略。在线聊天、自动建卡和联网查询使用你的 DeepSeek 账户额度。
+
+### Windows 社区版 1.0
 
 1. 在[社区版 1.0 发行页](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/community-v1.0.0)下载 Windows 11 x64 安装程序，双击安装。Python 和本地检索模型随包提供。
 2. 打开 PCAR 社区版，在「DeepSeek 官方连接」保存自己的官方 API Key。
@@ -80,10 +88,20 @@ PCAR（Persona-Centric Agent Runtime）是一款开源桌面 AI 伴侣工作台�
 
 ## 一起把这段人生做出来
 
-PCAR 目前主要围绕 DeepSeek 开发，也从 DSH 等开源社区的插件与互动实践中学习。
+我希望 PCAR 能给用户一次眼前一亮的体验。一个角色可以接续自己的经历，在长期相处中形成习惯、兴趣和关系，也能用新获得的能力参与生活。
+
+从已经实装的人格与记忆功能，到仓库里的研究笔记和远期路线，PCAR 都受到了前辈们对「数字生命」的探索启发。我的终极目标，是尽量做出《海绵宝宝》里痞老板的电子伴侣凯伦那样的存在。我也希望把走过的路线、遇到的问题和可复用的代码留下来，给后来研究数字生命的人一块垫脚石。
+
+感谢开源社区的前辈们。许多我喜欢的能力，已经有人做成了可复用的工具、插件和组件。在遵循各自许可证的前提下，把合适的成果接入 PCAR，能让角色拥有更丰富的能力，也让我们有更多精力研究这些能力如何与人格和经历结合。
 
 欢迎告诉我们，哪一句话让你觉得角色变了，或者哪一件共同经历值得在新会话里找回来。你也可以改进文档、参与开发，或提议角色在虚拟生活里可以做的一件事。
 
 [参与共建](CONTRIBUTING.md) · [反馈问题或建议](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/issues) · [文档导航](docs/index.md)
 
 项目由 [FoxMoreland](https://github.com/FoxMoreland) 维护。源码采用 [AGPL-3.0-only](LICENSE)。鲸鱼娘插画按 [CC BY-NC-SA 4.0 与相关署名条件](assets/readme/ATTRIBUTION.md) 使用。[代码来源](docs/REUSE.md)与[模型许可](docs/licenses/THIRD-PARTY-MODELS.md)保留各自记录。
+
+## 急招美术与平面设计伙伴
+
+PCAR 开始走向真实用户，我想认真做一次面向市场的产品化尝试，维持项目的非营利定位。现在的界面主要借助 AI 搭建，视觉风格和交互用起来还有不少我不满意的地方，连正式 Logo 也还在等人设计。我缺少美术和设计训练，希望有专业经验的朋友或业余爱好者一起做。
+
+可以从一个具体问题开始，软件界面和平面视觉、交互流程、Logo、图标和控件绘制都欢迎。你可以在 Issue 里发作品、草图，或指出哪个流程最值得先改。[参与 PCAR 设计](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/issues)
