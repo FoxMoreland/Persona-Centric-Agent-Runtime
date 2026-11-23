@@ -19,6 +19,7 @@ from persona_runtime.paths import RuntimePaths
 from persona_runtime.prompt_assembly import PromptBlock, assemble
 from persona_runtime.scene_voice import SCENES, decision, jev_request, project
 from persona_runtime.storage import Store
+from persona_runtime.security import protect
 
 
 class Materials:
@@ -73,7 +74,7 @@ class CardPublicationTests(unittest.IsolatedAsyncioTestCase):
 
     def configure_jev(self, endpoint="https://jev.fixture.invalid"):
         atomic_json(self.paths.home/"private/knowledge-router/config.json", {
-            "base_url":endpoint,"name":scene_policy.JEV,"encrypted_key":"100"})
+            "base_url":endpoint,"name":scene_policy.JEV,"encrypted_key":protect("100")})
 
     def enrolled(self, pid):
         with self.store.connection() as db:
@@ -128,6 +129,23 @@ class CardPublicationTests(unittest.IsolatedAsyncioTestCase):
         with self.store.connection() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM personas WHERE name IN ('A','B')").fetchone()[0], 0)
         self.assertEqual(len(self.publish(["A"])), 1)
+
+    def test_sparse_pair_activates_only_the_role_with_scene_consent(self):
+        self.configure_jev()
+        self.jobs.cards["A"]["spec"]["initial_background"] = ""
+        self.jobs.cards["B"]["spec"]["values_and_boundaries"] = []
+        preview = self.publisher.review(self.document, 2, self.plan, 3)["roles"]
+        self.assertEqual(preview["A"]["scenes"]["daily"], "501\n\n" + self.jobs.cards["A"]["scenes"]["daily"])
+        self.assertNotIn("initial_background", preview["A"]["prompt"])
+        self.assertNotIn("values_and_boundaries", preview["B"]["prompt"])
+        with self.assertRaises(ValueError):
+            self.publish(enable_scene=True, omit_unresolved=True)
+        aid, bid = self.publish(enable_scene=True, omit_unresolved=True, scene_role="A")
+        self.assertIsNotNone(self.enrolled(aid))
+        self.assertIsNone(self.enrolled(bid))
+        self.assertEqual([aid, bid], self.publish(enable_scene=True, omit_unresolved=True, scene_role="A"))
+        with self.assertRaises(ValueError):
+            self.publish(enable_scene=True, omit_unresolved=True, scene_role="B")
 
     def test_confirmation_is_bound_to_role_and_current_providers(self):
         self.configure_jev()

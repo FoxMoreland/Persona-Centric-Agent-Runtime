@@ -32,6 +32,9 @@ def pool(conn,turn,budget,*,keys_only=False):
     selected=scope(selected['persona_id'],selected['channel'],selected['bot'],selected['peer'])
     policy=policy_for(turn)
     cross=policy['cross_session'] and policy['context_mode']=='working_set'
+    if cross and turn['channel'] == 'desktop':
+        from .desktop_messages import branch
+        cross = not branch(conn, turn['session_id'])
     spec={'scope':selected,'session_id':None if cross else turn['session_id'],
           'window':'dialogue_cross_50' if cross else 'dialogue_session_50','query':''}
     ordinal=conn.execute('SELECT rowid FROM turns WHERE id=?',(turn['id'],)).fetchone()[0]

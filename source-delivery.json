@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "release": "0.4.0",
+  "release": "0.5.0",
   "mode": "source",
   "roots": [
     "persona_runtime",
@@ -31,11 +31,11 @@
   "schema_version": 36,
   "desktop_installation": "selected instance home; project venv; whole-business migration with fresh machine credentials and consent",
   "knowledge_output": "deepseek-flash native thinking enabled/high; per-step >=8192; persona speech profile v4; readable history retained",
-  "release_tag": "v0.4",
+  "release_tag": "v0.5",
   "deployment_mode": "agent-assisted",
   "development_baseline": "0.9.0.dev38",
   "stage": "windows_workbench",
-  "previous_release_tag": "v0.3",
+  "previous_release_tag": "v0.4",
   "scene_voice": "desktop opt-in per reviewed persona; jev-1.14; one scene card; native Pro; receipt-based presentation",
   "workbench_entry": "启动PCAR-新版.bat",
   "history_import": "reviewed two-person card extraction and scoped history continuation",
@@ -44,6 +44,7 @@
   "provider_routing": "reviewed relay text and official DeepSeek native tools with independent Jev decisions",
   "desktop_appearance": "per-persona avatar and chat background; instance accent color",
   "desktop_retry": "original accepted request; explicit retry; preserved receipts",
+  "desktop_quote_and_branch": "bounded local message window; independently writable desktop branch with an exact historical cutoff",
   "optional_writer": "OpenRouter Gemini 4 Hydrogen for reviewed desktop assemblies",
   "default_writer": "ds_pro"
 }

@@ -230,6 +230,11 @@ class PrivateReplyEntry:
                 state=desktop_recovery.contract(db,turn)
                 if not state or state['owner']!=self.engine.desktop_owner:
                     raise RuntimeErrorBase('desktop_owner_changed')
+                try:
+                    self.ordinary.preflight_quote(db,turn,json.loads(choice['decision_json']),proof,phase)
+                except RuntimeErrorBase as error:
+                    stop(db,turn_id,str(error))
+                    return
             meter=gate(db,self.store,'private_reply',turn_scope(turn))
             attempt = identifier()
             from . import desktop_turn_retry as turn_retry

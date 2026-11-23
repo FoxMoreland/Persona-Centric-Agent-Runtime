@@ -120,6 +120,7 @@ def collect(entry, db, turn, contract, frozen=None):
     from .chat import terms
     from .references import prepare, ReferenceError
     from .profile import model_persona_data, source_blocked
+    from . import desktop_messages, quote_context
     pid,sid = turn['persona_id'],turn['session_id']
     full = contract['consent']['enabled']
     jev = configured_model(entry.store.paths)
@@ -134,8 +135,11 @@ def collect(entry, db, turn, contract, frozen=None):
     catalog = {e['id']:{'id':e['id'],'text':e['text'],'role':'user','time':e['created_at']} for e in current_rows}
     recent_ids, refs, memory_ids = [], [], []
     previous_exchange = []
+    writer_history = []
+    quote = None
     with history_access(db,sid,full):
-        history = frozen['history'] if frozen else [r[0] for r in db.execute("""SELECT id FROM turns WHERE session_id=? AND persona_id=? AND channel='desktop'
+        quote = quote_context.read(db, turn)
+        history = frozen['history'] if frozen else [] if quote else [r[0] for r in db.execute("""SELECT id FROM turns WHERE session_id=? AND persona_id=? AND channel='desktop'
             AND status='completed' AND rowid<(SELECT rowid FROM turns WHERE id=?) ORDER BY rowid DESC LIMIT 4""",
             (sid,pid,turn['id']))]
         for previous in reversed(history):
@@ -144,11 +148,20 @@ def collect(entry, db, turn, contract, frozen=None):
                 recent_ids.append(item['id'])
                 if previous==history[0]:
                     previous_exchange.append(item['id'])
-        try:
-            _, manifest = prepare(db,turn)
-        except ReferenceError as exc:
-            raise RuntimeErrorBase('private_reply_reference_unavailable') from exc
-        for ref in manifest['references']:
+        legacy_refs = []
+        if quote:
+            anchor = quote['anchor']
+            refs = [anchor['id']]
+            recent_ids = [row['id'] for row in quote['latest']]
+            catalog.update({row['id']: quote_context.projection(row) for row in
+                            [anchor, *quote_context.neighborhood(quote), *quote['latest']]})
+        else:
+            try:
+                _, manifest = prepare(db,turn)
+            except ReferenceError as exc:
+                raise RuntimeErrorBase('private_reply_reference_unavailable') from exc
+            legacy_refs = manifest['references']
+        for ref in legacy_refs:
             target = ref['target']
             rows = _dialogue(db,turn,ref['turn_id'],jev,full)
             accepted=json.loads(db.execute("SELECT binding_json FROM input_references WHERE event_id=?",
@@ -165,7 +178,7 @@ def collect(entry, db, turn, contract, frozen=None):
         memories = []
         selection = (" AND m.id IN (SELECT value FROM json_each(?))" if frozen else "")
         parameters = (pid,sid,json.dumps(frozen['memories'])) if frozen else (pid,sid)
-        for row in db.execute("""SELECT m.* FROM memories m JOIN events e ON e.id=m.source_event_id
+        for row in [] if quote else db.execute("""SELECT m.* FROM memories m JOIN events e ON e.id=m.source_event_id
                 WHERE m.persona_id=? AND e.session_id=? AND m.status='active'""" + selection +
                 " ORDER BY m.rowid DESC LIMIT 128",parameters):
             item = dict(row)
@@ -178,11 +191,34 @@ def collect(entry, db, turn, contract, frozen=None):
             mid=item['id']
             catalog[mid]={'id':mid,'role':'memory','text':item['text'],'revision':item['revision']}
             memory_ids.append(mid)
-    from .character_context import select_context
+        from .import_history import META
+        from .scene_policy import read as read_state
+        if not quote and read_state(db, META + sid):
+            ids = frozen.get('writer_turns', []) if frozen else [row[0] for row in db.execute('''SELECT id FROM turns
+                WHERE session_id=? AND persona_id=? AND channel='desktop' AND status='completed'
+                  AND cancelled_at IS NULL AND (user_event_id IS NOT NULL OR reply_event_id IS NOT NULL)
+                  AND rowid < (SELECT rowid FROM turns WHERE id=?) ORDER BY rowid DESC LIMIT 50''', (sid, pid, turn['id']))]
+            for previous in reversed(ids):
+                for item in _dialogue(db, turn, previous, jev, full):
+                    catalog[item['id']] = item
+                    writer_history.append(item['id'])
+        else:
+            ids = []
+        if not quote and desktop_messages.branch(db, sid):
+            prefix = desktop_messages.recent(db, pid, desktop_messages.segments(db, pid, sid, include_own=False), 20)
+            catalog.update({row['id']: quote_context.projection(row) for row in prefix})
+            writer_history = [row['id'] for row in prefix] + recent_ids
+            if not recent_ids:
+                recent_ids = writer_history[-10:]
+    from .character_context import select_context, unset_fact
+    from .import_card_publish import uses_sparse_card
     chosen=select_context(json.loads(turn['character_snapshot']), ' '.join(row['text'] for row in current_rows),
                           example_limit=0)
     character=[]
+    omit_unset = uses_sparse_card(db, pid)
     for part in chosen['parts']:
+        if omit_unset and unset_fact(part):
+            continue
         ident='character/'+part['id']
         catalog[ident]={'id':ident,'role':'character','text':part['text'],'version':chosen['version_id']}
         character.append(ident)
@@ -190,11 +226,12 @@ def collect(entry, db, turn, contract, frozen=None):
         admitted=set(frozen['admitted_ids'])
         recent_ids=[i for i in recent_ids if i in admitted]
         previous_exchange=[i for i in previous_exchange if i in admitted]
+        writer_history=[i for i in writer_history if i in admitted]
         catalog={k:v for k,v in catalog.items() if k in admitted}
     from . import message_time
     time_proof = {}
     if message_time.enabled(turn) and (frozen is None or frozen.get(message_time.KEY)==message_time.VERSION):
-        dialogue_ids = set(current_ids + recent_ids + refs).intersection(catalog)
+        dialogue_ids = set(current_ids + recent_ids + refs + writer_history).intersection(catalog)
         times = message_time.event_times(db, dialogue_ids)
         time_proof = {'message_time_bindings':times}
         for eid in dialogue_ids:
@@ -203,7 +240,9 @@ def collect(entry, db, turn, contract, frozen=None):
             item.pop('time', None)
             if entries:
                 item['message_times'] = entries
-    return {**time_proof,'current':current_ids,'recent':recent_ids,'references':refs,'memories':memory_ids,'character':character,
+    return {**time_proof, **({'quote_window': quote} if quote else {}),
+            **({'writer_history': writer_history, 'writer_turns': ids} if writer_history else {}),
+            'current':current_ids,'recent':recent_ids,'references':refs,'memories':memory_ids,'character':character,
             'history':history,'previous_exchange':previous_exchange,'jev_model':jev['name'],
             'catalog':catalog,'persona':{kind:model_persona_data(item['data']) for kind,item in profile.items()},
             'profile_versions':{kind:item['id'] for kind,item in profile.items()}}

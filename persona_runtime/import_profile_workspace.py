@@ -113,7 +113,8 @@ class ProfileWorkspace:
             previous_plan = db.execute("""SELECT plan FROM profile_current WHERE document=?""", (ident,)).fetchone()
         if previous_plan:
             prepared["reserved_ids"] = self.load(ident, previous_plan[0], current=False)["reserved_ids"]
-        settings, capacity = self.engine.settings()
+        mode = self.library.chat_mode(ident)
+        settings, capacity = self.engine.settings(mode)
         plan = build_plan(prepared, capacity, selection=selection)
         plan["settings"] = settings
         plan_id = fingerprint([VERSION, ident, plan])
@@ -123,6 +124,8 @@ class ProfileWorkspace:
         summary["prompt_release"] = settings.get("prompt_release")
         summary["max_tokens"] = settings["max_tokens"]
         summary["configured"] = bool(settings.get("configured"))
+        if "chat_mode" in settings:
+            summary["chat_mode"] = settings["chat_mode"]
         for role, details in summary["roles"].items():
             details["batches"] = [{"id": b["id"], "state": "planned"} for b in plan["batches"] if b["role"] == role]
         rows = assign(parse_source(row["raw"]), mapping, overrides)
@@ -224,6 +227,10 @@ class ProfileWorkspace:
     def start(self, ident, revision, plan_id, confirmed, *, cached_only=False):
         require(confirmed is True, "需要确认所选计划及其分析用途。")
         plan = self.load(ident, plan_id)
+        from .models import ROLEPLAY
+        if plan["settings"].get("chat_mode") == ROLEPLAY:
+            require(self.engine.settings(ROLEPLAY)[0] == plan["settings"] and plan["settings"]["configured"],
+                    "角色扮演提炼模板待审阅，或模型连接已变化。")
         require(ident not in self.tasks, "任务已受理。")
         with self.library.db() as db:
             changed = db.execute("""UPDATE documents SET status='running',revision=revision+1 WHERE id=? AND revision=?

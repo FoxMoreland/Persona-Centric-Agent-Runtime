@@ -13,7 +13,7 @@ def official_direct(url):
             and not parsed.query and not parsed.fragment
             and parsed.path.rstrip('/') in ('', '/v1', '/beta', '/chat/completions',
                 '/v1/chat/completions', '/beta/chat/completions',
-                '/v1/tools/search', '/v1/tools/fetch'))
+                '/v1/tools/search', '/v1/tools/fetch', '/user/balance'))
 
 
 def route_name(url, proxy):

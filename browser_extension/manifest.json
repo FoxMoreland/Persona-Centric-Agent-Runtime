@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "导入 DeepSeek 到 PCAR",
+  "version": "0.1.0",
+  "description": "将已下载的官方 DeepSeek 导出包交给本机 PCAR，打开所选窗口的建卡预览。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArvx+n2Hus0HWcvqB2TkeLdE9zUhwqmw0MF/YYLoomENFjuQ8/fYbgiLOm5AnckIF8KPJmwfamcHPoO7gzBvNRD7/YpTfRWyuPHE2/+sYk/Rvet4tFwDFBpTTAXcuwUy/xYSIN6J8mL9ZZfGgDxvD9lhvGmRxP4Fxt0bMdvCpf9vRFUL4ap8PTH98pWitSF9rRgS7t3XWGLjTf5GTIn0MHV08xIIf9zfgImmJyW3v4PuFu4/XsMu3f6DshbL6BqRLoB9+WqCHJO8ayApphBa8lTK6kIBBSQPoCmlyN1dy6JcQXQeRhNx78+OdOAqrtr3Gn/QHKQdint22oH/w5Oyk7QIDAQAB",
+  "permissions": [
+    "activeTab",
+    "downloads",
+    "nativeMessaging",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

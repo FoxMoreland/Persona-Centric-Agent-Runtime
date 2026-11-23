@@ -53,6 +53,8 @@ class JevTransport:
         return trace
 
     async def complete(self, wire, *, on_dispatch, on_receipt, diagnostics):
+        from .desktop_activation import admit
+        admit()
         loop = asyncio.get_running_loop()
         start = loop.time()
         proxy = outbound_proxy(self.url)

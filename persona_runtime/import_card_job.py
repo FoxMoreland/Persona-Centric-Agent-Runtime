@@ -16,7 +16,7 @@ from .import_card_fields import (WORKFLOW_POLICY, admit_cards, build_source, ini
 from .import_library import encode, require
 from .import_prompts import contract_source, has_contract, has_release_permission, release_model
 from .import_profile_workspace import projected_claims
-from .models import timestamp
+from .models import PERSONA_REQUIRED_FIELDS, timestamp
 from .provider_compat import build_request, usage_fields
 from .provider_policy import require_generation_provider
 
@@ -139,8 +139,8 @@ class CardJobs:
         root = self.library.root
         return safe_path(root.parent.parent,root/name)
 
-    def _contract(self):
-        raw, release = contract_source(self.library, "card")
+    def _contract(self, mode):
+        raw, release = contract_source(self.library, "card", mode)
         if raw is None:
             return None, None, None
         data = json.loads(raw,object_pairs_hook=_unique_keys)
@@ -187,7 +187,10 @@ class CardJobs:
         require(plan.get("id") == plan_id == fingerprint([PROFILE_VERSION,ident,{k:v for k,v in plan.items() if k!="id"}]),
                 "分析计划与存档不一致。")
         _checked_drafts(db, src, drafts)
-        contract,checksum,release = self._contract()
+        from .import_library import document_mode
+        from .models import ROLEPLAY
+        mode = document_mode(db, ident)
+        contract,checksum,release = self._contract(mode)
         require(contract is not None, "请配置本实例的角色卡合成模板。")
         model = self._model(contract, release)
         stats = {r:plan["roles"][r].get("stats",{}) for r in ROLES}
@@ -209,6 +212,8 @@ class CardJobs:
                   **budget,"wire":wire,"wire_hash":fingerprint(wire)}
         if release:
             packet["prompt_release"] = release
+        if mode == ROLEPLAY:
+            packet["chat_mode"] = mode
         frozen = {"packet":packet,"drafts":drafts,"stats":stats}
         if card_policy is not None:
             require(card_policy == WORKFLOW_POLICY, "未知的成卡校验版本。")
@@ -220,7 +225,9 @@ class CardJobs:
             return self._freeze(conn,ident,revision,plan_id)[0]
 
     def _checked_model(self, packet):
-        contract,checksum,release = self._contract()
+        from .models import PRIVATE_CHAT
+        mode = packet.get("chat_mode", PRIVATE_CHAT)
+        contract,checksum,release = self._contract(mode)
         require(contract and checksum == packet["contract_sha256"] and release == packet.get("prompt_release"),
                 "成卡模板已变化。")
         model = self._model(contract, release)
@@ -239,8 +246,10 @@ class CardJobs:
         with self.library.db() as db:
             src = _source(db,ident)
             require(src,"未找到导入记录。")
+            from .import_library import document_mode
             result = {"plan_id":src["plan"],"source_revision":src["revision"],"revision":0,"cards":{},
-                      "stale":False,"configured":has_contract(self.library, "card"),"state":"none"}
+                      "required":list(PERSONA_REQUIRED_FIELDS),
+                      "stale":False,"configured":has_contract(self.library, "card", document_mode(db, ident)), "state":"none"}
             if src["status"] == "revoked":
                 return result | {"state":"revoked"}
             if not src["plan"] or not src["v2"]:

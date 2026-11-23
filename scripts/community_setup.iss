@@ -1,15 +1,15 @@
 #ifdef FieldTest
   #define DisplayName "PCAR 社区测试版"
   #define ProgramFolder "PCAR Community Test"
-  #define CandidateName "PCAR-Community-v0.4-Windows-x64-Test-Setup"
-  #define ProductVersion "0.4.0 Community"
-  #define FileVersion "0.4.0.0"
+  #define CandidateName "PCAR-Community-v1.1.1-Windows-x64-Test-Setup"
+  #define ProductVersion "1.1.1 Community"
+  #define FileVersion "1.1.1.0"
 #else
   #define DisplayName "PCAR 社区版"
   #define ProgramFolder "PCAR Community"
-  #define CandidateName "PCAR-Community-v1.0-Windows-x64-Setup"
-  #define ProductVersion "1.0"
-  #define FileVersion "1.0.0.0"
+  #define CandidateName "PCAR-Community-v1.1.1-Windows-x64-Setup"
+  #define ProductVersion "1.1.1"
+  #define FileVersion "1.1.1.0"
 #endif
 
 [Setup]
@@ -47,6 +47,11 @@ Name: "{group}\{#DisplayName}"; Filename: "{app}\PCAR.exe"
 
 [Run]
 Filename: "{app}\PCAR.exe"; Description: "打开 {#DisplayName}"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+#ifndef FieldTest
+Filename: "{app}\python\python.exe"; Parameters: "-E -s -B -m persona_runtime.deepseek_browser_bridge unregister community"; WorkingDir: "{app}"; Flags: runhidden skipifdoesntexist; RunOnceId: "PCARBrowserBridge"
+#endif
 
 #ifdef FieldTest
 [UninstallDelete]

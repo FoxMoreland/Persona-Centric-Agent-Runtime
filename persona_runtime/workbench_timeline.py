@@ -27,6 +27,7 @@ SAFE_ERRORS = {
     "lookup_target_invalid","lookup_target_input_budget_exceeded",
     "lookup_reply_format_invalid","lookup_reply_citation_invalid","lookup_reply_unbound",
     "provider_network_error","provider_effect_unknown","provider_retries_exhausted","knowledge_evidence_changed",
+    "reference_unavailable", "reference_source_changed", "reference_budget_exceeded",
 }
 NATIVE = "persona_id=? AND session_id=? AND channel='desktop' AND source_key NOT GLOB 'imported.*'"
 DESKTOP = """s.persona_id=? AND s.user_id=? AND coalesce(l.channel,'desktop')='desktop'
@@ -37,7 +38,7 @@ DESKTOP = """s.persona_id=? AND s.user_id=? AND coalesce(l.channel,'desktop')='d
 def selection(store, persona_id):
     with store.connection() as db:
         person = RuntimeService._persona(db, persona_id)
-        rows = db.execute(f"""SELECT s.id,s.created_at FROM sessions s LEFT JOIN session_lifecycle l ON l.session_id=s.id
+        rows = db.execute(f"""SELECT s.id,s.created_at,l.state FROM sessions s LEFT JOIN session_lifecycle l ON l.session_id=s.id
                                WHERE {DESKTOP} ORDER BY s.created_at,s.rowid""", (persona_id,LOCAL_USER_ID))
         sessions = [dict(row) for row in rows]
         head = db.execute("""SELECT session_id FROM session_heads WHERE persona_id=? AND user_id=?
@@ -91,6 +92,24 @@ def visible_reference(db,pid,sid,event_id,store=None):
     return {"id":event_id,"text":row["text"][:180]}
 
 
+def message_position(store, pid, sid, target):
+    from . import desktop_messages as messages
+    from .archive import find_turn
+
+    with store.connection() as db:
+        require_session(db, pid, sid)
+        row = messages.resolve(db, pid, target)
+        if not row or not messages.can_read(messages.segments(db, pid, sid), row):
+            raise RuntimeErrorBase('reference_unavailable')
+        if row['session_id'] != sid:
+            return {'kind': 'import', 'position': row['position'], 'id': row['id']}
+        if row['event_id'].startswith('imported.'):
+            return {'kind': 'import', 'position': row['position'] // messages.POSITION_STRIDE, 'id': row['id']}
+        turn = find_turn(db, 'event', row['event_id'])
+        position = db.execute('SELECT rowid FROM turns WHERE id=?', (turn['id'],)).fetchone()[0]
+        return {'kind': 'native', 'position': position, 'id': row['id']}
+
+
 def public_error(error):
     if not error:
         return None
@@ -120,11 +139,10 @@ def latest_status(store,db,pid,sid):
 
 def turn_card(db,row,store=None):
     from .turn_input import load_turn_input
-    from .bubble_limits import display_bubbles
     from .scene_publication import ScenePublication
     from .knowledge_search_notice import read as read_notice
     from .knowledge_service import turn_usable
-    from .presentation import batch_view
+    from .desktop_messages import visible_legacy_reply
     turn=dict(row)
     tid=turn["id"]
     members=load_turn_input(db,turn)
@@ -199,7 +217,7 @@ def turn_card(db,row,store=None):
             if result:
                 card['role_long_detail']=bool(result['detail'])
                 attribution=public_lookup.saved(db,'private.reply.attribution.'+result['id'])
-                research=json.loads(result['contract_json'])['ordinary']['research']
+                research=json.loads(result['contract_json'])['ordinary'].get('research') or {}
                 from .reply_provenance import literal_citations
                 card['used_sources']=bool(attribution and (attribution.get('bindings') or
                     literal_citations(db,tid,result['body'],result['detail'],research)))
@@ -225,14 +243,8 @@ def turn_card(db,row,store=None):
             event=db.execute("SELECT text,created_at FROM events WHERE id=? AND session_id=? AND persona_id=?",
                              (card["reply_event_id"],turn["session_id"],turn["persona_id"])).fetchone()
             if event:
-                batch=db.execute("SELECT id FROM reply_batches WHERE turn_id=? ORDER BY created_at DESC LIMIT 1",(tid,)).fetchone()
-                segments=[dict(r) for r in db.execute("SELECT * FROM reply_segments WHERE batch_id=? ORDER BY segment_index",(batch[0],))] if batch else []
-                displayed=[r[0] for r in db.execute("SELECT text FROM reply_display_messages WHERE batch_id=? ORDER BY display_index",(batch[0],))] if batch else []
-                visible = "\n\n".join(displayed) if displayed else batch_view(event[0],segments,historical=True)[0]
-                context = db.execute("SELECT details_json FROM context_uses WHERE turn_id=? ORDER BY rowid DESC LIMIT 1",(tid,)).fetchone()
-                presentation = (json.loads(context[0]).get("presentation") or {}) if context else {}
                 try:
-                    bubbles = display_bubbles(visible, presentation)
+                    visible, bubbles = visible_legacy_reply(db, turn, event[0])
                 except RuntimeErrorBase as error:
                     card.update(error_code=public_error(str(error)), reply_event_id=None)
                 else:
@@ -317,11 +329,15 @@ def page(store,pid,sid,version=None,before=None,after=None,anchor=None):
         with main_history_access(store,db,pid,sid) if meta else nullcontext():
             permitted=history_allowed(db,sid,"dialogue") if meta else False
         lifecycle=db.execute("SELECT state,revision FROM session_lifecycle WHERE session_id=?",(sid,)).fetchone()
+        from .desktop_messages import branch
+        lineage = branch(db, sid)
+        branch_info = {key: lineage[key] for key in ('parent_session_id', 'anchor', 'anchor_id')} if lineage else None
         response={"version":latest,"pending_notices":waiting(db,sid),"source_version":[meta.get("revision",0),excluded,permitted],
                   "latest":latest_status(store,db,pid,sid),
                   "presentable":store.current(db,required=False)==pid,
                   "session_revision":lifecycle["revision"] if lifecycle else 0,
-                   "sealed":bool(lifecycle and lifecycle["state"]=="sealed"),"input_buffer":input_buffer(db,pid,sid)}
+                   "sealed":bool(lifecycle and lifecycle["state"]=="sealed"),"input_buffer":input_buffer(db,pid,sid),
+                   **({'branch': branch_info} if branch_info else {})}
         from .private_reply_entry import selected,RESEARCH
         from .config import ConfigStore
         config=ConfigStore(store.paths);cfg=config.load()

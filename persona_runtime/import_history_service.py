@@ -8,7 +8,7 @@ from .import_history import META, configured_providers, history_allowed, restore
 from .import_library import require
 from .import_markdown import SYSTEM, assign
 from .import_plan import parse_source
-from .models import LOCAL_USER_ID, timestamp
+from .models import LOCAL_USER_ID, ROLEPLAY, persona_chat_mode, timestamp
 from .persona_management import active
 from .private_personas import guard_acceptance_write
 from .scene_policy import read, save
@@ -78,17 +78,24 @@ class HistoryService:
         require(type(organize) is bool and type(timezone_offset) is int and -14*60<=timezone_offset<=14*60,
                 "请选择时区和本次整理用途。")
         if creation is not None:
-            require(not persona_id and isinstance(creation,dict) and set(creation)=={"plan_id","card_revision","roles","enable_scene"}
+            required = {"plan_id", "card_revision", "roles", "enable_scene"}
+            require(not persona_id and isinstance(creation,dict)
+                    and required <= set(creation) <= required | {"omit_unresolved", "scene_role"}
                     and type(creation["card_revision"]) is int and type(creation["enable_scene"]) is bool
                     and isinstance(creation["roles"],list) and all(r in ("A","B") for r in creation["roles"])
                     and len(creation["roles"])==len(set(creation["roles"])) and ("B" if self_role=="A" else "A") in creation["roles"],
                     "请选择原聊天中对方的角色卡。")
+            from .import_card_publish import validate_creation_mode
+            validate_creation_mode(creation["roles"], creation["enable_scene"], creation.get("omit_unresolved", False),
+                                   creation.get("scene_role"))
         require(creation is not None or persona_id, "请选择目标角色。")
         request=dict(ident=ident, revision=revision, self_role=self_role, mapping=mapping, overrides=overrides or {},
                      first=first,last=last,excluded=[] if excluded is None else excluded,timezone_offset=timezone_offset,
                      persona_id=persona_id,organize=organize,session_id=session_id,creation=creation)
         with self.library.db() as private:
             source=_source(private,request)
+            from .import_library import document_mode
+            mode = document_mode(private, ident)
         all_rows, rows, names=_selected(source["raw"],request)
         kinds={"A":"speaker","B":"speaker"}
         users={"user","用户"}
@@ -100,6 +107,7 @@ class HistoryService:
         with self.store.connection() as db:
             if persona_id:
                 active(db, persona_id)
+                require(persona_chat_mode(db, persona_id) == mode, "此记录与目标人格的聊天模式不同。")
                 require(self.store.current(db,required=False)==persona_id,"当前角色已切换。")
             if session_id:
                 require(persona_id,"请选择原会话的人物。")
@@ -115,6 +123,7 @@ class HistoryService:
         value={"request":request,"providers":providers,"session_id":sid,"session_revision":rev,"identity":identity}
         return value|{"token":fingerprint(value),"total":len(rows),"source_total":len(all_rows),"names":names,"participant_kinds":kinds,
                       "counts":{r:counts[r] for r in ("A","B","note")},
+                      **({"chat_mode": mode} if mode == ROLEPLAY else {}),
                       "preview_rows":[{k:v[k] for k in ("id","role","speaker","date","text")} for v in rows[-6:]]},all_rows,rows
 
     def commit(self, preview, operation_id, confirmed, creation=None):
@@ -141,6 +150,8 @@ class HistoryService:
               "names":names,"participant_kinds":fresh["participant_kinds"],"selection":selection,"timezone_offset":req["timezone_offset"],"providers":fresh["providers"],
               "source_revision":req["revision"],"first":req["first"],"last":req["last"],"excluded":req["excluded"],
               "count":len(chosen)}
+        if fresh.get("chat_mode") == ROLEPLAY:
+            meta["chat_mode"] = ROLEPLAY
         new_people=[]
         with self.store.connection(write=True) as db:
             previous=read(db,OP+operation_id)

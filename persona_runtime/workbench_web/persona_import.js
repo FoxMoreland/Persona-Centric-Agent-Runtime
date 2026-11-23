@@ -2,6 +2,8 @@
 window.pcarLive = (() => {
   "use strict";
   const api = () => window.pywebview.api;
+  let activation=null, keyPanel=null, seenIntake=null;
+  const keyLocked=()=>activation && activation.state!=="verified";
   class FormError extends Error {}
   const hostMessages=new Set([
     "请选择 Markdown 文件。","人物已切换。","记忆政策版本已变化。","接收记忆资料的模型已变化。",
@@ -22,8 +24,22 @@ window.pcarLive = (() => {
   };
   const run = fn => (...args) => Promise.resolve().then(() => fn(...args)).catch(e => {
     const detail=String(e.message||e);
+    if(detail.includes("deepseek_activation_required")){keyPrompt();return;}
+    if(detail.includes("roleplay_prompts_review_required")){
+      toast("角色扮演提示词待审定。");return;
+    }
+    if(detail.includes("roleplay_official_deepseek_required")){
+      toast("角色扮演模式需要官方 DeepSeek 连接。");return;
+    }
+    if(detail.includes("roleplay_desktop_story_only")){
+      toast("请在文游会话中直接输入剧情和台词。");return;
+    }
     const known={session_sealed:"这段对话已封存，可新建对话继续。",session_not_current:"这段对话已归档，可返回当前会话继续。",
-      reference_unavailable:"引用的消息已失效，请重新选择。",version_conflict:"内容已更新，请重新打开核对。",
+      reference_unavailable:"引用的消息已失效，请重新选择。",reference_source_changed:"引用的消息或权限已变化，请重新选择。",
+      reference_budget_exceeded:"引用原文过长，无法和本次输入一起发送。",
+      multiple_quote_references:"请先发送或取消当前待发消息，再引用另一条。",
+      session_has_pending_work:"请先处理当前会话中待发送或还在回复的消息。",
+      quote_cannot_request_public_lookup:"请移除引用后，再发起公开查找。",version_conflict:"内容已更新，请重新打开核对。",
       credential_required_for_new_endpoint:"请填写新网关的 API Key。",session_privacy_recipients_changed:"接收方已变化，请重新打开授权设置。",
       main_reply_assembly_unavailable:"请先启用候选、录入密钥并确认本机正文装配。",
       main_reply_session_authorization_required:"请在主回复模型设置中确认当前会话的 OpenRouter 正文授权。",
@@ -148,6 +164,8 @@ window.pcarLive = (() => {
     return item;
   }
   function panel(title) {
+    const notice = byId("import-card-toast");
+    if (notice) notice.hidden = true;
     present(title,"");
     const box=el("div",null,dialogBody);
     box.className="fields";
@@ -171,15 +189,22 @@ window.pcarLive = (() => {
   function lines(value) {
     return value.split("\n").map(line=>line.trim()).filter(Boolean);
   }
-  function specForm(parent,spec) {
-    const name=field(parent,"名称",spec.name,false,"spec.name");
+  function specForm(parent,spec,required=[]) {
+    function control(key,title,list=false) {
+      const mandatory=required.includes(key);
+      const input=field(parent,title+(mandatory?"（必填）":""),spec[key],list,"spec."+key);
+      if(mandatory) input.setAttribute("aria-required","true");
+      return input;
+    }
+    const name=control("name","名称");
     const fields=Object.entries(titles).map(([key,title])=>{
       const list=["core_traits","values_and_boundaries"].includes(key);
-      const input=field(parent,title+(list?"（每行一项）":""),spec[key],list,"spec."+key);
+      const input=control(key,title+(list?"（每行一项）":""),list);
       return [key,readField(input,spec[key],list?lines:undefined)];
     });
     const readName=readField(name,spec.name);
     return ()=>Object.fromEntries([["format_version",1],["name",readName()],
+      ...(spec.chat_mode ? [["chat_mode",spec.chat_mode]] : []),
       ...fields.map(([key,read])=>[key,read()])]);
   }
   function inputField(box,label,type,value="") {
@@ -188,8 +213,9 @@ window.pcarLive = (() => {
     if(type!=="select") {control.type=type;control.value=value;}
     return control;
   }
-  function showRecipients(box,providers) {
+  function showRecipients(box,providers,roleplay=false) {
     const names={dialogue:"续聊主模型",jev:"场景判断（按角色设置）",memory:"记忆整理（按本次选择）"};
+    if(roleplay){delete names.jev;names.memory="故事记忆整理（按本次选择）";}
     for(const [key,label] of Object.entries(names)) {
       const value=providers?.[key];
       el("p",label+" · "+(value?.name || "待配置")+(value?.base_url?" · "+value.base_url:""),box);
@@ -198,12 +224,26 @@ window.pcarLive = (() => {
   async function importHistory() {
     const person=currentPerson();
     if(!person) return;
-    const data=await api().pick_transcript();
-    if(data && currentPerson()?.id===person.id)
-      setupHistory(data,{personaId:person.id,targetName:person.profile.name});
+    const samePerson=()=>currentPerson()?.id===person.id;
+    const options={personaId:person.id,targetName:person.profile.name};
+    if(!api().commit_import_scope){
+      const data=await api().pick_transcript();
+      if(data && samePerson())setupHistory(data,options);
+      return;
+    }
+    const scope=await api().pick_transcript(true);
+    if(scope && samePerson()){
+      const mode=person.profile.chat_mode || "private_chat";
+      if(scope.chat_mode==="roleplay" && mode!=="roleplay")
+        throw new FormError("这份 Markdown 标记为角色扮演，请选择同模式的人格接续。");
+      chooseImportScope(scope, data=>{
+        if(samePerson())setupHistory(data,options);
+      },()=>dialog.close(),mode);
+    }
   }
   function setupHistory(data,options,draft=null) {
-    draft ??= {mapping:{...data.mapping},overrides:{...data.overrides},self:"",first:"",last:"",
+    const boundSelf=options.targetRole ? (options.targetRole==="A"?"B":"A") : "";
+    draft ??= {mapping:{...data.mapping},overrides:{...data.overrides},self:boundSelf,first:"",last:"",
                excluded:"",timezone:String(-new Date().getTimezoneOffset()),organize:false};
     const box=panel("历史聊天接续");
     el("strong",options.targetName ? "接续人物 · "+options.targetName : "从这份记录创建角色",box);
@@ -219,6 +259,7 @@ window.pcarLive = (() => {
       }
     }
     const self=inputField(box,"原记录中哪一方是我","select");
+    self.disabled=Boolean(boundSelf);
     function fillIdentity(){
       self.replaceChildren(new Option("请选择本人",""));
       for(const role of roles){
@@ -239,7 +280,8 @@ window.pcarLive = (() => {
       tz.add(new Option("UTC"+(n<0?"−":"+")+time,String(n)));
     }
     tz.value=draft.timezone;
-    const organize=check(box,"整理为长期记忆 · 按该角色的后台模型设置和额度处理",draft.organize);
+    const organize=check(box,(data.preview?.chat_mode==="roleplay"?"整理为故事记忆":"整理为长期记忆")+
+      " · 按该角色的后台模型设置和额度处理",draft.organize);
     const error=el("p",null,box);error.className="error";error.setAttribute("role","alert");
     function remember(){
       Object.assign(draft,{first:first.value,last:last.value,excluded:excluded.value,timezone:tz.value,
@@ -280,7 +322,7 @@ window.pcarLive = (() => {
       el("p",row.text,box).className="import-original";
     }
     const receivers=groupBox(box,"使用这段历史的模型",true);
-    showRecipients(receivers,preview.providers);
+    showRecipients(receivers,preview.providers,preview.chat_mode==="roleplay");
     el("p",draft.organize?"本次历史将按该角色的后台设置整理。":"本次历史用于续聊和查档，暂不做长期记忆整理。",box);
     if(options.personaId && !options.sessionId && !preview.reused)
       el("p","已有角色会开启独立会话，当前会话按正常流程封存。重复导入可打开原会话。",box);
@@ -291,6 +333,7 @@ window.pcarLive = (() => {
       try {
         const result=await action("history_commit",{preview,confirmed:true,operation_id:operation,creation:options.creation || null});
         await reload(result.persona_id,true,result.session_id);
+        if(options.targetRole) window.pcarMobile?.chat();
         if(result.reused) notify("已打开先前导入的会话。");
       } catch(e){error.textContent=String(e.message||e);}
     });
@@ -300,7 +343,16 @@ window.pcarLive = (() => {
   }
   async function home() {
     const box=panel("新建角色");
-    button(box,"从聊天记录生成",async()=>{const data=await api().pick_transcript(); if(data) await openImport(data);});
+    if(api().pick_deepseek_export)button(box,"从 DeepSeek 创建",deepseekHome);
+    button(box,"从聊天记录生成",async()=>{
+      if(!api().commit_import_scope){
+        const data=await api().pick_transcript();
+        if(data)await openImport(data);
+        return;
+      }
+      const scope=await api().pick_transcript(true);
+      if(scope)chooseImportScope(scope,openImport,home);
+    });
     button(box,"导入已有角色包",async()=>{
       const pack=await api().live_package();if(!pack)return;
       const form=panel("核对并导入角色包"),read=specForm(form,pack.persona_spec),request=newId();
@@ -332,6 +384,306 @@ window.pcarLive = (() => {
     if(!status.textContent) showTemplate(template);
     for(const d of docs)button(box,d.format+" · "+d.created.slice(0,16)+" · "+(jobs[d.status]||d.status),
       async()=>openImport(await action("status",{ident:d.id})));
+  }
+
+  function keyPrompt(){
+    const box=keyPanel=panel("请先填写并验证 DeepSeek API Key");
+    button(box,"前往填写",keySetup);
+    button(box,"退出 PCAR",()=>api().exit_workbench());
+  }
+
+  function keySetup(){
+    const box=keyPanel=panel("验证 DeepSeek API Key");
+    const label=el("label","官方 DeepSeek API Key",box);
+    const input=el("input",null,label);
+    input.type="password";input.autocomplete="off";input.setAttribute("data-autofocus","");
+    const detail=el("p",null,box);detail.setAttribute("role","status");
+    const reasons={invalid_key:"官方鉴权未通过，请核对 Key。",proxy_required:"请先开启已配置的 Windows 系统代理。",
+      network_error:"暂时无法验证 Key，请检查连接后重试。",connection_changed:"本机连接已变化，请重新核对。",
+      missing:"请填写 DeepSeek API Key。"};
+    const save=button(box,"验证并保存",()=>verify(input.value.trim()));
+    const existing=activation?.has_key?button(box,"验证已有 Key",()=>verify("")):null;
+    button(box,"前往 DeepSeek 创建 Key",()=>api().open_deepseek_site(true));
+    if(activation?.has_key)button(box,"清除 Key",()=>{
+      const review=keyPanel=panel("清除 DeepSeek API Key");
+      el("p","清除后，业务功能将锁定，直至验证新 Key。",review);
+      button(review,"确认清除",async()=>{activation=await api().clear_deepseek_key();dialog.close();arm(0);});
+      button(review,"返回",keySetup);
+    });
+    async function verify(value,confirm=null){
+      if(!value&&!activation?.has_key){detail.textContent=reasons.missing;return;}
+      save.disabled=true;if(existing)existing.disabled=true;
+      detail.textContent="正在向 DeepSeek 验证。";
+      try{
+        const result=await api().verify_deepseek_key(value,confirm);
+        if(result.state==="confirm"){
+          const review=keyPanel=panel("确认更新 DeepSeek 连接");
+          el("p",result.affected?"此变更影响 "+result.affected+" 个已有会话的接收方授权。":"此变更会更新基础模型的接收方。",review);
+          button(review,"确认并验证",()=>verify(value,result.confirmation));
+          button(review,"返回",keySetup);
+          return;
+        }
+        if(result.state==="verified"){
+          input.value="";activation=result;dialog.close();
+          notify(result.balance_available?"DeepSeek 鉴权通过。":"DeepSeek 鉴权通过。当前账户余额不足。");
+          arm(0);return;
+        }
+        if(!box.isConnected){
+          const retry=keyPanel=panel("DeepSeek 鉴权");
+          el("p",reasons[result.state]||reasons.network_error,retry);
+          button(retry,"重新填写",keySetup);
+        }else detail.textContent=reasons[result.state]||reasons.network_error;
+      }catch(e){
+        const retry=keyPanel=panel("DeepSeek 鉴权未完成");
+        el("p","请检查本机服务与连接，再次验证。",retry);
+        button(retry,"返回填写",keySetup);
+      }finally{save.disabled=false;if(existing)existing.disabled=false;}
+    }
+    input.focus();
+  }
+
+  let exportWaitingPanel=null;
+  async function manualDeepSeekZip(parent){
+    try{
+      const picked=await api().pick_deepseek_export();
+      if(picked){
+        if(api().stop_deepseek_export)await api().stop_deepseek_export();
+        await chooseDeepSeek(picked);
+      }
+    }catch(e){el("p",String(e.message||e),parent);}
+  }
+
+  function deepseekGuide(parent){
+    const guide=el("details",null,parent);
+    el("summary","DeepSeek 导出图文教程",guide);
+    const steps=el("div",null,guide);steps.className="deepseek-guide";
+    function figure(title,description){
+      const figure=el("figure",null,steps);
+      const diagram=el("div",null,figure);diagram.className="deepseek-diagram";
+      diagram.setAttribute("aria-hidden","true");
+      const caption=el("figcaption",null,figure);
+      el("strong",title,caption);
+      el("p",description,caption);
+      return diagram;
+    }
+    function token(diagram, label, style=""){
+      const item=el("span",label,diagram);
+      item.className="deepseek-guide-token"+(style?" "+style:"");
+    }
+    function arrow(diagram){el("span","›",diagram).className="deepseek-guide-arrow";}
+    const settings=figure("在官网找到数据导出","在浏览器登录 DeepSeek。点侧栏的账号头像，进入「设置 → 数据管理」。");
+    el("span","",settings).className="deepseek-guide-avatar";
+    arrow(settings);token(settings,"设置");arrow(settings);token(settings,"数据管理","highlight");
+    const download=figure("生成链接，再下载 ZIP","在数据导出中点「生成下载链接」。链接就绪后点官网下载，等浏览器显示下载完成。");
+    token(download,"生成下载链接");arrow(download);token(download,"下载 ZIP","highlight");
+    const select=figure("回 PCAR 选择一段对话","收到提示后选要导入的对话。也可点「选择已下载的 ZIP」，直接打开官网给你的压缩包。");
+    token(select,"ZIP","archive");arrow(select);token(select,"PCAR · 选择对话","highlight");
+    return guide;
+  }
+
+  function showDeepSeekWaiting(folder){
+    const box=exportWaitingPanel=panel("等待 DeepSeek 导出");
+    el("p","请在浏览器登录 DeepSeek，在设置里生成下载链接。链接就绪后点击官网下载。PCAR 会自动识别下载完成的 ZIP。",box);
+    el("small",folder,box);
+    el("p","等待期间可以关闭这个提示，下载完成后会从工作台提示。",box);
+    deepseekGuide(box);
+    button(box,"选择已下载的 ZIP",()=>manualDeepSeekZip(box));
+    button(box,"停止等待",async()=>{await api().stop_deepseek_export();await deepseekHome();});
+  }
+
+  async function deepseekHome(){
+    const box=panel("从 DeepSeek 创建");
+    el("p","在系统浏览器完成登录和导出。PCAR 会识别下载好的官方 ZIP，再让你选择一段对话。",box);
+    async function openBrowser(folder){
+      try{
+        const ready=await api().start_deepseek_export(folder);
+        if(ready)showDeepSeekWaiting(ready);
+      }catch(e){el("p",String(e.message||e),box);}
+    }
+    if(api().start_deepseek_export){
+      button(box,"打开 DeepSeek 并等待下载",()=>openBrowser(false));
+      button(box,"选择下载文件夹并打开官网",()=>openBrowser(true));
+    }
+    button(box,"选择已下载的 ZIP",()=>manualDeepSeekZip(box));
+    deepseekGuide(box).open=true;
+    const pending=await api().deepseek_pending();
+    if(pending&&box.isConnected)button(box,"继续选择对话",()=>openDeepSeekDelivery(pending.id,true));
+    else if(api().deepseek_export_waiting){
+      const folder=await api().deepseek_export_waiting();
+      if(folder&&box.isConnected)button(box,"查看下载等待进度",()=>showDeepSeekWaiting(folder));
+    }
+  }
+
+  async function openDeepSeekDelivery(job,chooseNow=false){
+    seenIntake=job;
+    try{
+      const data=await api().open_deepseek_pending(job);
+      if(chooseNow)return chooseDeepSeek(data,job);
+      const box=panel("已收到 DeepSeek 导出");
+      el("p","已提取会话目录，共 "+data.conversations.length+" 段。可以现在选择，也可以稍后从「从 DeepSeek 创建」继续。",box);
+      button(box,"选择一段对话",()=>chooseDeepSeek(data,job));
+      button(box,"稍后",()=>dialog.close());
+    }catch(e){
+      const box=panel("浏览器导入待处理");
+      el("p",String(e.message||e),box);
+      button(box,"重新选择 ZIP",deepseekHome);
+      button(box,"取消此次交接",async()=>{await api().discard_deepseek_pending(job);dialog.close();});
+    }
+  }
+
+  async function chooseDeepSeek(data,job=null){
+    const box=panel("选择一段 DeepSeek 对话");
+    el("p","每次提取一段对话。选中后即可审阅其 Markdown 正文。",box);
+    if(!data.conversations.length)el("p","这个导出包中没有会话。",box);
+    const search=el("input",null,box);
+    search.type="search";search.placeholder="搜索对话标题或编号";
+    search.setAttribute("aria-label","搜索对话标题或编号");
+    const list=el("div",null,box);
+    let page=0;
+    function show(){
+      list.replaceChildren();
+      const query=search.value.trim().toLowerCase();
+      const matches=data.conversations.filter(item=>item.title.toLowerCase().includes(query)||item.id.toLowerCase().includes(query));
+      el("p",matches.length+" 个会话",list);
+      for(const item of matches.slice(page*50,page*50+50)){
+        if(item.updated || item.count!==null)el("small",[item.updated,item.count===null?null:item.count+" 条"].filter(Boolean).join(" · "),list);
+        button(list,item.title,()=>importDeepSeek(item.id,null,data,job));
+      }
+      if(page)button(list,"上一页",()=>{page--;show();});
+      if((page+1)*50<matches.length)button(list,"下一页",()=>{page++;show();});
+    }
+    search.oninput=()=>{page=0;show();};show();
+    if(job)button(box,"取消此次交接",async()=>{await api().discard_deepseek_pending(job);dialog.close();});
+  }
+
+  async function importDeepSeek(ident,branch,data,job){
+    try{
+      const result=await api().import_deepseek_session(ident,branch);
+      if(result.scope)return chooseImportScope(result.scope,reviewDeepSeek,()=>chooseDeepSeek(data,job));
+      if(result.document)return reviewDeepSeek(result.document);
+      if(result.branches){
+        const box=panel("选择可还原的分支");
+        el("p",result.conversation.title,box);
+        const choice=el("select",null,box);
+        choice.setAttribute("aria-label","选择 DeepSeek 分支");
+        for(const item of result.branches)choice.add(new Option([item.date,"分支 "+item.id].filter(Boolean).join(" · "),item.id));
+        button(box,"导入所选分支",()=>importDeepSeek(ident,Number(choice.value),data,job));
+        button(box,"返回会话",()=>chooseDeepSeek({...data,target:null},job));
+        return;
+      }
+      return chooseDeepSeek({...data,target:ident,conversations:data.conversations.filter(item=>item.id!==ident)},job);
+    }catch(e){
+      const box=panel("DeepSeek 导入未完成");
+      el("p",String(e.message||e),box);
+      button(box,"返回会话",()=>chooseDeepSeek({...data,target:null},job));
+    }
+  }
+
+  function chooseImportScope(source, accept, back, fixedMode=null){
+    const box=panel("选择聊天模式和导入数量");
+    box.classList.add("import-range");
+    if(source.title)el("strong",source.title,box);
+    el("p","原记录共 "+source.total.toLocaleString("zh-CN")+" 条消息。按原顺序导入最近所选条数。",box);
+    const mode=inputField(box,"聊天模式","select");
+    mode.add(new Option("私人聊天模式","private_chat"));
+    mode.add(new Option("角色扮演模式","roleplay"));
+    mode.value=fixedMode || source.chat_mode;
+    mode.disabled=Boolean(fixedMode);
+    const description=el("p",null,box);
+    const range=inputField(box,"导入数量","select");
+    for(const count of [50,100,200,500,1000]){
+      const option=new Option("导入 "+count+" 条消息",String(count));
+      option.disabled=count>source.total;
+      range.add(option);
+    }
+    range.add(new Option("导入全部消息","all"));
+    range.add(new Option("自定义导入数量","custom"));
+    range.value=source.total>500 ? "500" : "all";
+    const custom=inputField(box,"最近消息条数","number",String(Math.min(500,source.total)));
+    custom.min="1";custom.max=String(source.total);custom.step="1";
+    const preview=el("p",null,box);
+    preview.setAttribute("aria-live","polite");
+    if(source.title)el("small","建卡范围需要包含用户和 DeepSeek 双方的消息。",box);
+    if(source.total>5000){
+      const warning=el("p","原记录超过 5000 条。整理较长历史会增加建卡用时和模型费用。",box);
+      warning.className="import-range-warning";warning.setAttribute("role","status");
+    }
+    const consent=check(box,"我接受本次超过 5000 条消息的建卡用时和费用");
+    const consentLine=consent.parentElement;consentLine.className="import-range-warning";
+    const apply=button(box,"确认导入",async()=>{
+      const count=chosenCount();
+      if(!valid(count) || (count>5000&&!consent.checked))return;
+      apply.disabled=true;
+      try{
+        const data=await api().commit_import_scope(source.token,count,mode.value,consent.checked);
+        if(box.isConnected)await accept(data);
+      }finally{if(box.isConnected)refresh();}
+    });
+    button(box,"返回",back);
+    function chosenCount(){
+      if(range.value==="all")return source.total;
+      if(range.value==="custom")return custom.valueAsNumber;
+      return Number(range.value);
+    }
+    function valid(count){return Number.isInteger(count)&&count>=1&&count<=source.total;}
+    function refresh(){
+      const count=chosenCount();
+      custom.parentElement.hidden=range.value!=="custom";
+      consentLine.hidden=!(count>5000);
+      const okay=valid(count);
+      preview.textContent=okay ? "将导入 "+count.toLocaleString("zh-CN")+" 条消息。" : "请输入有效的导入条数。";
+      description.textContent=mode.value==="roleplay" ?
+        "用于 AI 文游。保留动作、旁白和角色心理，将剧情记在这个人格的故事世界里。" :
+        "用于模拟即时通讯私聊。按真实交流整理人物与记忆。";
+      apply.disabled=!okay || (count>5000&&!consent.checked);
+    }
+    mode.onchange=refresh;
+    consent.onchange=refresh;
+    range.onchange=custom.oninput=()=>{consent.checked=false;refresh();};
+    refresh();
+  }
+
+  async function reviewDeepSeek(document,start=0,edits={}){
+    const box=panel("审阅 DeepSeek Markdown");
+    el("p",document.deepseek?.title||"DeepSeek 对话",box);
+    el("p","可修改每条消息的 Markdown 正文。删除正文会排除该条。原始导出保留供核对。",box);
+    const status=el("p",null,box);
+    status.setAttribute("role","status");
+    const data=await action("evidence",{ident:document.id,start});
+    if(!box.isConnected)return;
+    if(data.total)el("small","第 "+(start+1)+"–"+Math.min(start+10,data.total)+" 条，共 "+data.total+" 条",box);
+    for(const row of data.rows.slice(0,10)){
+      const label=el("label",[row.speaker,row.date].filter(Boolean).join(" · "),box);
+      label.className="field";
+      const input=el("textarea",null,label);
+      input.rows=4;
+      input.value=edits[row.id]??row.original;
+      input.oninput=()=>{
+        if(input.value===row.original)delete edits[row.id];
+        else edits[row.id]=input.value;
+      };
+    }
+    if(start>0)button(box,"上一页",()=>reviewDeepSeek(document,Math.max(start-10,0),edits));
+    if(start+10<data.total)button(box,"下一页",()=>reviewDeepSeek(document,start+10,edits));
+    if(data.total>10){
+      const jump=el("input",null,box);
+      jump.type="number";jump.min=1;jump.max=data.total;jump.placeholder="消息编号";
+      jump.setAttribute("aria-label","跳到消息编号");
+      button(box,"跳转",()=>{
+        const position=Number(jump.value);
+        if(Number.isInteger(position)&&position>=1&&position<=data.total)
+          return reviewDeepSeek(document,Math.floor((position-1)/10)*10,edits);
+      });
+    }
+    const commit=()=>Object.keys(edits).length?api().revise_deepseek_markdown(document.id,edits):document;
+    button(box,"另存审阅版 Markdown",async()=>{
+      try{const revised=await commit();if(await api().save_deepseek_markdown(revised.id))status.textContent="已保存审阅版。";}
+      catch(e){status.textContent=String(e.message||e);}
+    });
+    button(box,"确认内容并继续建卡",async()=>{
+      try{await openImport(await commit());}
+      catch(e){status.textContent=String(e.message||e);}
+    });
   }
 
   async function evidence(data,start,prepared,back,overrides=null,showSections=false) {
@@ -375,7 +727,12 @@ window.pcarLive = (() => {
   function mapping(data, map={...data.mapping}, overrides={...data.overrides}) {
     const box=panel("确认两位说话人");
     const range=data.preview||{};
+    if(range.chat_mode==="roleplay")el("p","角色扮演模式 · 剧情将随人格保存。",box);
     el("p",[data.format,range.count && range.count+" 条记录",range.from,range.to].filter(Boolean).join(" · "),box);
+    if(data.format==="DeepSeek Markdown"){
+      if(data.deepseek)el("p",[data.deepseek.title,"分支 "+data.deepseek.branch,data.deepseek.from,data.deepseek.to].filter(Boolean).join(" · "),box);
+      button(box,"另存 Markdown",()=>api().save_deepseek_markdown(data.id));
+    }
     const speakers = Object.entries(data.counts);
     if (speakers.length === 1)
       el("p","文件中只有一个昵称。同名的两位说话人可在逐条核对时指定归属，缺少一方时请补充记录。",box);
@@ -397,7 +754,7 @@ window.pcarLive = (() => {
     checkMapping();
   }
 
-  async function openImport(data,role="A") {
+  async function openImport(data,role=data.format==="DeepSeek Markdown" && data.mapping.DeepSeek==="B"?"B":"A") {
     if(data.status==="preview"){mapping(data);return;}
     if(data.plan){return openPlanned(data,role);}
     const box=panel("聊天人设草稿");
@@ -893,14 +1250,13 @@ window.pcarLive = (() => {
     return items;
   }
 
-  const notifiedConflicts = new Map();
   function conflictWarning(items, cards, locate) {
     if (!items.length || !dialog.open) return;
     const popup=el("dialog",null,document.body);
     popup.className="import-conflict-dialog"; popup.setAttribute("role","alertdialog");
     popup.setAttribute("aria-labelledby","card-conflict-title");popup.setAttribute("aria-describedby","card-conflict-message");
     const header=el("div",null,popup);header.className="dialog-head";
-    el("h2","角色卡有严重冲突",header).id="card-conflict-title";
+    el("h2","核对角色卡冲突",header).id="card-conflict-title";
     const body=el("div",null,popup);body.className="dialog-body";
     el("p","请核对以下字段的依据，修改内容或确认保留当前值。",body).id="card-conflict-message";
     for(const issue of items){
@@ -930,6 +1286,42 @@ window.pcarLive = (() => {
     const focus=()=>{if(control.isConnected){control.scrollIntoView({block:"center"});control.focus();}};
     focus();
     setTimeout(focus,0);
+  }
+
+  let cardToastTimer, openingCardChat=false;
+  function cardNotice(message) {
+    let notice=byId("import-card-toast");
+    if(!notice) {
+      notice=el("div",null,dialog);
+      notice.id="import-card-toast";
+      notice.className="import-card-toast";
+      notice.setAttribute("role","status");
+    }
+    clearTimeout(cardToastTimer);
+    notice.textContent=message;
+    notice.hidden=false;
+    cardToastTimer=setTimeout(()=>{notice.hidden=true;},2600);
+  }
+
+  function markRequiredCardFields(box,missing) {
+    const paths=missing.map(key=>"spec."+key);
+    const controls=[...box.querySelectorAll("textarea[data-card-path]")];
+    cardNotice("请填写"+missing.map(key=>"「"+(titles[key]||"名称")+"」").join("和"));
+    for(const input of controls) {
+      input.classList.remove("card-field-shake");
+      input.removeAttribute("aria-invalid");
+      if(paths.includes(input.dataset.cardPath)) input.setAttribute("aria-invalid","true");
+    }
+    setTimeout(()=>{
+      if(!box.isConnected||!dialog.open) return;
+      for(const input of controls.filter(node=>node.getAttribute("aria-invalid")==="true")){
+        input.getBoundingClientRect();
+        input.classList.add("card-field-shake");
+      }
+      focusCardField(box,paths[0]);
+      const first=controls.find(input=>input.dataset.cardPath===paths[0]);
+      if(first) first.setSelectionRange(first.value.length,first.value.length);
+    },0);
   }
 
   function addConflictResolution(box, issue, save, finish, openSource) {
@@ -968,9 +1360,9 @@ window.pcarLive = (() => {
     const blockers=cardConflicts(job.cards);
     async function locate(target,path){
       if(target===role){focusCardField(box,path);return;}
-      openCard(data,target,await save(),{both:both.checked,focusField:path});
+      openCard(data,target,await save(),{...editorOptions(target),focusField:path});
     }
-    if(blockers.length) button(box,"处理严重冲突（"+blockers.length+"）",()=>conflictWarning(blockers,job.cards,locate));
+    if(blockers.length) button(box,"核对冲突（"+blockers.length+"）",()=>conflictWarning(blockers,job.cards,locate));
     if(job.stale) {
       el("p","当前显示最新草稿。",box);
       const previous=job.stale_candidate?.[role];
@@ -986,8 +1378,13 @@ window.pcarLive = (() => {
       }
     }
     if(job.error) el("p",job.error==="invalid_receipt"?"成卡回执未通过格式校验，请手工补齐。":String(job.error),box);
-    const nav=el("div",null,box); nav.className="inline-actions";
-    button(nav,"暂存并查看 "+other,async()=>openCard(data,other,await save(),{both:both.checked}));
+    const nav=el("div",null,box); nav.className="tablist";
+    for(const target of roles){
+      const tab=button(nav,"角色 "+target,async()=>{
+        if(target!==role)openCard(data,target,await save(),editorOptions(target));
+      });
+      tab.setAttribute("aria-pressed",String(target===role));
+    }
     button(nav,"查看原画像",async()=>{
       await save(); await openPlanned(await action("status",{ident:data.id}),role,{source:true});
     });
@@ -997,29 +1394,29 @@ window.pcarLive = (() => {
       if(!proposal) return;
       const next=await action("card_edit",{ident:data.id,revision:data.revision,plan_id:data.plan.id,
                               card_revision:current.revision,role,card:proposal});
-      openCard(data,role,next,{both:both.checked});
+      openCard(data,role,next,editorOptions());
     }
+    const base=groupBox(box,"基础人设与语言风格",true);
+    const readSpec=specForm(base,card.spec,job.required);
+    const relation=readField(field(base,"关系说明",card.relationship,false,"relationship"),card.relationship);
+    base.addEventListener("input",event=>{
+      const input=event.target;
+      if(input.matches("textarea[data-card-path]") && input.value.trim()){
+        input.removeAttribute("aria-invalid");
+        input.classList.remove("card-field-shake");
+      }
+    });
     pendingProposals(box,card,issue=>saveProposal(issue,fillProposal),false,
                      items=>saveProposal(items,fillTextProposals));
-    const base=groupBox(box,"基础人设与语言风格",true);
-    const readSpec=specForm(base,card.spec);
-    const relation=readField(field(base,"关系说明",card.relationship,false,"relationship"),card.relationship);
-    const nativePreview=groupBox(base,"预览普通发言人设正文");
-    const ordinary=el("pre",null,nativePreview); ordinary.className="import-original";
-    let previewRequest=0;
-    const refreshNative=run(async()=>{
-      const current=++previewRequest;
-      ordinary.textContent="";
-      if (!nativePreview.parentElement.open) return;
-      const preview=await action("card_preview",{spec:readSpec()});
-      if(current===previewRequest && nativePreview.isConnected) ordinary.textContent=preview;
-    });
-    nativePreview.parentElement.addEventListener("toggle",refreshNative);
-    base.addEventListener("input",()=>{nativePreview.parentElement.open=false; ++previewRequest; ordinary.textContent="";});
     const factBox=groupBox(box,"人物资料");
     const readCharacter=characterForm(factBox,card.character);
-    const materialBox=groupBox(box,"场景提示与 Jev");
+    const roleplay=data.preview?.chat_mode==="roleplay";
+    const canChooseScene=!roleplay && !window.pcarMobile;
+    const materialBox=groupBox(box,state.community?"场景提示与 Flash 判别":"场景提示与 Jev");
     const readScenes=sceneMaterial(materialBox,card);
+    const scene=canChooseScene ? check(materialBox,"核准并启用当前角色的场景提示和判别内容",Boolean(creation.scene)) : null;
+    materialBox.parentElement.hidden=!canChooseScene;
+    if(roleplay) el("p","角色扮演模式 · 剧情以原有叙述方式呈现。",box);
     cardProof(box,data,role,card,save);
     async function save(resolvedFields=[]){
       const changed={...card,spec:readSpec(),relationship:relation(),
@@ -1029,57 +1426,120 @@ window.pcarLive = (() => {
         card_revision:job.revision,role,card:changed,...(resolvedFields.length?{resolved_fields:resolvedFields}:{})});
       return job;
     }
-    button(box,"暂存角色卡",async()=>openCard(data,role,await save(),{both:both.checked}));
+    button(box,"暂存角色卡",async()=>{
+      openCard(data,role,await save(),editorOptions());
+      cardNotice("草稿已暂存");
+    });
     const finalActions=el("div",null,byId("dialog-actions"));
     finalActions.className="import-create-actions";
-    const both=check(finalActions,"同时创建 A 和 B",Boolean(creation.both));
-    const mode=inputField(box,"保存后打开的会话","select");
+    const mode=inputField(box,"开聊方式","select");
     mode.add(new Option("从空白开始","empty"));
     mode.add(new Option("带历史开始","history"));
-    const scene=check(materialBox,"核准已预览的场景提示和 Jev 判别，配置齐备时启用");
-    const publish=button(finalActions,"确认创建并打开聊天",async()=>{
-      const selected=both.checked?roles:[role], enableScene=scene.checked;
-      const result=await save();
-      const remaining=cardConflicts(result.cards,selected);
-      if(remaining.length){
-        conflictWarning(remaining,result.cards,locate);
+    mode.value=creation.mode||"empty";
+    function editorOptions(target=role){return {mode:mode.value,scene:target===role && Boolean(scene?.checked)};}
+    async function openSavedChat(pid){
+      openingCardChat=true;
+      try{
+        await reload(pid,false);
+        if(stopped || currentPerson()?.id!==pid) throw new Error("card_chat_selection_incomplete");
+      }catch{
+        if(!dialog.open) return;
+        const saved=panel("角色已保存");
+        button(saved,"打开角色 "+role+" 的聊天",()=>openSavedChat(pid)).classList.add("primary");
         return;
+      }finally{
+        openingCardChat=false;
       }
-      for(const r of selected) {
-        const spec=result.cards[r].spec;
-        const missing=["name",...Object.keys(titles)].find(key=>!spec[key]?.length);
-        if(missing) {
-          if(r!==role) openCard(data,r,result,{both:both.checked});
-          const title=titles[missing]||"名称";
-          const target=[...dialogBody.querySelectorAll("label.field")].find(n=>n.firstChild?.textContent.startsWith(title));
-          target?.querySelector("textarea")?.focus();
-          throw new FormError(r+" 的「"+title+"」需要填写。");
+      dialog.close();
+      window.pcarMobile?.chat();
+    }
+    async function previewPublication(start){
+      const result=await save(), options=editorOptions();
+      const identity={ident:data.id,revision:data.revision,plan_id:data.plan.id,card_revision:result.revision};
+      const preview=await action("card_review",identity);
+      if(!box.isConnected||!dialog.open) return;
+      const current=preview.roles[role], peer=preview.roles[other];
+      if(current.unavailable){cardNotice("请先从人物中心恢复这个角色");return;}
+      if(current.missing.length){markRequiredCardFields(box,current.missing);return;}
+      if(!start && current.saved){cardNotice("角色 "+role+" 已保存");return;}
+      const selected=[role];
+      if(start && !peer.unavailable && !peer.saved && !peer.missing.length) selected.push(other);
+      const pending=selected.filter(target=>!preview.roles[target].saved);
+      const scenes=options.scene && !current.saved && Object.keys(current.scenes).length ? current.scenes : null;
+      const next={plan_id:identity.plan_id,card_revision:identity.card_revision,
+                  roles:pending,enable_scene:Boolean(scenes),omit_unresolved:true,
+                  ...(scenes?{scene_role:role}:{})};
+      const back=()=>openCard(data,role,result,options);
+      async function confirm(){
+        if(start && options.mode==="history" && !current.saved){
+          setupHistory(data,{cards:result.cards,creation:next,targetRole:role,back});
+          return;
+        }
+        const operation=["card",data.id,data.revision,result.revision,pending.join(""),next.scene_role||""].join(".");
+        const people=pending.length?await action("card_create",{...identity,...next,operation_id:operation,confirmed:true}):[];
+        if(!start){back();cardNotice("角色 "+role+" 已保存");return;}
+        const pid=current.saved||people[pending.indexOf(role)];
+        if(options.mode==="history"){
+          setupHistory(data,{personaId:pid,targetName:current.name,targetRole:role,back});
+        } else {
+          await openSavedChat(pid);
         }
       }
-      if(mode.value==="history"){
-        setupHistory(data,{cards:result.cards,creation:{plan_id:data.plan.id,card_revision:result.revision,
-          roles:selected,enable_scene:enableScene},back:()=>openCard(data,role,result,{both:both.checked})});
-        return;
+      if(!pending.length){await confirm();return;}
+      const reviewBox=panel("预览人设提示词");
+      const choosing=el("div",null,reviewBox);
+      choosing.className="tablist";
+      let viewedRole=role;
+      const promptMode=scenes?inputField(reviewBox,"提示词类型","select"):null;
+      if(promptMode){
+        promptMode.add(new Option("普通聊天",""));
+        for(const key of Object.keys(scenes))promptMode.add(new Option(sceneLabels[key],key));
+        promptMode.onchange=()=>show(viewedRole);
       }
-      const request=[data.id.slice(0,32),data.revision,result.revision,selected.join(""),Number(enableScene)].join(".");
-      const ids=await action("card_create",{ident:data.id,revision:data.revision,plan_id:data.plan.id,
-        card_revision:result.revision,roles:selected,enable_scene:enableScene,operation_id:request,confirmed:true});
-      await reload(ids[both.checked && role==="B"?1:0]);
-    });
-    publish.classList.add("primary");
+      const prompt=field(reviewBox,"人设提示词","",false);
+      prompt.readOnly=true;
+      prompt.className="import-card-prompt";
+      const details=el("p",null,reviewBox);
+      details.className="hint";
+      function show(target){
+        viewedRole=target;
+        const item=preview.roles[target];
+        if(promptMode) promptMode.closest("label").hidden=target!==role;
+        prompt.value=(target===role && scenes?.[promptMode?.value]) || item.prompt;
+        prompt.scrollTop=0;
+        details.textContent=[item.template_ready?"":"角色扮演模板待审定，框内显示本次保存的人设。",
+          item.omitted.length?"已跳过 "+item.omitted.length+" 个待核对的字段。":""].filter(Boolean).join(" ");
+        details.hidden=!details.textContent;
+        for(const tab of choosing.querySelectorAll("button"))
+          tab.setAttribute("aria-pressed",String(tab.dataset.role===target));
+      }
+      if(selected.length>1) for(const target of selected){
+        const tab=button(choosing,"角色 "+target,()=>show(target));
+        tab.dataset.role=target;
+      }
+      show(role);
+      if(options.scene && !current.saved){
+        el("p",scenes?"保存时核对场景连接与用途授权。":"场景材料待核对。本次保存普通人设。",reviewBox).className="hint";
+      }
+      if(start){
+        const text=selected.length>1?"同时保存角色 "+other+"，进入角色 "+role+" 的聊天。":
+          "进入角色 "+role+" 的聊天。"+(!peer.saved && !peer.unavailable?"角色 "+other+" 保留为草稿。":"");
+        el("p",text,reviewBox);
+      }
+      const actions=byId("dialog-actions");
+      button(actions,"返回编辑",back);
+      button(actions,start?(options.mode==="history"?"确认并选择历史":"确认并开始聊天"):"确认保存",confirm).classList.add("primary");
+    }
+    button(finalActions,"保存角色 "+role,()=>previewPublication(false));
+    button(finalActions,"开始聊天",()=>previewPublication(true)).classList.add("primary");
     for(const issue of blockers.filter(i=>i.role===role)) {
-      addConflictResolution(box,issue,save,next=>openCard(data,role,next,{both:both.checked}),
+      addConflictResolution(box,issue,save,next=>openCard(data,role,next,editorOptions()),
         async ref=>{
           const current=await save();
-          await claimSource(data,role,ref,()=>openCard(data,role,current,{both:both.checked,focusField:issue.field}),"返回冲突字段");
+          await claimSource(data,role,ref,()=>openCard(data,role,current,{...editorOptions(),focusField:issue.field}),"返回冲突字段");
         });
     }
-    const sessionKey=JSON.stringify([data.id,data.plan.id,data.revision]);
-    const currentKeys=blockers.map(item=>item.role+" "+item.field);
-    const prior=notifiedConflicts.get(sessionKey);
-    if(currentKeys.length) notifiedConflicts.set(sessionKey,new Set(currentKeys)); else notifiedConflicts.delete(sessionKey);
     if(creation.focusField) focusCardField(box,creation.focusField);
-    else if(currentKeys.some(key=>!prior?.has(key))) conflictWarning(blockers,job.cards,locate);
   }
 
   async function openPlanned(data, role, creation={}) {
@@ -1150,7 +1610,8 @@ window.pcarLive = (() => {
       planScope(current,role,()=>openImport(current,role));
     });
     if (!plan.configured) {
-      el("p","提炼配置待审定。可先核对范围和编辑草稿。",box);
+      el("p",plan.chat_mode==="roleplay"?"角色扮演提示词待审定。可先核对范围和编辑草稿。":
+        "提炼配置待审定。可先核对范围和编辑草稿。",box);
       button(box,"按当前配置重新计划",async()=>{
         const current = await save();
         await refreshed(await action("plan",{ident:data.id,revision:current.revision,mapping:current.mapping,
@@ -1255,7 +1716,7 @@ window.pcarLive = (() => {
   async function loadSelection(person,fresh,closeDialog,viewSession,reconnect,id){
     const result=viewSession ? await api().live_select(person.id,false,viewSession) : await api().live_select(person.id,fresh);
     if(id!==epoch||stopped)return;
-    person.sessions=result.sessions.map(s=>({id:s.id,label:s.created_at.slice(0,16).replace("T"," "),
+    person.sessions=result.sessions.map(s=>({id:s.id,label:s.created_at.slice(0,16).replace("T"," "),lifecycle:s.state,
       draft:"",messages:[],past:[],version:null,historyReady:false,turns:[],readOnly:s.id!==result.active}));
     if(!person.sessions.length)person.sessions.push({id:"",label:"新对话",draft:"",turns:[],past:[],version:null});
     const chosen=person.sessions.find(s=>s.id===viewSession)||person.sessions.find(s=>s.id===result.active)||person.sessions[0];
@@ -1355,6 +1816,7 @@ window.pcarLive = (() => {
       if(!current())return;
       const scopeChanged=s.readOnly!==Boolean(result.sealed||s.id!==p.writableSession);
       s.readOnly=Boolean(result.sealed||s.id!==p.writableSession);
+      s.branch=result.branch||null;
       const bufferChanged=JSON.stringify(s.inputBuffer)!==JSON.stringify(result.input_buffer);
       s.inputBuffer=result.input_buffer;
       if(result.reset){s.turns=result.turns;s.older=result.older;s.newer=result.newer;}
@@ -1523,7 +1985,7 @@ window.pcarLive = (() => {
     el("p","续聊用途 · "+({active:"已确认",legacy:"待核对本人和原件",provider_changed:"当前模型待确认",
       withdrawn:"已撤回"}[info.usage_state] || "待确认"),box);
     el("p","长期记忆 · "+(memoryStateNames[info.memory_state] || "待核对"),box);
-    showRecipients(box,info.current_providers);
+    showRecipients(box,info.current_providers,currentPerson()?.profile.chat_mode==="roleplay");
     if(info.usage_state==="legacy") {
       button(box,"选择原件并核对本人",async()=>{
         const file=await api().pick_transcript();
@@ -1576,10 +2038,8 @@ window.pcarLive = (() => {
         body.append(document.createTextNode(chars.slice(part.start-source.start,part.end-source.start).join("")));
       }
     }
-    if(!s.readOnly && event.role!=="note" && event.referenceable)button(box,"引用这条消息",()=>{
-      if(s!==currentSession())throw new FormError("请回到该消息所在的会话。");
-      s.reference={id:event.id,text:event.text};reviseDraft(s);dialog.close();render();message.focus();
-    });
+    if(!s.readOnly && event.role!=="note" && event.referenceable)button(box,"引用这条消息",()=>
+      quoteMessage(s,event.message_target||messageTarget(event.id),event.text));
     if(back)button(box,"返回查找结果",back);
   }
   function historySearch(s,query="",rows=[],before=null,loaded=false){
@@ -1603,9 +2063,70 @@ window.pcarLive = (() => {
     }
     input.focus();
   }
+  function messageTarget(id,index=0){return {kind:"desktop_message",id,index};}
+  function quoteMessage(s,target,text){
+    if(s!==currentSession()||s.readOnly)return;
+    s.reference={...target,text};reviseDraft(s);dialog.close();render();message.focus();
+  }
+  async function reopenSource(s){
+    const person=currentPerson(), branch=s.branch;
+    const parent=person.sessions.find(item=>item.id===branch.parent_session_id);
+    if(parent?.lifecycle==="active" && parent.id!==person.writableSession){
+      s.parentOperation||=newId();
+      await api().live_activate(person.id,parent.id,s.parentOperation);
+    }
+    if(s!==currentSession())return;
+    let mark=null;
+    try{mark=await api().live_message_position(person.id,branch.parent_session_id,branch.anchor);}
+    catch{notify("原消息已不可引用，已打开原会话。");}
+    if(s!==currentSession())return;
+    await select(person,false,true,branch.parent_session_id);
+    const now=currentSession();
+    if(mark && now?.id===branch.parent_session_id){
+      now.restore=mark;now.version=null;now.historyReady=false;await refresh();
+    }
+  }
+  function messageActions(node,target,text){
+    const parent=node.parentNode,s=currentSession(),person=currentPerson();
+    if(!active||!s?.id||!person||!target.id)return;
+    const row=document.createElement("div");
+    row.className="message-with-menu"+(node.classList.contains("own")?" own-message":"");
+    parent.replaceChild(row,node);row.append(node);
+    let pressed=false,timer=null,start=null;
+    function cancelPress(){clearTimeout(timer);timer=null;start=null;}
+    function open(){
+      if(currentSession()!==s||currentPerson()?.id!==person.id)return;
+      const box=panel("消息操作");
+      if(!s.readOnly)button(box,"引用这条消息",()=>quoteMessage(s,target,text));
+      const operation=newId();
+      button(box,"从这里开启分支",async()=>{
+        if(s!==currentSession())return;
+        const result=await api().live_branch(person.id,s.id,target,operation);
+        if(s!==currentSession())return;
+        await select(person,false,true,result.session_id);
+      });
+    }
+    const menu=button(row,"⋯",open);
+    menu.className="message-menu";
+    menu.setAttribute("aria-label","消息操作");menu.title="消息操作";
+    menu.dataset.messageMenu="";
+    node.addEventListener("contextmenu",e=>{e.preventDefault();cancelPress();if(!pressed)open();});
+    node.addEventListener("pointerdown",e=>{
+      if(e.pointerType!=="touch" && e.pointerType!=="pen")return;
+      pressed=false;start={x:e.clientX,y:e.clientY};
+      timer=setTimeout(()=>{cancelPress();pressed=true;open();},500);
+    });
+    node.addEventListener("pointermove",e=>{if(start&&Math.hypot(e.clientX-start.x,e.clientY-start.y)>12)cancelPress();});
+    for(const name of ["pointerup","pointercancel","pointerleave"])node.addEventListener(name,cancelPress);
+    node.addEventListener("click",e=>{if(pressed){pressed=false;e.preventDefault();e.stopImmediatePropagation();}},true);
+  }
   function turnNode(t){
     const group=document.createElement("div");group.style.display="contents";
-    const show=(role,text,id,time)=>stamp(makeBubble(group,role,text,time),"native",id,t.position);
+    const show=(role,text,id,time,index=0,menu=true)=>{
+      const node=stamp(makeBubble(group,role,text,time),"native",index?id+"/"+index:id,t.position);
+      if(t.status==="completed" && menu)messageActions(node,messageTarget(id,index),text);
+      return node;
+    };
     for(const m of t.input_members||[])if(m.text)show("user",m.text,m.id,m.timestamp);
     const plans=t.desktop_publications||[];
     const notices=plans.filter(v=>v.phase==="search_notice");
@@ -1619,13 +2140,13 @@ window.pcarLive = (() => {
         const prior=seen.get(item.id);
         const time=prior?.receipt_id?{recorded_at:prior.presented_at,source:"presented"}:
           {recorded_at:t.inline_reply.received_at,source:"reply_received"};
-        show("persona",item.text,item.id,time).dataset.originalFragment=item.id;
+        show("persona",item.text,item.id,time,0,Boolean(prior?.receipt_id)).dataset.originalFragment=item.id;
       }
     }else if(main){for(const m of main.visible)show("persona",m.text,m.id,m.receipt_id?{recorded_at:m.presented_at,source:"presented"}:null);}
     else if(t.status==="completed" && t.reply){
       const parts=t.display_bubbles||[t.display_reply||t.reply];
-      show("persona",parts[0],t.reply_event_id,parts.length===1?{recorded_at:t.reply_recorded_at,source:"event_recorded"}:null);
-      for(const part of parts.slice(1))makeBubble(group,"persona",part,null);
+      for(const [index,part] of parts.entries())show("persona",part,t.reply_event_id,
+        parts.length===1?{recorded_at:t.reply_recorded_at,source:"event_recorded"}:null,index);
     }
     if(!state.community && t.feedback_available)button(group,"这条不像",()=>feedback(currentPerson().id,t.id));
     if(t.lookup_confirmation)button(group,"确认本轮查找范围",async()=>{
@@ -1840,11 +2361,18 @@ window.pcarLive = (() => {
     const thread=el("div",null,timeline);thread.className="conversation-inner";
     const reference=byId("history-reference");
     reference.hidden=!s.reference || s.readOnly;
-    reference.querySelector("span").textContent=s.reference?"引用 · "+s.reference.text.slice(0,180):"";
+    reference.querySelector("span").textContent=s.reference?(s.reference.unavailable?"引用已失效，请移除或重新选择。":
+      "引用 · "+(s.reference.text||"").slice(0,180)):"";
+    if(s.branch)button(thread,"返回原消息",()=>reopenSource(s)).className="inline-actions history-actions";
+    if(s.readOnly && s.lifecycle==="active")button(thread,"在此会话继续",async()=>{
+      const person=currentPerson();s.activateOperation||=newId();
+      await api().live_activate(person.id,s.id,s.activateOperation);
+      if(s===currentSession())await select(person,false,true,s.id);
+    }).className="inline-actions history-actions";
     if(s.past.length){
       const actions=el("div",null,thread);actions.className="inline-actions history-actions";
       button(actions,"查找历史消息",()=>historySearch(s));
-      button(actions,"历史来源与用途",()=>historySettings(s));
+      if(!s.branch)button(actions,"历史来源与用途",()=>historySettings(s));
     }
     if(s.before)button(thread,"查看更早的消息",async()=>{
       const before=s.before,revision=s.historyRevision;
@@ -1873,6 +2401,7 @@ window.pcarLive = (() => {
       node.className=event.role==="note"?"button ghost history-actions":"bubble "+(event.role==="user"?"own":"reply");
       markTime(node,event.timestamp);
       node.title="查看来源与引用 · "+node.title;
+      if(event.role!=="note" && event.referenceable)messageActions(node,event.message_target||messageTarget(event.id),event.text);
     }
     if(s.older)button(thread,"查看更早的对话",()=>nativePage(s,true));
     for(const t of s.turns){
@@ -2056,13 +2585,15 @@ window.pcarLive = (() => {
     const p=currentPerson(),s=currentSession(),value=message.value;
     if(stopped||!p||!s||s.readOnly||!value.trim()||s.sending||s.bufferWorking||selectionToken!==null||pendingDraft(s)||linkState!=="online")return;
     if(!state.connected){connection();return;}
+    if(s.reference?.unavailable)throw new FormError("引用已失效，请移除或重新选择。");
     s.bufferRevision=(s.bufferRevision||0)+1;
     s.sending=true;updateSendButton();
     const ref=s.reference?.id || null;
     const request=newId(), revision=s.draftRevision ||= newId();
     try{
       const policy=s.inputBuffer?{version:s.inputBuffer.version}:null;
-      const args=[p.id,s.id,value,request,ref?{kind:"event",id:ref}:null,revision,false,policy];
+      const choice=ref?(s.reference.kind==="desktop_message"?messageTarget(ref,s.reference.index):{kind:"event",id:ref}):null;
+      const args=[p.id,s.id,value,request,choice,revision,false,policy];
       if(longRequested)args.push(true);
       const accepted=await api().live_submit(...args);
       if(accepted.state==="rejected")throw new FormError(bufferErrors[accepted.reason]);
@@ -2253,6 +2784,7 @@ window.pcarLive = (() => {
     button(box,"查看字段与原话依据",async()=>openImport(await action("status",{ident:binding.document}),binding.role));
   }
   function connection(afterSave=null){
+    if(state.community||keyLocked())return keySetup();
     const box=panel(state.community?"DeepSeek 官方连接":"模型连接");
     const model=state.community?null:el("select",null,box);
     if(model){
@@ -2381,12 +2913,25 @@ window.pcarLive = (() => {
       const recovering=linkState!=="online"||generation!==health.generation;
       const configChanged=state.connected!==health.configured||state.model!==health.model||lastHealth?.configVersion!==health.configVersion;
       lastHealth=health;generation=health.generation;linkState="online";
+      activation=health.activation||null;
+      timeline.style.visibility=keyLocked()?"hidden":"";
+      if(keyLocked()){
+        if(dialog.open&&!keyPanel?.isConnected)dialog.close();
+        state.connected=false;setStatus("请先填写并验证 DeepSeek API Key。",true);
+        delay=750;return;
+      }
       state.connected=health.configured;state.model=health.model;
       if(recovering||configChanged){
-        const saved=currentPerson()?{persona_id:state.current,session_id:currentSession()?.id}:await api().live_location();
-        if(stopped)return;
-        await reload(saved?.persona_id,false,saved?.session_id,recovering);
+        if(!openingCardChat){
+          const saved=currentPerson()?{persona_id:state.current,session_id:currentSession()?.id}:await api().live_location();
+          if(stopped||openingCardChat)return;
+          await reload(saved?.persona_id,false,saved?.session_id,recovering);
+        }
       }else await refresh();
+      if((!dialog.open||exportWaitingPanel?.isConnected)&&api().deepseek_pending){
+        const pending=await api().deepseek_pending();
+        if(pending && pending.id!==seenIntake)await openDeepSeekDelivery(pending.id);
+      }
       if(stopped)return;
       if(observedRepair!==repairVersion){delay=100;return;}
       delay=currentSession()?.outbox?.length?180:750;
@@ -2417,8 +2962,28 @@ window.pcarLive = (() => {
                 "正在连接本机服务，已发送的消息会自动核对。");
     }finally{checking=false;arm(delay);}
   }
+  function addLogExport(box){
+    if(!api().export_support_logs)return;
+    const saved=el("p",null,box);
+    saved.className="import-original";
+    saved.setAttribute("role","status");
+    saved.hidden=true;
+    const control=button(box,"导出日志",async()=>{
+      saved.hidden=false;
+      saved.textContent="正在整理本机排障日志。";
+      try{
+        const result=await api().export_support_logs(linkState,activation?.state ?? null);
+        saved.textContent="日志已保存，可将此 ZIP 发给排障人员。\n"+result.path;
+      }catch{
+        saved.textContent="保存日志失败。请检查 Windows 下载和 PCAR 数据目录是否有可用空间及写入权限。";
+      }
+    });
+    control.dataset.supportLogs="";
+  }
   function diagnostics(){
     const box=panel("运行与诊断");
+    box.dataset.supportPanel="";
+    addLogExport(box);
     button(box,"模型调用限额",quotaSettings);
     button(box,"本机备份与恢复",backupPanel);
     if(lastHealth?.quotaWaits?.length)button(box,"查看等待额度的任务",()=>quotaPrompt(lastHealth.quotaWaits,true));
@@ -2557,6 +3122,18 @@ window.pcarLive = (() => {
     if(linkState==="online")api().live_network_wake().catch(()=>{});
     arm(0);
   }
+  document.addEventListener("click",event=>{
+    if(!active||!keyLocked()||!(event.target instanceof Element))return;
+    if(keyPanel?.isConnected && (keyPanel.contains(event.target)||event.target.closest("#dialog-close")))return;
+    const control=event.target.closest("button,a,input,select,textarea,summary,[role=button]");
+    if(!control||control.closest("#repair-dialog")||control.matches(
+      '#menu-toggle,[data-menu="exit"],[data-menu="advanced"],[data-support-logs]'))return;
+    if(control.matches("#dialog-close")&&dialogBody.querySelector("[data-support-panel]"))return;
+    event.preventDefault();event.stopImmediatePropagation();keyPrompt();
+  },true);
+  document.addEventListener("beforeinput",event=>{
+    if(active&&keyLocked()&&keyPanel?.contains(event.target)!==true){event.preventDefault();keyPrompt();}
+  },true);
   window.addEventListener("online",wake);
   window.addEventListener("focus",()=>{
     if(active && !stopped && !checking && !document.hidden)arm(0);

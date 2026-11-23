@@ -6,8 +6,12 @@ import re
 from .corpus_files import CorpusError, inspect_bytes, digest
 from .corpus_moect import MAX_RECORDS
 from .corpus_views import build_dataset
+from .models import PRIVATE_CHAT, ROLEPLAY, chat_mode
 
 VERSION = "dyadic-md-v1"
+DEEPSEEK_MD = "<!-- pcar-deepseek-md-v1 -->\n"
+DEEPSEEK_FORMAT = "DeepSeek Markdown"
+ROLEPLAY_MD = "<!-- pcar-chat-mode: roleplay -->"
 DATE = r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:?\d{2})?"
 MOECT = re.compile(r"^\[(" + DATE + r")\] (.+)$")
 HEADING = re.compile(r"^#{2,4}[ \t]+(.+?)\s*$")
@@ -27,10 +31,66 @@ def valid_message_date(value):
     return offset is None or int(offset[1]) < 60
 
 
+def _parse_deepseek(text):
+    header_start = len(DEEPSEEK_MD)
+    header_end = text.find("\n", header_start)
+    if not re.fullmatch(r"<!-- [A-Za-z0-9_-]{1,128} [0-9]+ -->", text[header_start:header_end]):
+        raise CorpusError("DeepSeek Markdown 来源标记无效。")
+    offset = header_end + 1
+    line = 3
+    rows = []
+    while offset < len(text):
+        heading_end = text.find("\n", offset)
+        length_end = text.find("\n", heading_end + 1)
+        heading = HEADING.fullmatch(text[offset:heading_end])
+        size = re.fullmatch(r"<!-- ([1-9][0-9]{0,8}) -->", text[heading_end + 1:length_end])
+        if heading_end < 0 or length_end < 0 or not heading or not size or len(rows) >= MAX_RECORDS:
+            raise CorpusError("DeepSeek Markdown 消息边界无效。")
+        label = heading[1]
+        dated = DATED.fullmatch(label)
+        speaker, date = dated.groups() if dated else (label, None)
+        if speaker not in ("用户", "DeepSeek") or (date and not valid_message_date(date)):
+            raise CorpusError("DeepSeek Markdown 说话人或时间无效。")
+        start = length_end + 1
+        end = start + int(size[1])
+        if text[end:end + 2] != "\n\n":
+            raise CorpusError("DeepSeek Markdown 正文长度不符。")
+        body = text[start:end]
+        rows.append(dict(id=str(len(rows)+1), speaker=speaker, date=date, start=start, end=end,
+                         line=line, text=body, original=body))
+        line += 4 + body.count("\n")
+        offset = end + 2
+    if not rows:
+        raise CorpusError("该 DeepSeek 会话没有可导入的正文。")
+    return {"format": DEEPSEEK_FORMAT, "rows": rows, "counts": dict(Counter(row["speaker"] for row in rows))}
+
+
+def _decode(raw):
+    encoding = inspect_bytes(raw, ".md")["encoding"]
+    return raw.decode("utf-16" if encoding.startswith("utf-16") else encoding)
+
+
+def _mode_prefix(text):
+    first = text.split("\n", 1)[0]
+    return len(first) + 1 if first.rstrip("\r") == ROLEPLAY_MD and "\n" in text else 0
+
+
 def parse(raw):
-    info = inspect_bytes(raw, ".md")
-    encoding = info["encoding"]
-    text = raw.decode("utf-16" if encoding.startswith("utf-16") else encoding)
+    text = _decode(raw)
+    prefix = _mode_prefix(text)
+    parsed = _parse_text(text[prefix:])
+    if prefix:
+        parsed["chat_mode"] = ROLEPLAY
+        for row in parsed["rows"]:
+            row["line"] += 1
+            row["start"] += prefix
+            row["end"] += prefix
+    return parsed
+
+
+def _parse_text(text):
+    if text.startswith(DEEPSEEK_MD):
+        return _parse_deepseek(text)
     lines = text.splitlines(keepends=True)
     moect = len(lines) >= 2 and lines[1].strip() == "由 Moect 导出"
     rows = []
@@ -92,6 +152,33 @@ def parse(raw):
         raise CorpusError("未识别出消息标题。通用 Markdown 请用二级标题标记每条消息的说话人。")
     counts = Counter(r["speaker"] for r in rows if r["speaker"].casefold() not in SYSTEM)
     return {"format": "Moect Markdown" if moect else "Markdown", "rows": rows, "counts": dict(counts)}
+
+
+def scope_markdown(raw, parsed, count, mode):
+    """Keep the latest messages in source order, with their original speaker headings."""
+    original_mode = parsed.get("chat_mode", PRIVATE_CHAT)
+    rows = parsed["rows"]
+    if count == len(rows) and mode == original_mode:
+        return raw
+    text = _decode(raw)
+    prefix = _mode_prefix(text)
+    lines = text.splitlines(keepends=True)
+    start = rows[0]["line"] - 1
+    keep_from = rows[-count]["line"] - 1
+    if parsed["format"] == DEEPSEEK_FORMAT:
+        # The length-framed header offsets are more precise than splitlines()
+        # for a generated conversation containing other Unicode line separators.
+        header = text.find("\n", len(DEEPSEEK_MD) + prefix) + 1
+        from .deepseek_export import markdown_messages
+        body = text[prefix:header] + markdown_messages(
+            (row["speaker"], row["date"], row["original"]) for row in rows[-count:])
+    else:
+        body = "".join(lines[bool(prefix):start] + lines[keep_from:])
+    return (mode_header(mode) + body).encode("utf-8")
+
+
+def mode_header(mode):
+    return ROLEPLAY_MD + "\n" if chat_mode(mode) == ROLEPLAY else ""
 
 
 def assign(parsed, mapping, overrides):

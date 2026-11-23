@@ -62,7 +62,8 @@ def main():
         for name in archive.namelist():
             if name.startswith(keep) or name in roots:
                 archive.extract(name, payload)
-    shutil.copy2(SOURCE / 'docs/user/社区版.md', payload / '社区版.md')
+    for name in ('社区版.md', '历史聊天接续.md', 'DeepSeek 对话导入.md'):
+        shutil.copy2(SOURCE / 'docs/user' / name, payload / name)
     (payload / 'persona_runtime/community-edition').write_text('community\n', encoding='ascii')
     if args.field_test:
         (payload / 'persona_runtime/community-field-test').write_text('field-test\n', encoding='ascii')
@@ -74,8 +75,8 @@ def main():
     subprocess.run([str(args.iscc.resolve()), *test_define, f'/DPayload={payload}',
                     f'/DWebView2={args.webview2.resolve()}', f'/O{work}',
                     str(SOURCE / 'scripts/community_setup.iss')], check=True)
-    name = ('PCAR-Community-v0.4-Windows-x64-Test-Setup.exe' if args.field_test
-            else 'PCAR-Community-v1.0-Windows-x64-Setup.exe')
+    name = ('PCAR-Community-v1.1.1-Windows-x64-Test-Setup.exe' if args.field_test
+            else 'PCAR-Community-v1.1.1-Windows-x64-Setup.exe')
     installer = work / name
     with installer.open('rb') as stream:
         digest = hashlib.file_digest(stream, 'sha256').hexdigest()

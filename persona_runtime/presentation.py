@@ -88,8 +88,10 @@ def render(text, content_kind='chat'):
         'display_sha256':hashlib.sha256(value.encode('utf-8')).hexdigest()}
 
 
-def batch_view(reply, segments=None, *, historical=False):
+def batch_view(reply, segments=None, *, historical=False, preserve=False):
     if reply is None:return None, None
+    if preserve:
+        return reply, {"version": "roleplay-body-v1"}
     try:
         items = segments or [{'text':reply,'content_kind':'chat'}]
         rendered = [render(s['text'],s.get('content_kind') or 'chat') for s in items]

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>导入 DeepSeek 到 PCAR</title>
+<style>
+body{font:15px system-ui,sans-serif;padding:14px;width:306px;margin:0;color:#18352a;background:#f6f8f5}
+h1{font-size:17px;margin:0 0 10px}p{line-height:1.5}
+select,input,button{box-sizing:border-box;width:100%;padding:8px;margin:4px 0;font:inherit}
+button{cursor:pointer;background:#fff;border:1px solid #aebeb5;border-radius:6px;text-align:left}
+button:disabled{cursor:default;opacity:.6}
+</style>
+<h1>导入 DeepSeek 到 PCAR</h1>
+<label for="edition">接收实例</label><select id="edition"></select>
+<button id="start">记住当前对话</button>
+<p>在 DeepSeek 设置中发起官方数据导出。下载完成后，可将该文件交给 PCAR。</p>
+<label for="download-url">官方 ZIP 下载链接</label>
+<input id="download-url" type="url" placeholder="https://">
+<button id="download">下载并交给 PCAR</button>
+<div id="files"></div>
+<button id="retry">继续上次交接</button>
+<p id="status" role="status"></p>
+<script src="popup.js"></script>
+</html>

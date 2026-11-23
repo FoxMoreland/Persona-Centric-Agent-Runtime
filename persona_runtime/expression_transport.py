@@ -25,6 +25,9 @@ class ExpressionHTTPClient:
         self.allow_loopback_fixture = allow_loopback_fixture
 
     async def complete(self, model, messages, *, save_raw):
+        from .desktop_activation import locked, unauthorized
+        if locked():
+            raise ExpressionCallFailure("deepseek_activation_required", {"request_headers_sent": False})
         try:
             require_generation_provider(model, allow_loopback_fixture=self.allow_loopback_fixture)
             payload, contract = build_request(model, messages)
@@ -60,6 +63,8 @@ class ExpressionHTTPClient:
                 async with client.post(url, json=payload, headers=headers, proxy=proxy,
                                        allow_redirects=False) as response:
                     state.update(response_headers_received=True, http_status=response.status)
+                    if response.status == 401:
+                        unauthorized(model)
                     raw = bytearray()
                     async for chunk in response.content.iter_chunked(65536):
                         raw.extend(chunk)
