@@ -191,6 +191,9 @@ class RecallRuntime:
 
     def prepare(self,turn):
         with self.store.connection() as db:
+            from .quote_context import in_batch
+            if in_batch(db, turn.get('input_batch_id')):
+                return None
             if not check_policy(db,turn):return None
         self.maintain(turn['persona_id'],pages=6)
         with self.store.connection() as db:
@@ -201,6 +204,9 @@ class RecallRuntime:
             parts=[query_head]
             from .context_builders import policy_for
             config=policy_for(turn);cross=config['cross_session'] and config['context_mode']=='working_set'
+            if cross and turn['channel'] == 'desktop':
+                from .desktop_messages import branch
+                cross = not branch(db, turn['session_id'])
             selected=turn_scope(db,turn)
             recent=[dict(r) for r in db.execute("SELECT * FROM turns WHERE persona_id=? AND channel=? AND status='completed' AND rowid<(SELECT rowid FROM turns WHERE id=?) ORDER BY (session_id=?) DESC,rowid DESC LIMIT 10",(turn['persona_id'],turn['channel'],turn['id'],turn['session_id'])) if turn_scope(db,dict(r))==selected]
             if not cross:recent=[r for r in recent if r['session_id']==turn['session_id']]

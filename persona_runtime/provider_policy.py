@@ -5,6 +5,13 @@ from .provider_compat import CURRENT_DEEPSEEK
 
 PRIVATE_COMPATIBLE_WRITER = ('https://e-flowcode.cc/v1', 'gemini-4-hydrogen')
 DEEPSEEK_TEXT_RELAY = 'https://e-flowcode.cc/v1'
+TYPESAFE_JEV_URL = 'https://api.typesafe.ai/v1'
+TYPESAFE_JEV_MODEL = 'jev-1.14.0'
+
+
+def is_official_typesafe_jev(model):
+    return isinstance(model, dict) and (model.get('base_url'), model.get('name')) == (
+        TYPESAFE_JEV_URL, TYPESAFE_JEV_MODEL)
 
 
 def is_deepseek_text_relay(model):

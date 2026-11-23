@@ -34,7 +34,8 @@ class GeneralTests(unittest.IsolatedAsyncioTestCase):
         self.org.processing.enable_for_persona(pid,True,reader['revision'],processing['revision'],web['revision'],'general-enable')
         self.provider=self.org.client=NativeProvider();self.main=self.chat.client=Main();self.tools=[]
         from persona_runtime.config import atomic_json
-        atomic_json(self.paths.home/'private/knowledge-router/config.json',{'base_url':'https://decision.fixture.invalid/v1','name':'jev-test','encrypted_key':'artificial-protected-jev'})
+        from persona_runtime.security import protect
+        atomic_json(self.paths.home/'private/knowledge-router/config.json',{'base_url':'https://decision.fixture.invalid/v1','name':'jev-test','encrypted_key':protect('jev-fixture')})
         self.need_web=True;self.decisions=[];self.org.routing.transport=self.decision_transport
         self.org.processing.tools.transport=self.transport;self.worker=asyncio.create_task(self.org.worker())
     async def decision_transport(self,model,body):

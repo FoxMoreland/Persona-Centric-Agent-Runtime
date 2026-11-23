@@ -251,6 +251,9 @@ class OrganizationEngine:
         previous = latest_summary(conn, session_id) if mode != "candidates" and not rebuild else None
         model = self.model()
         memory_enabled = self.automatic and self.automatic.is_enabled(conn,persona_id)
+        from .models import ROLEPLAY, persona_chat_mode
+        if persona_chat_mode(conn, persona_id) == ROLEPLAY and not memory_enabled:
+            raise RuntimeErrorBase("roleplay_story_memory_required")
         if previous and (previous.get('source_refs_json') or not history_scope.allowed_summary(conn,previous,model,memory_enabled)):
             previous = None  # Typed sealed sources are not legacy generated semantics.
         if start_row is None:
@@ -530,6 +533,7 @@ class OrganizationEngine:
     async def worker(self):
         from .migration import migration_pending,background_allowed
         from .recall_runtime import RecallRuntime
+        from .desktop_activation import locked
         import logging
         if self.maintenance_stop.is_set() and not self.draining:self.maintenance_stop=asyncio.Event()
         stop=self.maintenance_stop
@@ -538,7 +542,7 @@ class OrganizationEngine:
             while not self.draining and not stop.is_set():
                 delay=interval
                 try:
-                    if not self.chat.draining and not migration_pending(self.store.paths) and (not background or (
+                    if not self.chat.draining and not locked() and not migration_pending(self.store.paths) and (not background or (
                             not self.foreground_only and background_allowed(self.store.paths))):
                         result=await operation()
                         if result is True and name in ('foreground','background'):

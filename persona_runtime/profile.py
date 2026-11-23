@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from .models import LOCAL_USER_ID, PersonaSpec, RuntimeErrorBase, identifier, require_text, timestamp
 
 KINDS = ('core', 'expression', 'relationship', 'state')
+RELATIONSHIP_PREFIX = '\n关系说明：'
 _RETIRED_DEFAULT_BOUNDARY = '区分已知事实与不确定信息'
 
 
@@ -17,6 +18,11 @@ def model_persona_data(data):
     return {**data, 'values_and_boundaries': [
         boundary for boundary in boundaries if boundary != _RETIRED_DEFAULT_BOUNDARY
     ]}
+
+
+def persona_prompt_fields(data):
+    return {key: value for key, value in model_persona_data(data).items()
+            if value not in (None, '', [])}
 
 
 def encode(value):
@@ -68,7 +74,7 @@ def initialize_profiles(conn, persona_id=None, actor='migration'):
     for row in rows:
         spec=json.loads(row['spec_json'])
         relation=conn.execute('SELECT description FROM relationships WHERE persona_id=? AND user_id=?',(row['id'],LOCAL_USER_ID)).fetchone()
-        data={'core':{k:v for k,v in spec.items() if k not in ('format_version','expression_style')},
+        data={'core':{k:v for k,v in spec.items() if k not in ('format_version','expression_style','chat_mode')},
               'expression':{'style':spec['expression_style']},'relationship':{'description':relation[0] if relation else ''},
               'state':{'text':'','expires_at':None}}
         for kind in KINDS:
@@ -148,7 +154,8 @@ class ProfileService:
         elif kind=='expression':
             if set(data)!={'style'}:
                 raise RuntimeErrorBase('invalid_expression_fields')
-            require_text(data['style'],'style')
+            if data['style'] != '':
+                require_text(data['style'],'style')
         elif kind=='relationship':
             if set(data)!={'description'} or not isinstance(data['description'],str):
                 raise RuntimeErrorBase('invalid_relationship_fields')

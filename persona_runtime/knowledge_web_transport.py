@@ -11,6 +11,8 @@ from .security import unprotect
 
 
 async def request(stage,args,model):
+    from .desktop_activation import admit, unauthorized
+    admit()
     endpoint='https://api.deepseek.com/v1/tools/'+stage
     from .network_proxy import outbound_proxy
     proxy=outbound_proxy(endpoint)
@@ -35,6 +37,8 @@ async def request(stage,args,model):
             async with client.post(endpoint,json=args,headers={'Authorization':'Bearer '+unprotect(model['encrypted_key']),
                     'Content-Type':'application/json'},allow_redirects=False,proxy=proxy) as response:
                 status=response.status
+                if status == 401:
+                    unauthorized(model)
                 raw=bytearray()
                 async for piece in response.content.iter_chunked(65536):
                     raw.extend(piece)

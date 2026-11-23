@@ -6,8 +6,8 @@ import sqlite3
 
 from .archive import fingerprint
 from .corpus_files import digest
-from .import_markdown import assign, parse, learning_rows, valid_message_date
-from .models import RuntimeErrorBase, timestamp
+from .import_markdown import DEEPSEEK_FORMAT, assign, parse, learning_rows, valid_message_date
+from .models import PRIVATE_CHAT, ROLEPLAY, RuntimeErrorBase, timestamp
 
 FIELDS = ("introduction", "core_traits", "expression_style", "values_and_boundaries", "initial_background")
 CONTRACT = "pcar-dyadic-import-v1"
@@ -15,7 +15,15 @@ CONTRACT = "pcar-dyadic-import-v1"
 
 def _preview_summary(parsed):
     dates = [row["date"] for row in parsed["rows"] if row["date"]]
-    return {"count": len(parsed["rows"]), "from": min(dates, default=None), "to": max(dates, default=None)}
+    summary = {"count": len(parsed["rows"]), "from": min(dates, default=None), "to": max(dates, default=None)}
+    if parsed.get("chat_mode") == ROLEPLAY:
+        summary["chat_mode"] = ROLEPLAY
+    return summary
+
+
+def document_mode(db, ident):
+    row = db.execute("SELECT metadata FROM previews WHERE id=?", (ident,)).fetchone()
+    return json.loads(row[0]).get("chat_mode", PRIVATE_CHAT) if row else PRIVATE_CHAT
 
 
 def encode(value):
@@ -29,6 +37,7 @@ def require(ok, message):
 
 class ImportLibrary:
     def __init__(self, paths):
+        self.paths = paths
         self.root = paths.home / "private/persona-import"
 
     @contextmanager
@@ -49,6 +58,7 @@ class ImportLibrary:
                   status TEXT NOT NULL, draft TEXT NOT NULL, view TEXT,
                   approved TEXT, created TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS previews(id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS deepseek_sources(document TEXT PRIMARY KEY, raw BLOB NOT NULL, summary TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS calls(
                   id TEXT PRIMARY KEY, document TEXT NOT NULL, state TEXT NOT NULL,
                   raw BLOB, status INTEGER, metadata TEXT, created TEXT NOT NULL);
@@ -104,19 +114,27 @@ class ImportLibrary:
         except (OSError, KeyError, TypeError, json.JSONDecodeError):
             raise RuntimeErrorBase("尚缺本用途已审定的装配文件。") from None
 
-    def add(self, raw):
+    def add(self, raw, *, deepseek_source=None):
         ident = digest(raw)
         with self.db() as db:
             if not db.execute("SELECT 1 FROM documents WHERE id=?", (ident,)).fetchone():
                 parsed = parse(raw)
                 db.execute('INSERT OR IGNORE INTO previews VALUES(?,?)',(ident,encode(_preview_summary(parsed))))
                 names = list(parsed["counts"])
-                mapping = dict(zip(names, ("A", "B"))) if len(names)==2 else dict.fromkeys(names, "-")
+                mapping = ({"用户": "A", "DeepSeek": "B"} if parsed["format"] == DEEPSEEK_FORMAT and len(names) == 2
+                           else dict(zip(names, ("A", "B"))) if len(names) == 2 else dict.fromkeys(names, "-"))
                 db.execute("""INSERT OR IGNORE INTO documents
                     (id,raw,secret,format,counts,mapping,overrides,status,draft,created)
                     VALUES(?,?,?,?,?,?,?,'preview','{}',?)""", (ident, raw, secrets.token_bytes(32),
                     parsed["format"], encode(parsed["counts"]), encode(mapping), "{}", timestamp()))
+            if deepseek_source is not None:
+                original, summary = deepseek_source
+                db.execute("INSERT OR IGNORE INTO deepseek_sources VALUES(?,?,?)", (ident, original, encode(summary)))
         return self.status(ident)
+
+    def chat_mode(self, ident):
+        with self.db() as db:
+            return document_mode(db, ident)
 
     def row(self, ident):
         with self.db() as db:
@@ -131,6 +149,7 @@ class ImportLibrary:
             plan = plan_status(db, ident) if row and row["status"] != "revoked" else None
             cached = db.execute('SELECT metadata FROM previews WHERE id=?',(ident,)).fetchone()
             preview = json.loads(cached[0]) if cached else {}
+            deepseek = db.execute('SELECT summary FROM deepseek_sources WHERE document=?', (ident,)).fetchone()
             if row and any(preview.get(key) is not None and not valid_message_date(preview[key]) for key in ("from","to")):
                 # Older imports counted malformed timestamp labels when caching the bounds.
                 raw = db.execute("SELECT raw FROM documents WHERE id=?", (ident,)).fetchone()[0]
@@ -142,11 +161,16 @@ class ImportLibrary:
             for draft in decoded["draft"].values():
                 for claim in draft["claims"]:
                     claim["needs_review"] = requires_profile_review(claim)
-        return dict(row) | decoded | {"plan": plan, "preview": preview}
+        return dict(row) | decoded | {"plan": plan, "preview": preview} | ({"deepseek": json.loads(deepseek[0])} if deepseek else {})
 
     def list(self):
         with self.db() as db:
             return [dict(r) for r in db.execute("SELECT id,created,format,status,counts FROM documents ORDER BY created DESC")]
+
+    def deepseek_source(self, ident):
+        with self.db() as db:
+            row = db.execute("SELECT raw,summary FROM deepseek_sources WHERE document=?", (ident,)).fetchone()
+        return (row["raw"], json.loads(row["summary"])) if row else None
 
     def evidence(self, ident, start=0, prepared=False, sections=False):
         require(type(start) is int and start>=0, "消息位置无效。")
@@ -165,6 +189,7 @@ class ImportLibrary:
     def prepare(self, ident, revision, mapping, overrides):
         row = self.row(ident)
         require(row["status"] not in ("running","revoked"), "当前状态无法修改归属。")
+        require(self.chat_mode(ident) != ROLEPLAY, "角色扮演记录请使用新版分批建卡。")
         rows = assign(parse(row["raw"]), mapping, overrides)
         view = learning_rows(rows, row["secret"], ident)
         require({r["speaker"] for r in view} == {"A","B"}, "学习分区中需要有双方的有效原话。")

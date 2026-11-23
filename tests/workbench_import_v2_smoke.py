@@ -24,7 +24,7 @@ from persona_runtime.models import PersonaSpec
 from persona_runtime.paths import RuntimePaths
 from persona_runtime.server import create_app
 from persona_runtime.service import RuntimeService
-from persona_runtime.storage import Store
+from persona_runtime.storage import SCHEMA_VERSION, Store
 from persona_runtime.workbench_webview import DesktopControls, workbench_html
 
 
@@ -441,6 +441,9 @@ def exercise(home, existing, baseline=None, *, history=False, import_quota=False
                         screen.wait("document.getElementById('dialog-body').textContent.includes('已导入')")
                 assert prompt_bundle_status(library)["source"] == "file"
             screen.click("从聊天记录生成")
+            screen.wait("document.querySelector('#dialog-title').textContent!=='新建角色'")
+            if screen.eval("document.querySelector('#dialog-title').textContent==='选择聊天模式和导入数量'"):
+                screen.click("确认导入")
             if existing:
                 screen.click("使用新版分批提炼")
             screen.click("确认说话人并继续")
@@ -470,11 +473,9 @@ def exercise(home, existing, baseline=None, *, history=False, import_quota=False
                 config.update({'call_limits':{'enabled':False,'hourly':1,'daily':0}})
             assert not screen.eval("document.querySelector('dialog').textContent.includes('还原这段历史')")
             if existing:
-                screen.wait("Boolean(document.querySelector('dialog.import-conflict-dialog[open]'))")
-                screen.click("返回角色卡")
-                screen.click("暂存并查看 B")
-                screen.click("确认创建并打开聊天")
-                screen.wait("Boolean(document.querySelector('dialog.import-conflict-dialog[open]'))")
+                assert not screen.eval("Boolean(document.querySelector('dialog.import-conflict-dialog[open]'))")
+                screen.click("角色 B")
+                screen.click("核对冲突（", prefix=True)
                 screen.click("处理 B 的「固定年龄」")
                 screen.wait("document.activeElement?.dataset.cardPath==='character.age.fixed_age'")
                 screen.wait("""[...document.querySelectorAll('#dialog-body .import-conflict-row li')].some(
@@ -483,16 +484,16 @@ def exercise(home, existing, baseline=None, *, history=False, import_quota=False
                     x=>x.textContent.includes('固定年龄')&&x.textContent.includes('18'))""")
                 screen.click("确认「固定年龄」当前填写")
                 screen.wait("!document.querySelector('#dialog-body > .fields').inert")
-                screen.click("处理严重冲突（1）")
+                screen.click("核对冲突（1）")
                 screen.click("处理 B 的「出生日期」")
                 screen.wait("document.activeElement?.dataset.cardPath==='character.age.birth_date'")
                 screen.eval("document.activeElement.value='2000-01-02';true")
                 screen.click("确认「出生日期」当前填写")
-                screen.wait("!document.getElementById('dialog-body').textContent.includes('处理严重冲突')")
+                screen.wait("!document.getElementById('dialog-body').textContent.includes('核对冲突')")
                 saved = CardJobs(library,config).status(digest(raw))["cards"]["B"]
                 assert not [item for item in saved["issues"] if item.get("severity")=="conflict"]
                 assert saved["character"]["age"]["birth_date"]=="2000-01-02"
-                screen.click("暂存并查看 A")
+                screen.click("角色 A")
                 screen.click("查看原画像")
                 screen.summary("查看旧计划草稿")
                 screen.eval("document.querySelector('dialog details[open] button').click();true")
@@ -512,25 +513,32 @@ def exercise(home, existing, baseline=None, *, history=False, import_quota=False
                 screen.summary("人物资料"); screen.summary("外貌")
                 assert screen.eval("(" + screen.input("身高（厘米）") + ").value") == ""
                 screen.eval("(" + screen.input("人物介绍") + ").value='989';true")
-                screen.summary("预览普通发言人设正文")
-                screen.wait("[...document.querySelectorAll('dialog pre')].some(p=>p.innerText.includes('989'))")
+                screen.click("开始聊天")
+                screen.wait("document.querySelector('dialog textarea.import-card-prompt')?.value.includes('989')")
+                screen.click("返回编辑")
                 screen.summary("场景提示与 Jev"); screen.summary("日常交流"); screen.summary("完整场景提示")
                 screen.wait("[...document.querySelectorAll('dialog pre')].some(p=>p.innerText === '520\\n\\n522')")
                 screen.summary("字段出处与待补项"); screen.summary("共通人设提示")
                 screen.click("A · #", prefix=True)
                 screen.wait("Boolean(document.querySelector('dialog mark')?.textContent)")
-                screen.click("返回角色卡"); screen.click("暂存并查看 B")
+                screen.click("返回角色卡"); screen.click("角色 B")
                 screen.wait("document.getElementById('dialog-title').textContent.includes('核对角色卡 · B')")
                 assert screen.eval("(" + screen.input("人物介绍") + ").value") == "600"
                 screen.summary("人物资料"); screen.summary("外貌")
                 screen.eval("(" + screen.input("身高（厘米）") + ").value='177';true")
             if history and not existing:
-                select_dialog(screen,"保存后打开的会话","history")
-            screen.check("同时创建 A 和 B"); screen.click("确认创建并打开聊天")
+                screen.click("角色 B")
+                screen.wait("document.getElementById('dialog-title').textContent.includes('核对角色卡 · B')")
+                select_dialog(screen,"开聊方式","history")
+            screen.click("开始聊天")
+            screen.wait("document.querySelector('#dialog-title').textContent==='预览人设提示词'")
+            assert screen.eval("document.querySelectorAll('#dialog-body textarea').length") == 1
             if history and not existing:
+                screen.click("确认并选择历史")
                 confirm_history(screen)
                 screen.wait("document.querySelector('#timeline').innerText.includes('1101')")
             else:
+                screen.click("确认并开始聊天")
                 screen.wait("!document.querySelector('dialog').open")
                 screen.wait("document.querySelector('#timeline').innerText.includes('可以发送第一条消息')")
             screen.eval("const input=document.querySelector('#message');input.value='7992';"
@@ -563,7 +571,7 @@ def exercise(home, existing, baseline=None, *, history=False, import_quota=False
                     assert "1101" in json.dumps(marker.replies[0])
                 inspect_history(screen,marker,existing,store)
             with store.connection() as db:
-                assert db.execute('PRAGMA user_version').fetchone()[0] == 33
+                assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
                 assert db.execute('SELECT count(*) FROM personas').fetchone()[0] == (3 if existing else 2)
                 assert bool(db.execute("SELECT count(*) FROM turns WHERE json_extract(origin_json,'$.import_document') IS NOT NULL").fetchone()[0]) == history
                 assert db.execute("SELECT count(*) FROM events WHERE id LIKE 'imported.%'").fetchone()[0] == ((98 if existing else 20) if history else 0)

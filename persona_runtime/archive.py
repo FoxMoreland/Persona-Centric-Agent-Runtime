@@ -15,6 +15,9 @@ def fingerprint(value):
 
 def target_spec(value, channel):
     if not isinstance(value, dict): raise RuntimeErrorBase('invalid_reference')
+    if channel == 'desktop' and value.get('kind') == 'desktop_message':
+        from .desktop_messages import target
+        return target(value)
     kind = value.get('kind'); key = 'message_id' if kind == 'platform_message' else 'id'
     if kind not in ('event', 'turn', 'part', 'platform_message') or set(value) != {'kind', key}:
         raise RuntimeErrorBase('invalid_reference')

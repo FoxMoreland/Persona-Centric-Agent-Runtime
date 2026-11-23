@@ -243,6 +243,12 @@ class ManagedOrganization:
 
     def _check(self,db,task,contract,payload,check_sources):
         if contract['data']['cancel_requested']:raise RuntimeErrorBase('cancelled_by_user')
+        from .models import ROLEPLAY, persona_chat_mode
+        if persona_chat_mode(db, task['persona_id']) == ROLEPLAY and task['mode'] != 'test':
+            from .roleplay_prompts import story_memory_contract
+            story = (payload.get('automatic_memory') or {}).get('story_prompts')
+            if not story or story != story_memory_contract(self.store.paths, json.loads(task['model_snapshot'])):
+                raise RuntimeErrorBase('roleplay_story_memory_required')
         if payload.get('proactive'):
             self.engine.proactive.check(db,task,payload)
             return

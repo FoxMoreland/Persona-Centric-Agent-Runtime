@@ -21,6 +21,8 @@ class WorkbenchSubmissions:
 
     def draft(self, pid, sid, update=None):
         from .workbench_timeline import require_session, visible_reference
+        from . import desktop_messages
+        from .quote_context import is_quote
         path = self.config.paths.home / "runtime/webview-composer.dpapi.json"
         with self.journal._locked():
             instance=self.client.expected_instance(self.config.load())
@@ -36,8 +38,19 @@ class WorkbenchSubmissions:
                 else:
                     from .service import RuntimeService
                     RuntimeService._persona(db,pid)
-                allowed = visible_reference(db,pid,sid,ref.get("id"),Store(self.config.paths)) if sid and isinstance(ref,dict) else None
-            stored = dict(current,reference={"id":allowed["id"]} if allowed else None)
+                allowed, saved_ref = None, None
+                if sid and is_quote(ref):
+                    saved_ref = desktop_messages.target({k: ref[k] for k in ('kind', 'id', 'index') if k in ref})
+                    msg = desktop_messages.resolve(db, pid, saved_ref)
+                    if msg and desktop_messages.can_read(desktop_messages.segments(db, pid, sid), msg):
+                        allowed = {**saved_ref, 'text': msg['text'][:180]}
+                    else:
+                        # Preserve the invalid anchor so a refresh cannot turn it into an ordinary send.
+                        allowed = {**saved_ref, 'unavailable': True}
+                elif sid and isinstance(ref, dict):
+                    allowed = visible_reference(db,pid,sid,ref.get("id"),Store(self.config.paths))
+                    saved_ref = {'id': allowed['id']} if allowed else None
+            stored = dict(current,reference=saved_ref)
             if changed or (key in values and stored != values[key]):
                 values[key] = stored
                 atomic_json(path, {"version":1,"encrypted":protect(json.dumps(values,ensure_ascii=False))})
@@ -110,7 +123,9 @@ class WorkbenchSubmissions:
                 else:
                     state = "blocked"
             except (TransportUnknown, LocalAPIError, RuntimeErrorBase) as error:
-                if str(error) in ("manual_buffer_full","manual_buffer_scope_changed","input_buffer_policy_changed"):
+                if str(error) in ("manual_buffer_full", "manual_buffer_scope_changed", "input_buffer_policy_changed",
+                                  "reference_unavailable", "reference_budget_exceeded", "multiple_quote_references",
+                                  "quote_cannot_request_public_lookup"):
                     self.journal.forget(rid)
                     return {"id":rid, "state":"rejected", "reason":str(error)}
                 transient = isinstance(error, TransportUnknown) or str(error) in ("queue_full","buffer_full","service_draining","local_repair_active")

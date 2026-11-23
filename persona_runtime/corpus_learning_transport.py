@@ -35,6 +35,9 @@ class CorpusLearningHTTPClient:
         return url,proxy,tls,secret
 
     async def complete(self,model,request,*,save_raw):
+        from .desktop_activation import locked, unauthorized
+        if locked():
+            raise CorpusCallFailure("deepseek_activation_required", {"request_headers_sent": False})
         try:url,proxy,tls,secret=self.preflight(model,request)
         except (ValueError,OSError,KeyError):
             raise CorpusCallFailure('corpus_learning_transport_preflight_failed',
@@ -52,6 +55,8 @@ class CorpusLearningHTTPClient:
                     trace_configs=[trace],connector=aiohttp.TCPConnector(ssl=tls)) as client:
                 async with client.post(url,json=request,headers=headers,proxy=proxy,allow_redirects=False) as response:
                     state.update(response_headers_received=True,http_status=response.status)
+                    if response.status == 401:
+                        unauthorized(model)
                     raw=bytearray()
                     async for chunk in response.content.iter_chunked(65536):
                         raw.extend(chunk);state['response_bytes']=len(raw)

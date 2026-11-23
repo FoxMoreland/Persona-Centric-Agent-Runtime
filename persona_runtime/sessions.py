@@ -283,6 +283,68 @@ class SessionService:
             result={'session_id':sid,'continued_from_session_id':session_id,'state':'active','revision':1}
             record_operation(conn,operation_id,'reopen',selected,digest,result);return result
 
+    def branch(self, session_id, persona_id, anchor, operation_id):
+        """Create an independently writable desktop session from a visible message."""
+        from . import desktop_messages
+
+        selected = scope(persona_id, 'desktop')
+        anchor = desktop_messages.target(anchor)
+        value = {'session_id': session_id, 'anchor': anchor}
+        with self.store.connection(write=True) as conn:
+            digest, old = operation(conn, operation_id, 'branch', selected, value)
+            if old is not None:
+                return old
+            parent = owned(conn, session_id, selected)
+            message = desktop_messages.resolve(conn, persona_id, anchor)
+            prefix = []
+            for part in desktop_messages.segments(conn, persona_id, session_id):
+                if message and part['session_id'] == message['session_id'] and message['position'] <= part['end']:
+                    prefix.append({**part, 'end': message['position']})
+                    break
+                prefix.append(part)
+            else:
+                raise RuntimeErrorBase('reference_unavailable')
+            self._check_desktop_switch(conn, selected)
+            sid = identifier()
+            conn.execute("INSERT INTO sessions VALUES(?,?,?,'private',?)", (sid, persona_id, LOCAL_USER_ID, timestamp()))
+            session = dict(conn.execute('SELECT * FROM sessions WHERE id=?', (sid,)).fetchone())
+            register(conn, session, selected, reason='branched', continued_from=session_id)
+            select(conn, persona_id, 'desktop', sid)
+            info = {'persona_id': persona_id, 'parent_session_id': session_id, 'anchor': anchor,
+                    'anchor_id': message['id'], 'anchor_session_id': message['session_id'],
+                    'anchor_version': fingerprint(message), 'parent_revision': parent['revision'], 'prefix': prefix}
+            conn.execute('INSERT INTO knowledge_control VALUES(?,?)', (desktop_messages.BRANCH_PREFIX + sid, encoded(info)))
+            conn.executemany('INSERT OR IGNORE INTO knowledge_control VALUES(?,?)',
+                             [('desktop.branch.hold.' + item, 'true') for item in (session_id, sid)])
+            result = {'session_id': sid, 'parent_session_id': session_id, 'anchor_id': message['id']}
+            record_operation(conn, operation_id, 'branch', selected, digest, result)
+            return result
+
+    @staticmethod
+    def _check_desktop_switch(conn, selected, target=None):
+        head = conn.execute('SELECT session_id FROM session_heads WHERE persona_id=? AND user_id=? AND channel=? AND bot=? AND peer=?',
+                            tuple(selected.values())).fetchone()
+        if head and head[0] != target and blockers(conn, head[0]):
+            raise RuntimeErrorBase('session_has_pending_work')
+
+    def activate_desktop(self, session_id, persona_id, operation_id):
+        selected = scope(persona_id, 'desktop')
+        with self.store.connection(write=True) as conn:
+            digest, old = operation(conn, operation_id, 'desktop_activate', selected, {'session_id': session_id})
+            if old is not None:
+                return old
+            row = owned(conn, session_id, selected)
+            if row['state'] != 'active':
+                raise RuntimeErrorBase('session_sealed')
+            self._check_desktop_switch(conn, selected, session_id)
+            conn.execute('''INSERT INTO session_heads VALUES(?,?,?,?,?,?)
+                ON CONFLICT(persona_id,user_id,channel,bot,peer) DO UPDATE SET session_id=excluded.session_id''',
+                         (*selected.values(), session_id))
+            select(conn, persona_id, 'desktop', session_id)
+            result = {'session_id': session_id}
+            record_operation(conn, operation_id, 'desktop_activate', selected, digest, result)
+            return result
+
     def package(self, session_id, persona_id, channel='desktop', bot='', peer=''):
         selected=scope(persona_id,channel,bot,peer)
         with self.store.connection() as conn:
@@ -325,7 +387,9 @@ class SessionService:
 
     def tick(self, *, _session_ids=None, _clock_evidence=None):
         with self.store.connection() as conn:
-            rows=[dict(r) for r in conn.execute("SELECT s.* FROM session_lifecycle s WHERE s.state='active' AND NOT EXISTS(SELECT 1 FROM persona_lifecycle p WHERE p.persona_id=s.persona_id AND p.deleted_at IS NOT NULL)")]
+            rows=[dict(r) for r in conn.execute('''SELECT s.* FROM session_lifecycle s WHERE s.state='active'
+                AND NOT EXISTS(SELECT 1 FROM persona_lifecycle p WHERE p.persona_id=s.persona_id AND p.deleted_at IS NOT NULL)
+                AND NOT EXISTS(SELECT 1 FROM knowledge_control k WHERE k.key='desktop.branch.hold.'||s.session_id)''')]
         result=[]
         for row in rows:
             if _session_ids is not None and row['session_id'] not in _session_ids:continue

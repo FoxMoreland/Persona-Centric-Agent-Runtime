@@ -16,7 +16,7 @@ from .knowledge_web_decision import usage
 from .models import RuntimeErrorBase
 from .provider_compat import build_request
 from .scene_jev import JevTransport
-from .provider_policy import DEEPSEEK_TEXT_RELAY, is_official_deepseek
+from .provider_policy import DEEPSEEK_TEXT_RELAY, is_official_deepseek, is_official_typesafe_jev
 
 
 OFFICIAL_DEEPSEEK_ROUTE = 'deepseek-official-jev-ef-v1'
@@ -46,9 +46,14 @@ class ReviewedPrivateChatProviders:
         document=json.loads(raw)
         activation = document.get('formal_activation')
         if 'formal_activation' in document:
+            fields = {'reviewed_sha256', 'instance', 'personas', 'recipients_sha256'}
             if (set(document) != {'formal_activation'} or not isinstance(activation, dict)
-                    or set(activation) != {'reviewed_sha256', 'instance', 'personas', 'recipients_sha256'}):
+                    or set(activation) not in (fields, fields | {'jev'})):
                 raise RuntimeErrorBase('private_chat_review_scope_changed')
+            if 'jev' in activation and (
+                    not is_official_typesafe_jev(activation['jev'])
+                    or set(activation['jev']) != {'base_url', 'name'}):
+                raise RuntimeErrorBase('private_chat_review_recipient_changed')
             document = json.loads(_review_bytes(config, activation['reviewed_sha256']))
         has_source_assessment='source_assessment' in document
         source_assessment=document.pop('source_assessment',None)
@@ -198,6 +203,8 @@ class ReviewedPrivateChatProviders:
             }
             self.bundle = document | {'scope': {'instance': activation['instance'],
                                                'personas': self.retrieval_spec['persona_ids']}}
+            if 'jev' in activation:
+                self.bundle['jev'] = activation['jev']
         self.generation_route=document.get('generation_route')
         if 'generation_route' in document and self.generation_route!=OFFICIAL_DEEPSEEK_ROUTE:
             raise RuntimeErrorBase('private_chat_review_recipient_changed')
@@ -555,16 +562,25 @@ class ReviewedPrivateChatProviders:
         return self.bind_phase_reply('main')
 
     def bind_hydrogen_reply(self, accepted):
+        return partial(self._reply, self._hydrogen_model(accepted))
+
+    def _hydrogen_model(self, accepted):
         from . import main_reply
         if accepted['bundle'] != self.version or self.notice_model() is None:
             raise RuntimeErrorBase('main_reply_assembly_unavailable')
-        model = main_reply.resolve(self.config,self.config.load(),accepted)
-        return partial(self._reply,model)
+        return main_reply.resolve(self.config,self.config.load(),accepted)
 
     async def reply(self,attempt,packet):
         return await self.bind_phase_reply(packet.get('phase','main'))(attempt,packet)
 
-    async def _reply(self,model,attempt,packet):
+    def preflight_quote(self, packet, accepted_writer):
+        model = self._hydrogen_model(accepted_writer) if accepted_writer else self._model('main')
+        self._prepare_reply(model, packet)
+
+    def _prepare_reply(self,model,packet):
+        packet = dict(packet)
+        quote = packet.pop('_accepted_quote_window', None)
+        bounded_dialogue = packet.pop('_bounded_dialogue', False)
         if self.knowledge_revisions:
             from .knowledge_revisions import model_material
             packet=model_material(packet)
@@ -619,20 +635,37 @@ class ReviewedPrivateChatProviders:
             packet=partwise.packet
             system=self.conversation_systems['partwise_post_search_system']
             model=model|{'_json_output':True}
+        quote_receipt = None
+        if quote:
+            from .quote_context import fit_packet
+            packet, quote_receipt = fit_packet(packet, quote, system, model['max_input_chars'])
+        elif bounded_dialogue:
+            packet = {**packet, 'dialogue': list(packet['dialogue'])}
+            while packet['dialogue'] and len(system) + len(encoded(packet)) > model['max_input_chars']:
+                packet['dialogue'].pop(0)
         messages=[{'role':'system','content':system},
                   {'role':'user','content':encoded(packet)}]
         if sum(len(m['content']) for m in messages)>model['max_input_chars']:
             raise RuntimeErrorBase('private_reply_input_budget_exceeded')
-        from .provider_policy import is_private_compatible_writer, is_openrouter_writer
+        from .provider_policy import is_private_compatible_writer
         if self.compatible_writer and is_private_compatible_writer(model):
             model=model|{'_private_writer_stream':True}
         request,_=build_request(model,messages)
         if request.get('tools') or request.get('tool_choice'):
             raise RuntimeErrorBase('private_reply_tools_forbidden')
+        return model, packet, messages, request, long, attributed, partwise, quote_receipt, bounded_dialogue
+
+    async def _reply(self,model,attempt,packet):
+        model, packet, messages, request, long, attributed, partwise, quote_receipt, bounded_dialogue = self._prepare_reply(model, packet)
+        from .provider_policy import is_openrouter_writer
         hydrogen = is_openrouter_writer(model)
         response=await (self.hydrogen_writer if hydrogen else self.writer).complete(model,messages)
         raw,usage=response
         usage=dict(usage or {},requested_model=model['name'])
+        if quote_receipt:
+            usage['quote_window'] = quote_receipt
+        elif bounded_dialogue:
+            usage['dialogue_message_ids'] = [row['id'] for row in packet['dialogue']]
         if hydrogen:
             from .generation_retry import safe_diagnostics
             usage['writer_transport'] = safe_diagnostics(getattr(response,'diagnostics',None))

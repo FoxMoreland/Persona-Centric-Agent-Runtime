@@ -43,10 +43,14 @@ class CognitiveService:
         frozen=json.loads(current['profile_snapshot']) if current.get('profile_snapshot') else snapshot(conn,current['persona_id'])
         from .references import prepare
         block,references=prepare(conn,current)
+        window = []
         try:
-            _,keys=pool(conn,current,Budget(),keys_only=True)
-            window=keys['turn_ids']
+            if not references.get('quote_window'):
+                _,keys=pool(conn,current,Budget(),keys_only=True)
+                window=keys['turn_ids']
         except (RuntimeErrorBase,SearchFailure):window=[]
+        from .quote_context import branch_prefix
+        prefix = branch_prefix(conn, current) if details.get('branch_message_ids') else []
         # Hashes are internal transient guards. Full rows never enter the
         # persisted manifest or ordinary logs.
         settings=turn if expected else current
@@ -58,7 +62,8 @@ class CognitiveService:
             'summary':dict(summary) if summary else None,'summary_valid':summary_valid,
             'state':details.get('state_version') if expected else state['id'] if active_state(state) else None,
             'relation_blocked':source_blocked(conn,frozen['relationship']['source_ids']),
-            'references_hash':fingerprint(block),'window':window})
+            'references_hash':fingerprint(block),'window':window,
+            **({'branch_hash': fingerprint(prefix)} if details.get('branch_message_ids') else {})})
 
     def _manifest(self,conn,turn,messages,details):
         from .reply_protocol import descriptor
@@ -120,28 +125,37 @@ class CognitiveService:
             manifest['knowledge']=details['knowledge']
             manifest['evidence_refs'].extend(details['knowledge'].get('evidence',[]))
         if details.get('recall_support'):manifest['recall_support']=details['recall_support']
+        if quote := details.get('references', {}).get('quote_window'):
+            manifest['quote_window'] = quote
+        if details.get('branch_message_ids'):
+            manifest['branch_message_ids'] = details['branch_message_ids']
         return attach(manifest,turn,details,selection_record)
 
     def prepare(self,turn_id,character_selection=None,observation=None):
         started=time.perf_counter()
-        with self.store.connection() as conn:turn=dict(conn.execute('SELECT * FROM turns WHERE id=?',(turn_id,)).fetchone())
+        from .quote_context import in_batch
+        with self.store.connection() as conn:
+            turn=dict(conn.execute('SELECT * FROM turns WHERE id=?',(turn_id,)).fetchone())
+            quoted = in_batch(conn, turn.get('input_batch_id'))
         from .recall_runtime import RecallRuntime
-        recall=RecallRuntime(self.store).prepare(turn)
+        recall=None if quoted else RecallRuntime(self.store).prepare(turn)
         from .companion import minimal
         is_minimal=minimal(turn)
         try:character=self.characters.prepare(turn,character_selection,behavior_cues=False) if is_minimal else self.characters.prepare(turn,character_selection)
         except RuntimeErrorBase as exc:
             from .chat import ModelError
             raise ModelError(str(exc)) from None
-        decision=None if is_minimal else self.shadow.prepare(turn,observation)
+        decision=None if is_minimal or quoted else self.shadow.prepare(turn,observation)
         from .dialogue_voice import read as read_voice
         voice=read_voice(turn)
         if decision is not None and voice:decision={**decision,'_voice_version':voice['version']}
         from .decision_capsule import capsule
-        if recall is not None:
+        if quoted:
+            evidence=None
+        elif recall is not None:
             with self.store.connection() as conn:evidence=self.dialogue.basic_evidence(conn,turn)
         else:evidence=self.dialogue.evidence(turn)
-        knowledge=self.engine.knowledge.prepare_turn(turn)
+        knowledge={'state':'disabled','evidence':[]} if quoted else self.engine.knowledge.prepare_turn(turn)
         self.engine.scene.ensure(turn)
         with self.store.connection() as conn:
             if evidence is not None:
@@ -175,6 +189,13 @@ class CognitiveService:
         from .history_context import capture as capture_history, validate as validate_history
         if prepared.get('_conversation_frozen'):
             validate_history(conn,turn,prepared['details'].get('import_history_sources'))
+            if prepared['details'].get('references', {}).get('quote_window'):
+                from .quote_context import read
+                read(conn, turn)
+            if prepared.get('_branch_history_hash'):
+                from .quote_context import branch_prefix
+                if prepared['_branch_history_hash'] != fingerprint(branch_prefix(conn, turn)):
+                    raise RuntimeErrorBase('reference_source_changed')
             return prepared
         if prepared.get('_dialogue_pipeline'):
             from .chat import ModelError
@@ -188,17 +209,19 @@ class CognitiveService:
         if turn['channel']!='test':prepare(conn,turn)
         from .companion import minimal
         is_minimal=minimal(turn)
+        from .quote_context import in_batch
+        quoted = in_batch(conn, turn.get('input_batch_id'))
         try:character=self.characters.recheck(conn,turn,prepared.get('character_prepared'),behavior_cues=False) if is_minimal else self.characters.recheck(conn,turn,prepared.get('character_prepared'))
         except RuntimeErrorBase as exc:
             from .chat import ModelError
             raise ModelError(str(exc)) from None
-        decision=None if is_minimal else self.shadow.recheck(conn,turn,prepared['manifest'].get('_shadow_prepared'))
+        decision=None if is_minimal or quoted else self.shadow.recheck(conn,turn,prepared['manifest'].get('_shadow_prepared'))
         from .decision_capsule import capsule
         knowledge=self.engine.knowledge.recheck(conn,turn,prepared.get('knowledge_prepared'))
         if knowledge!=prepared.get('knowledge_prepared') or decision!=prepared['manifest'].get('_shadow_prepared') or character!=prepared.get('character_prepared') or prepared['guard']!=self._guard(conn,turn,prepared['details']):
-            evidence=self.dialogue.basic_evidence(conn,turn)
+            evidence=None if quoted else self.dialogue.basic_evidence(conn,turn)
             original=(prepared['details'].get('retrieval') or {}).get('degraded_reason')
-            if original:evidence['retrieval']['degraded_reason']=original
+            if original and evidence is not None:evidence['retrieval']['degraded_reason']=original
             messages,details=self.dialogue.render(conn,turn,evidence,character,capsule=capsule(decision))
             from .knowledge_context import attach as attach_knowledge
             messages,details=attach_knowledge(messages,details,knowledge,turn)
@@ -208,13 +231,16 @@ class CognitiveService:
             manifest['_shadow_prepared']=decision
             prepared={**prepared,'messages':messages,'details':details,'manifest':manifest,'character_prepared':character,'knowledge_prepared':knowledge,'evidence_prepared':evidence}
         prepared['manifest']['final_verification_ms']=round((time.perf_counter()-started)*1000,3)
-        prepared['manifest']['_shadow_prepared']=None if is_minimal else self.shadow.recheck(conn,turn,prepared['manifest'].get('_shadow_prepared'))
+        prepared['manifest']['_shadow_prepared']=None if is_minimal or quoted else self.shadow.recheck(conn,turn,prepared['manifest'].get('_shadow_prepared'))
         from .prompt_assembly import fit_manifest
         prepared['manifest']=fit_manifest(prepared['manifest'])
         history_proof = capture_history(conn,turn,prepared["details"])
         if history_proof:
             validate_history(conn,turn,history_proof)
             prepared["details"]["import_history_sources"] = history_proof
+        if prepared['details'].get('branch_message_ids'):
+            from .quote_context import branch_prefix
+            prepared['_branch_history_hash'] = fingerprint(branch_prefix(conn, turn))
         prepared['_conversation_frozen']=True
         return prepared
 

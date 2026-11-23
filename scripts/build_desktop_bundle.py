@@ -17,9 +17,9 @@ WEBVIEW_FILES = (
     '启动PCAR-新版.bat', 'persona_runtime/workbench_web/index.html',
     'persona_runtime/workbench_web/desktop.js', 'persona_runtime/workbench_web/persona_import.js',
 )
-SCENE_DOCS=('docs/user/历史聊天接续.md','docs/acceptance/LT-13-外部历史接续验收.md','docs/user/双人聊天生成角色卡.md','docs/acceptance/LT-13-双人成卡与场景启用.md','docs/acceptance/LT-13-v2-双人画像证据与建角验收.md','docs/acceptance/工作台双人私聊导入与历史接续.md','docs/expression/E.N6-场景发言接入与回退.md','docs/模型输入与提示词写作总则.md',
+SCENE_DOCS=('docs/user/DeepSeek 对话导入.md','docs/user/历史聊天接续.md','docs/acceptance/LT-13-外部历史接续验收.md','docs/user/双人聊天生成角色卡.md','docs/acceptance/LT-13-双人成卡与场景启用.md','docs/acceptance/LT-13-v2-双人画像证据与建角验收.md','docs/acceptance/工作台双人私聊导入与历史接续.md','docs/expression/E.N6-场景发言接入与回退.md','docs/模型输入与提示词写作总则.md',
             'docs/第三方角色Embedding依赖与许可.md','docs/M9R.5-本机验收与候选交付.md')
-SCENE_TESTS=('test_portable_history.py','test_history_continuation.py','test_import_history_service.py','test_import_history_memory.py','test_m8d.py','test_import_prompts.py','test_import_card_fields.py','test_import_card_job.py','test_import_card_publish.py','test_import_analysis_v2.py','test_import_plan.py','test_import_profile_workflow.py','test_import_personas.py','test_scene_voice_delivery.py','test_tk_notice.py','test_m9r_native_retrieval.py',
+SCENE_TESTS=('test_deepseek_desktop.py','test_portable_history.py','test_history_continuation.py','test_import_history_service.py','test_import_history_memory.py','test_m8d.py','test_import_prompts.py','test_import_card_fields.py','test_import_card_job.py','test_import_card_publish.py','test_import_analysis_v2.py','test_import_plan.py','test_import_profile_workflow.py','test_import_personas.py','test_scene_voice_delivery.py','test_tk_notice.py','test_m9r_native_retrieval.py',
              'test_m9r0_native_contract.py','test_general_retrieval.py','test_m4.py',
              'test_desktop_recovery.py','test_dialogue_schema_migration.py','test_private_reply_output.py',
              'test_private_reply_stage1.py','test_private_reply_stage2.py','test_private_reply_stage3.py','test_private_reply_stage4.py',

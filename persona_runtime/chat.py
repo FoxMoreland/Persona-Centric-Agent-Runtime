@@ -71,6 +71,8 @@ class ChatCompletionsClient:
         except (OSError,TimeoutError):return False
 
     async def complete(self, model, messages):
+        from .desktop_activation import admit, unauthorized
+        admit()
         if '_native_web_profile' in model:
             from .deepseek_native_transport import DeepSeekNativeClient
             return await DeepSeekNativeClient(ssl_context=self.ssl_context).complete(model,messages)
@@ -145,6 +147,8 @@ class ChatCompletionsClient:
                                        headers=headers, json=payload, allow_redirects=False, proxy=proxy) as response:
                     transport.update(phase='reading_body', response_headers_received=True)
                     if response.status != 200:
+                        if response.status == 401:
+                            unauthorized(model)
                         details={**diagnostic(),'http_status':response.status}
                         if hydrogen and response.status==429:
                             from .main_reply import retry_not_before
@@ -462,7 +466,14 @@ class ChatEngine:
                                  or (origin is not None and previous["origin"] != origin)):
                     raise RuntimeErrorBase("submission_conflict")
                 return previous
-            persona_id = None if test else self.service._persona(conn, persona_id)["id"]
+            person = None if test else self.service._persona(conn, persona_id)
+            persona_id = person["id"] if person else None
+            from .models import ROLEPLAY
+            from .roleplay import TURN_MODE, admit as admit_roleplay
+            roleplay = bool(person and person["spec"].get("chat_mode") == ROLEPLAY)
+            if roleplay:
+                admit_roleplay(self.store.paths, channel, self.config.load()["model"],
+                               public_lookup=public_task is not None or lookup_span is not None)
             if channel=='qq':
                 from .expression_utterance import require_supported_channel
                 require_supported_channel(conn,persona_id,channel)
@@ -502,16 +513,16 @@ class ChatEngine:
                 from .character import head as character_head
                 conn.execute('UPDATE turns SET character_snapshot=? WHERE id=?',(json.dumps(character_head(conn,persona_id),ensure_ascii=False),turn_id))
                 from .context_policy import current as context_policy
-                accepted_context=context_policy(conn,persona_id,channel,self.store)
+                accepted_context=dict(TURN_MODE) if roleplay else context_policy(conn,persona_id,channel,self.store)
                 from .scene_policy import KEY as SCENE_KEY
                 from .private_reply_entry import selected, bind
-                candidate_route = channel=='desktop' and selected(conn,self.config.load()['instance_id'],persona_id)
+                candidate_route = not roleplay and channel=='desktop' and selected(conn,self.config.load()['instance_id'],persona_id)
                 if candidate_route:
                     bind(conn,turn_id,self.config.load()['instance_id'],candidate_route)
                 if channel=='desktop':
                     from .desktop_turn_retry import admission_scope
                     from .main_reply import admit, MARKER
-                    if accepted_writer := admit(self.config,self.config.load(),candidate_route):
+                    if not roleplay and (accepted_writer := admit(self.config,self.config.load(),candidate_route)):
                         model[MARKER] = accepted_writer
                         conn.execute('UPDATE turns SET model_snapshot=? WHERE id=?',(json.dumps(model),turn_id))
                     conn.execute('INSERT INTO desktop_turn_checkpoints VALUES(?,?)',
@@ -598,8 +609,10 @@ class ChatEngine:
             value['reply_batch']=batch
         else:value['reply_batch']=None
         from .presentation import batch_view
+        from .models import ROLEPLAY, persona_chat_mode
+        roleplay = persona_chat_mode(conn, row["persona_id"]) == ROLEPLAY
         value['display_reply'],value['presentation']=batch_view(value['reply'],
-            value['reply_batch']['segments'] if value['reply_batch'] else None,historical=True)
+            value['reply_batch']['segments'] if value['reply_batch'] else None, historical=True, preserve=roleplay)
         from .chat_display import read as read_display
         value['display_messages']=read_display(conn,reply_batch['id']) if reply_batch else []
         if value['display_messages']:
@@ -827,6 +840,12 @@ class ChatEngine:
                 self.expression.settle_prior(latest)
                 with self.store.connection() as conn:
                     accepted_turn=dict(conn.execute('SELECT * FROM turns WHERE id=?',(turn_id,)).fetchone())
+                from .models import ROLEPLAY, persona_chat_mode
+                from .roleplay import is_turn, prepare as prepare_story
+                with self.store.connection() as conn:
+                    roleplay = persona_chat_mode(conn, accepted_turn["persona_id"]) == ROLEPLAY
+                if roleplay and not is_turn(accepted_turn):
+                    raise ModelError("roleplay_snapshot_invalid")
                 from .companion import read as companion_read
                 companion=companion_read(accepted_turn)
                 from .scene_policy import frozen as scene_frozen
@@ -847,15 +866,20 @@ class ChatEngine:
                         phase = "custom_pipeline" if self.dialogue_pipeline else "preparing"
                         desktop_recovery.transition(conn, accepted_turn, self.desktop_owner, phase)
                 with self.store.connection() as conn:
+                    from .quote_context import in_batch as has_quote
+                    quoted = has_quote(conn, accepted_turn.get('input_batch_id'))
                     retry_input = conn.execute('''SELECT p.prepared_json FROM desktop_retry_preparation p
                         JOIN desktop_stage_attempts a ON p.turn_id=a.turn_id WHERE p.turn_id=? AND a.stage='generation'
                         AND a.operation IS NOT NULL LIMIT 1''',(turn_id,)).fetchone() if accepted_turn['channel']=='desktop' else None
                 if retry_input:
                     prepared=json.loads(retry_input[0])
                     prepared["manifest"]["context_id"]=identifier()
+                elif roleplay:
+                    with self.store.connection() as conn:
+                        prepared=prepare_story(self,conn,accepted_turn)
                 elif self.dialogue_pipeline is not None:
                     prepared=await self.dialogue_pipeline.prepare(self,turn_id)
-                elif companion and companion['mode']=='minimal':
+                elif quoted or companion and companion['mode']=='minimal':
                     prepared=await self._prepare_context(turn_id)
                 else:
                     selection=await self.selector.prepare(turn_id)
@@ -867,15 +891,16 @@ class ChatEngine:
                         return
                     model = json.loads(turn["model_snapshot"])
                     from .private_personas import guard_cloud_dispatch
-                    direct_on=self.direct.generation.enabled(conn,turn_id)
+                    direct_on=not roleplay and self.direct.generation.enabled(conn,turn_id)
                     if import_frozen(turn) and direct_on:
                         raise ModelError('import_style_route_conflict')
                     if not direct_on:guard_cloud_dispatch(self.store,turn['persona_id'],'main',model)
-                    prepared=self.cognitive.finalize(conn,turn,prepared)
+                    if not roleplay:
+                        prepared=self.cognitive.finalize(conn,turn,prepared)
                     from .expression_runtime import enabled as expression_enabled
-                    expression_on=not direct_on and expression_enabled(conn,turn_id)
+                    expression_on=not roleplay and not direct_on and expression_enabled(conn,turn_id)
                     if expression_on and import_frozen(turn):raise ModelError('import_style_route_conflict')
-                    if prepared["details"].get("import_history_sources") and not (scene_on or expression_on or direct_on):
+                    if prepared["details"].get("import_history_sources") and not (roleplay or scene_on or expression_on or direct_on):
                         from .tk_notice import required as visible_desktop
                         if visible_desktop(conn,turn):
                             origin = json.loads(turn.get("origin_json") or "null") or {}
@@ -972,7 +997,8 @@ class ChatEngine:
                             validate_import(self.store,conn,current,prepared['details'].get('import_style'))
                             from .expression_sources import validate
                             validate(self.store,conn,current,expression_context)
-                        fresh=self.cognitive.finalize(conn,current,prepared)
+                        fresh=(prepare_story(self,conn,current) if roleplay
+                               else self.cognitive.finalize(conn,current,prepared))
                         if fresh['messages']!=messages:raise ModelError('generation_retry_sources_changed')
                         if study is not None:
                             if state['attempts'] or state['prior_failures']:raise ModelError('style_study_first_attempt_only')
@@ -1153,7 +1179,9 @@ class ChatEngine:
         reply=reply_batch.text
         from dataclasses import asdict
         from .presentation import batch_view
-        visible_text, presentation=batch_view(reply,[asdict(s) for s in reply_batch.segments])
+        from .roleplay import is_turn
+        roleplay = is_turn(turn)
+        visible_text, presentation=batch_view(reply,[asdict(s) for s in reply_batch.segments], preserve=roleplay)
         from .chat_display import enabled, plan as display_plan, persist as persist_display
         display_messages=display_plan([asdict(s) for s in reply_batch.segments],turn.get('expression_snapshot')) if enabled(turn.get('expression_snapshot'),reply_batch.mode) else []
         if display_messages:
@@ -1161,7 +1189,7 @@ class ChatEngine:
             presentation['display_count']=len(display_messages)
             presentation['planned_wait_ms']=sum(m['wait_ms'] for m in display_messages)
             visible_text = '\n\n'.join(item['text'] for item in display_messages)
-        if turn["channel"] == "desktop":
+        if turn["channel"] == "desktop" and not roleplay:
             from .bubble_limits import save_display_boundaries
             save_display_boundaries(visible_text, presentation)
         with self.store.connection(write=True) as conn:

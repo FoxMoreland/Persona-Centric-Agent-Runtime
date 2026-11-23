@@ -101,8 +101,9 @@ def card(paths, policy, scene):
 
 def configured_jev(paths):
     from .knowledge_routing import configured_model
+    from .provider_policy import is_official_typesafe_jev
     model = configured_model(paths)
-    require(model['name']==JEV,'jev_model_changed')
+    require(model['name']==JEV or is_official_typesafe_jev(model),'jev_model_changed')
     return model
 
 

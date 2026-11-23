@@ -22,7 +22,7 @@ $PcarPython = Join-Path $PcarData '.venv\Scripts\python.exe'
 & $PcarPython -B -m persona_runtime --home $PcarData doctor
 ```
 
-准备程序安装锁定依赖和包内的公开 BGE 检索模型。双击 **启动PCAR-新版.bat** 进入新版工作台，按实际使用配置模型及接收方，创建或导入角色。旧 Tk 入口为 `启动PCAR.bat`。原实例仍在运行时，启动器会尝试唤回对应窗口。
+准备程序安装锁定依赖和包内的公开 BGE 检索模型。双击 **启动PCAR-新版.bat** 进入新版工作台，按实际使用配置模型及接收方，创建或导入角色。`启动PCAR.bat` 也进入新版工作台。候选版 Key 验证和导入流程见[从 DeepSeek 对话创建角色](docs/user/DeepSeek%20对话导入.md)。原实例仍在运行时，启动器会尝试唤回对应窗口。
 
 ## 原机从 v0.3 或 v0.2 升级
 

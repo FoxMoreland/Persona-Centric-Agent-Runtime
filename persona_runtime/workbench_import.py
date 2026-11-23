@@ -22,17 +22,25 @@ class WorkbenchData:
         self._library=ImportLibrary(paths)
         self._window=window
         self._selection_lock=RLock()
+        self._activation = None
+        self._deepseek = None
+        self._import_selection = None
         self._repair_status=None
-        self._client.write_check=self._require_open
+        self._client.write_check=self._require_runtime_write
 
-    def _require_open(self):
+    def _require_runtime_write(self):
         from .local_repair import require_open,RepairInProgress,ACTIVE
         if self._repair_status:
             record=self._repair_status()
             if record and record['phase'] in ACTIVE:raise RepairInProgress()
         require_open(self._config.paths,self._client.expected_instance(self._config.load()))
 
-    def pick_transcript(self):
+    def _require_open(self):
+        self._require_runtime_write()
+        if self._activation is not None:
+            self._activation.require()
+
+    def pick_transcript(self, choose_scope=False):
         self._require_open()
         from webview import FileDialog
         names=self._window().create_file_dialog(FileDialog.OPEN,allow_multiple=False,file_types=("Markdown (*.md)",))
@@ -40,7 +48,146 @@ class WorkbenchData:
             return None
         require(names[0].lower().endswith(".md"),"请选择 Markdown 文件。")
         raw=read_supplied(names[0]);self._require_open()
+        if choose_scope:
+            from .import_markdown import parse
+            return self._stage_import({"raw": raw, "parsed": parse(raw)})
         return self._library.add(raw)
+
+    def _stage_import(self, source):
+        from .models import PRIVATE_CHAT, identifier
+        with self._selection_lock:
+            token = identifier()
+            self._import_selection = (token, source)
+            if "deepseek" in source:
+                return {"token": token, "total": len(source["deepseek"]["rows"]), "chat_mode": PRIVATE_CHAT,
+                        "title": source["deepseek"]["conversation"]["title"]}
+            return {"token": token, "total": len(source["parsed"]["rows"]),
+                    "chat_mode": source["parsed"].get("chat_mode", PRIVATE_CHAT)}
+
+    def commit_import_scope(self, token, count, mode, confirmed=False):
+        from .deepseek_intake import DeepSeekInbox, archive_identity
+        from .import_scope import selected
+        self._require_open()
+        with self._selection_lock:
+            require(self._import_selection is not None and token == self._import_selection[0],
+                    "导入来源已变化，请重新选择。")
+            source = self._import_selection[1]
+            if "deepseek" in source:
+                path, snapshot, task, preference = source["origin"]
+                require(snapshot == archive_identity(path), "导出文件已变化，请重新选择。")
+            raw, deepseek = selected(source, count, mode, confirmed)
+            self._require_open()
+            document = self._library.add(raw, deepseek_source=deepseek)
+            if deepseek:
+                inbox = DeepSeekInbox(self._config.paths)
+                if task:
+                    inbox.finish(task["id"], "imported")
+                elif preference:
+                    inbox.forget(preference["job"])
+            self._import_selection = None
+            return document
+
+    def clear_deepseek_key(self):
+        return self._client.manage("desktop.activation.clear")
+
+    def verify_deepseek_key(self, key="", confirmation=None):
+        return self._client.call("POST", "/v1/manage", {"action": "desktop.activation.verify",
+            "args": {"key": key, "confirm": confirmation}}, timeout=25)
+
+    def _set_deepseek_file(self, path, task=None):
+        from pathlib import Path
+        from .deepseek_export import inspect
+        from .deepseek_intake import archive_identity
+        self._require_open()
+        path = Path(path)
+        snapshot = archive_identity(path)
+        if task is not None:
+            require(snapshot == task["identity"], "浏览器下载文件已变化，请重新选择。")
+        data = inspect(path)
+        require(snapshot == archive_identity(path), "导出文件在读取时发生变化，请重新选择。")
+        from .deepseek_intake import DeepSeekInbox
+        preference = None if task else DeepSeekInbox(self._config.paths).preferred()
+        target = (task or preference or {}).get("target")
+        with self._selection_lock:
+            self._deepseek = (path, snapshot, task, preference)
+        return data | {"target": target}
+
+    def pick_deepseek_export(self):
+        self._require_open()
+        from webview import FileDialog
+        names = self._window().create_file_dialog(FileDialog.OPEN, allow_multiple=False, file_types=("DeepSeek ZIP (*.zip)",))
+        if names:
+            return self._set_deepseek_file(names[0])
+        return None
+
+    def deepseek_pending(self):
+        from .deepseek_intake import DeepSeekInbox
+        task = DeepSeekInbox(self._config.paths).pending()
+        return {"id": task["id"]} if task else None
+
+    def open_deepseek_pending(self, ident):
+        from .deepseek_intake import DeepSeekInbox
+        self._require_open()
+        task = DeepSeekInbox(self._config.paths).pending()
+        require(task and task["id"] == ident, "浏览器导入任务已变化。")
+        return self._set_deepseek_file(task["path"], task)
+
+    def discard_deepseek_pending(self, ident):
+        from .deepseek_intake import DeepSeekInbox
+        self._require_open()
+        inbox = DeepSeekInbox(self._config.paths)
+        task = inbox.pending()
+        require(task and task["id"] == ident, "浏览器导入任务已变化。")
+        inbox.finish(ident, "cancelled")
+
+    def import_deepseek_session(self, ident, branch=None):
+        from .deepseek_export import inspect
+        from .deepseek_intake import archive_identity
+        self._require_open()
+        with self._selection_lock:
+            require(self._deepseek is not None, "请先选择 DeepSeek 导出文件。")
+            path, snapshot, task, preference = self._deepseek
+            require(snapshot == archive_identity(path), "导出文件已变化，请重新选择。")
+            picked = inspect(path, ident, branch, prepare=True)
+            require(snapshot == archive_identity(path), "导出文件在读取时发生变化，请重新选择。")
+            if "rows" not in picked:
+                return picked
+            return {"scope": self._stage_import({"deepseek": picked, "origin": self._deepseek})}
+
+    def revise_deepseek_markdown(self, ident, edits):
+        from .deepseek_export import revise_markdown
+        from .import_markdown import DEEPSEEK_FORMAT, parse
+        self._require_open()
+        original = self._library.row(ident)
+        source = self._library.deepseek_source(ident)
+        require(source and original["format"] == DEEPSEEK_FORMAT and original["status"] != "revoked",
+                "DeepSeek 来源已不可用。")
+        raw, summary = source
+        markdown = revise_markdown(original["raw"], summary["id"], summary["branch"], edits)
+        if markdown == original["raw"]:
+            return self._library.status(ident)
+        rows = parse(markdown)
+        dates = [row["date"] for row in rows["rows"] if row["date"]]
+        return self._library.add(markdown, deepseek_source=(raw, summary | {
+            "counts": rows["counts"], "from": dates[0] if dates else None,
+            "to": dates[-1] if dates else None, "edited_from": ident,
+        }))
+
+    def save_deepseek_markdown(self, ident):
+        from pathlib import Path
+        from webview import FileDialog
+        from .import_markdown import DEEPSEEK_FORMAT
+        self._require_open()
+        row = self._library.row(ident)
+        require(row["format"] == DEEPSEEK_FORMAT and row["status"] != "revoked", "DeepSeek 来源已不可用。")
+        chosen = self._window().create_file_dialog(FileDialog.SAVE, save_filename="DeepSeek.md",
+                                                    file_types=("Markdown (*.md)",))
+        if chosen:
+            self._require_open()
+            target = Path(chosen if isinstance(chosen, str) else chosen[0])
+            require(target.suffix.lower() == ".md", "请选择 Markdown 文件。")
+            target.write_bytes(row["raw"])
+        return bool(chosen)
 
     def import_prompt_file(self):
         self._require_open()
@@ -53,11 +200,11 @@ class WorkbenchData:
 
     def import_action(self, name, args):
         require(name in ("prompt_status","list","replay","analyze","status","cancel","evidence","prepare","edit","create","style","feedback",
-                         "card_preview","card_status","card_compose","card_edit","card_create","card_scene_status","card_scene_enable",
+                         "card_preview","card_status","card_compose","card_edit","card_review","card_create","card_scene_status","card_scene_enable",
                          "update","revoke","history","history_preview","history_commit","history_status","history_update","plan","plan_evidence","plan_archive","review","review_all"),"未知导入操作。")
         pid = args.get("persona_id")
         if pid and name in ("history_preview","history_update","update","card_scene_enable"):
-            self.live_activate(pid)
+            self._use_persona(pid)
         return self._client.call("POST","/v1/manage",{"action":"persona.import."+name,"args":args},timeout=180)
 
     def live_health(self):
@@ -78,7 +225,7 @@ class WorkbenchData:
         if status.get("instance_id")!=cfg["instance_id"] or status.get("service")!="persona-runtime":
             return {"state":"wrong_instance"}
         return {"state":"online","generation":status.get("service_generation"),"configured":bool(cfg["model"]["encrypted_key"] and cfg["model"]["base_url"]),
-                "model":cfg["model"]["name"],"configVersion":str(self._config.file.stat().st_mtime_ns),
+                "model":cfg["model"]["name"],"activation":self._activation.status(cfg) if self._activation else None,"configVersion":str(self._config.file.stat().st_mtime_ns),
                 "draining":bool(status.get("draining")),**({"quotaWaits":status["quota_waits"]} if status.get("quota_waits") else {}),
                 **({"maintenance":status["maintenance"]} if status.get("maintenance") else {}),
                 **({"repair":repair} if repair else {})}
@@ -86,6 +233,12 @@ class WorkbenchData:
     def live_quota_settings(self,settings=None):
         if settings is None:return self._client.manage('quota.settings.current')
         return self._client.manage('quota.configure',**settings)
+
+    def export_support_logs(self, service_state=None, key_state=None):
+        from .diagnostic_export import export_logs
+
+        path = export_logs(self._config.paths, service_state, key_state)
+        return {"name": path.name, "path": str(path)}
 
     def live_backups(self):
         from .automatic_backup import Backups
@@ -107,7 +260,7 @@ class WorkbenchData:
     def live_quota_decide(self,ids,allow):
         return self._client.manage('quota.workflow.decide',ids=ids,allow=allow)
 
-    def live_activate(self,pid):
+    def _use_persona(self,pid):
         self._client.manage("persona.use",persona_id=pid)
 
     def live_network_wake(self):
@@ -158,6 +311,23 @@ class WorkbenchData:
                 require(view_session_id is None,"浏览已保存会话时无需新建。")
                 self._client.manage("session.select",channel="desktop",fresh=True,persona_id=pid)
             return self._client.manage("desktop.browser.show",persona_id=pid)
+
+    def live_branch(self, pid, sid, anchor, operation_id):
+        self._require_open()
+        with self._selection_lock:
+            self._client.manage('persona.use', persona_id=pid)
+            return self._client.manage('session.branch', persona_id=pid, session_id=sid,
+                                       anchor=anchor, operation_id=operation_id)
+
+    def live_activate(self, pid, sid, operation_id):
+        self._require_open()
+        with self._selection_lock:
+            self._client.manage('persona.use', persona_id=pid)
+            return self._client.manage('session.activate_desktop', persona_id=pid, session_id=sid,
+                                       operation_id=operation_id)
+
+    def live_message_position(self, pid, sid, target):
+        return self._client.manage('desktop.message.position', pid=pid, sid=sid, target=target)
 
     def live_snapshot(self,sid,version=None):
         return self._client.manage("chat.snapshot",session_id=sid,version=version,include_imports=False)
@@ -319,7 +489,7 @@ class WorkbenchData:
             data["provider"] = provider_identity(model)
             if enabled:
                 data.update(enabled=True,memory_backfill=True)
-            self.live_activate(pid)
+            self._use_persona(pid)
             self._client.manage("organization.policy.update",persona_id=pid,expected_selected=pid,
                                 expected_version=expected,data=data,operation_id=identifier())
             policy=self._client.manage("organization.policy.current",persona_id=pid)
@@ -349,7 +519,7 @@ class WorkbenchData:
     def live_create(self,spec):
         person=self._client.manage("persona.create",spec=spec)
         self._client.manage("session.select",persona_id=person["id"],channel="desktop")
-        self.live_activate(person["id"])
+        self._use_persona(person["id"])
         return person
 
     def live_model(self,name,key):

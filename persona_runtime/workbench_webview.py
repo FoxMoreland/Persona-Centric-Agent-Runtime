@@ -87,7 +87,10 @@ class DesktopControls(WorkbenchData):
 
     def __init__(self, post, status, paths, window):
         super().__init__(paths,window)
+        from .desktop_activation import DesktopActivation
+        self._activation = DesktopActivation(self._config)
         self._post = post
+        self._export_watch = None
         self._status = status
         self._appearance_lock = RLock()
 
@@ -96,6 +99,66 @@ class DesktopControls(WorkbenchData):
 
     def runtime_status(self):
         return self._status()
+
+    def register_deepseek_bridge(self):
+        import os
+        import sys
+        from .deepseek_browser_bridge import register
+        self._require_open()
+        source = Path(__file__).resolve().parents[1]
+        edition = "community" if os.environ.get("PCAR_EDITION") == "community" else "development"
+        register(edition, source, Path(sys.executable).with_name("python.exe"), self._config.paths.home)
+        return edition
+
+    def open_deepseek_browser(self):
+        self._require_open()
+        from .deepseek_webview import web_route
+        web_route()
+        self._post(("deepseek-browser", None))
+        return True
+
+    def start_deepseek_export(self, choose_folder=False):
+        import webbrowser
+        from .deepseek_download import DeepSeekDownloadWatch, windows_downloads
+        from .deepseek_webview import SITE
+        from webview import FileDialog
+
+        self._require_open()
+        if choose_folder:
+            selected = self._window().create_file_dialog(FileDialog.FOLDER, allow_multiple=False)
+            if not selected:
+                return None
+            folder = Path(selected[0])
+        else:
+            folder = windows_downloads()
+        watcher = DeepSeekDownloadWatch(self._config.paths, folder, self._require_open,
+                                       lambda: self._post(("deepseek-zip-received", None)))
+        self.stop_deepseek_export()
+        self._export_watch = watcher
+        watcher.start()
+        try:
+            if not webbrowser.open_new_tab(SITE):
+                raise RuntimeErrorBase("无法打开系统浏览器。")
+        except Exception:
+            watcher.stop()
+            raise
+        return str(watcher.folder)
+
+    def deepseek_export_waiting(self):
+        watcher = self._export_watch
+        return str(watcher.folder) if watcher and watcher.active() else None
+
+    def stop_deepseek_export(self):
+        watcher = self._export_watch
+        if watcher:
+            watcher.stop()
+
+    def open_deepseek_site(self, console=False):
+        import webbrowser
+        if not console:
+            self._require_open()
+        url = "https://platform.deepseek.com/api_keys" if console else "https://chat.deepseek.com/"
+        return webbrowser.open(url)
 
     def hide_to_tray(self):
         self._post(("tray", None))
@@ -163,6 +226,7 @@ class WebViewHost:
         self.closed = False
         self.closing = False
         self.in_tray = False
+        self.deepseek_browser = None
         self.wake_id = None
         self.next_poll = 0
         self.initial_theme = initial_window_appearance(appearance)
@@ -279,6 +343,12 @@ class WebViewHost:
             self.menu = None
 
     def detach(self, *_):
+        stop = getattr(getattr(self, 'controls', None), 'stop_deepseek_export', None)
+        if stop:
+            stop()
+        browser = getattr(self, "deepseek_browser", None)
+        if browser and not browser.form.IsDisposed:
+            browser.form.Close()
         if self.timer is not None:
             self.timer.Stop()
             self.timer.Dispose()
@@ -406,6 +476,16 @@ class WebViewHost:
                         self.hide()
                     elif action == "appearance":
                         self.apply_window_appearance(value)
+                    elif action == "deepseek-zip-received":
+                        self.show()
+                    elif action == "deepseek-browser":
+                        self.show_deepseek_browser()
+                    elif action == "deepseek-status":
+                        message, completed = value
+                        if completed and self.deepseek_browser and not self.deepseek_browser.form.IsDisposed:
+                            self.deepseek_browser.form.Close()
+                            self.show()
+                        self.notice(message)
             if self.closing and self.close_retry_at is not None and time.monotonic()>=self.close_retry_at:
                 self.close_retry_at=None
                 self.close_worker=Thread(target=self.shutdown,name="webview-shutdown",daemon=True)
@@ -434,6 +514,17 @@ class WebViewHost:
                 self.notice("托盘暂不可用，已恢复工作台窗口。")
         except Exception as error:
             self.abort(error)
+
+    def show_deepseek_browser(self):
+        from .deepseek_webview import ExportBrowser
+        if self.deepseek_browser and not self.deepseek_browser.form.IsDisposed:
+            self.deepseek_browser.form.Activate()
+            return
+        try:
+            self.deepseek_browser = ExportBrowser(self.form, self.paths,
+                                                   lambda message, complete: self.queue.put(("deepseek-status", (message, complete))))
+        except Exception:
+            self.notice("内置浏览器暂时无法打开。请使用系统浏览器导出，再选择 ZIP。")
 
     def abort(self, error):
         self.failure = error

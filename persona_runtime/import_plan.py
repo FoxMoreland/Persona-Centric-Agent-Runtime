@@ -9,6 +9,7 @@ from .archive import fingerprint
 from .corpus_files import CorpusError, digest
 from .import_library import encode, require
 from .import_markdown import FENCE, PLACEHOLDER, SYSTEM, assign, learning_view, parse, partition_rows
+from .models import ROLEPLAY
 
 
 VERSION = "dyadic-windows-v2"
@@ -62,7 +63,10 @@ def _personal_rows(parsed):
     rows = []
     for row in parsed["rows"]:
         original = row["original"]
-        blocks = _sections(row, parsed["format"] == "Moect Markdown")
+        if parsed.get("chat_mode") == ROLEPLAY and row["speaker"].casefold() not in SYSTEM:
+            blocks = [("body", 0, len(original))]
+        else:
+            blocks = _sections(row, parsed["format"] == "Moect Markdown")
         bodies, offsets = [], []
         position = 0
         for kind, start, end in blocks:
