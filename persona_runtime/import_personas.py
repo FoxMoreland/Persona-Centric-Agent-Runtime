@@ -9,7 +9,7 @@ from .import_card_job import CardJobs
 from .import_card_publish import CardPublisher
 from .import_library import require
 from . import import_style as style
-from .models import PersonaSpec
+from .models import ROLEPLAY, PersonaSpec
 from .persona_management import active
 from .profile import append_version
 from .scene_policy import read, save
@@ -33,8 +33,12 @@ class PersonaImports:
         require(type(compose_card) is bool and (not compose_card or (plan_id and confirmed is True and not cached_only)),
                 "需要确认本次导入的成卡用途。")
         if plan_id is None:
+            require(self.library.chat_mode(ident) != ROLEPLAY, "角色扮演记录请使用新版分批建卡。")
             return self.analysis.start(ident, revision, confirmed, cached_only=cached_only)
         if not compose_card:return self.profiles.start(ident,revision,plan_id,confirmed,cached_only=cached_only)
+        if self.library.chat_mode(ident) == ROLEPLAY:
+            from .import_prompts import has_contract
+            require(has_contract(self.library, "card", ROLEPLAY), "角色扮演成卡模板待审阅。")
         from .call_limits import flow
         from .models import identifier
         scope='job/'+identifier()
@@ -82,11 +86,13 @@ class PersonaImports:
         await self.profiles.drain()
         await self.analysis.drain()
 
-    def create_cards(self, ident, revision, plan_id, card_revision, roles, operation_id, confirmed, enable_scene=False):
+    def create_cards(self, ident, revision, plan_id, card_revision, roles, operation_id, confirmed, enable_scene=False,
+                     omit_unresolved=False):
         require(confirmed is True, "请确认已审阅所选角色卡。")
         return self.card_publisher.create(ident=ident, revision=revision, plan_id=plan_id,
                                           card_revision=card_revision, roles=roles,
-                                          operation_id=operation_id, enable_scene=enable_scene, confirmed=confirmed)
+                                          operation_id=operation_id, enable_scene=enable_scene, confirmed=confirmed,
+                                          omit_unresolved=omit_unresolved)
 
     def binding(self, old, version, material, enabled):
         require(type(enabled) is bool,"启用状态无效。")
@@ -110,6 +116,7 @@ class PersonaImports:
         return True
 
     def create(self, ident, revision, roles, enable_style, operation_id, continue_history=False):
+        require(self.library.chat_mode(ident) != ROLEPLAY, "角色扮演记录请使用新版分批建卡。")
         require(isinstance(roles,list) and 1<=len(roles)<=2 and len(set(roles))==len(roles)
                 and set(roles)<={"A","B"} and isinstance(operation_id,str) and 0<len(operation_id)<=128,
                 "请选择本次创建的人物。")

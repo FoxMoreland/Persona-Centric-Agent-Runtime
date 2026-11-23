@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import math
+from pathlib import Path
 
 from .models import LOCAL_USER_ID, PersonaSpec, RuntimeErrorBase, identifier, timestamp
 from .profile import encode, snapshot as profile_snapshot
@@ -22,6 +23,13 @@ FIELDS = {
 }
 PATHS = {f'{group}.{field}' for group, fields in FIELDS.items() for field in fields} | {'age.years'}
 MAX_BYTES = 128 * 1024
+
+
+def read_package(path):
+    file = Path(path)
+    if file.stat().st_size > 256 * 1024:
+        raise ValueError('角色包超过256 KiB，未读取。')
+    return json.loads(file.read_text(encoding='utf-8-sig'))
 
 
 def empty_character():

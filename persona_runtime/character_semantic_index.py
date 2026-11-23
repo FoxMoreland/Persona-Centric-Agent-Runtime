@@ -8,7 +8,7 @@ from contextlib import closing
 
 from .character import CharacterService, validate_character
 from .character_embedding import (SemanticFailure, CHUNKING, DIMENSION, digest,
-                                  safe_path, private_directory, numpy_module, checked_vectors)
+                                  safe_path, private_directory, vector_math, checked_vectors)
 from .instance import InstanceLock
 from .models import LOCAL_USER_ID, RuntimeErrorBase
 
@@ -58,7 +58,7 @@ class CharacterSemanticIndex:
         return safe_path(self.store.paths.home, self.root / (digest(spec) + '.sqlite3'), self.store.path)
 
     def _read(self, spec, expected, *, path=None):
-        np = numpy_module()
+        math = vector_math()
         path = self._path(spec) if path is None else safe_path(self.store.paths.home, path, self.store.path)
         if not path.is_file():
             raise SemanticFailure('character_cache_missing')
@@ -80,12 +80,11 @@ class CharacterSemanticIndex:
                         raise ValueError()
                     if not 0 <= entry['start'] < entry['end'] <= len(source['text']):
                         raise ValueError()
-                    value = np.frombuffer(vector, dtype='<f4')
-                    if (value.shape != (DIMENSION,) or not np.isfinite(value).all()
-                            or abs(float(np.linalg.norm(value)) - 1) > 1e-4):
+                    decoded = math.decode(vector)
+                    if len(decoded) != 1 or not math.are_unit(decoded, atol=1e-4):
                         raise ValueError()
                     checksum.update(raw.encode('utf-8')); checksum.update(vector)
-                    entries.append(entry); vectors.append(value)
+                    entries.append(entry); vectors.append(decoded[0])
                 if checksum.hexdigest() != meta['checksum'] or int(meta['count']) != len(rows):
                     raise ValueError()
                 # A complete item cannot silently lose its final (or middle) chunk.
@@ -98,7 +97,7 @@ class CharacterSemanticIndex:
                         covered = max(covered, end)
                     if covered != len(source['text']):
                         raise ValueError()
-                return entries, np.asarray(vectors, dtype=np.float32).reshape((-1, DIMENSION))
+                return entries, vectors
         except SemanticFailure:
             raise
         except (sqlite3.Error, OSError, KeyError, TypeError, ValueError):
@@ -149,12 +148,13 @@ class CharacterSemanticIndex:
     def _publish(self, path, spec, entries, vectors):
         safe_path(self.store.paths.home, path, self.store.path)
         checksum = hashlib.sha256()
+        math = vector_math() if entries else None
         with closing(sqlite3.connect(path)) as conn, conn:
             conn.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)')
             conn.execute('CREATE TABLE chunks(ordinal INTEGER PRIMARY KEY,metadata TEXT NOT NULL,vector BLOB NOT NULL)')
             for index, (entry, value) in enumerate(zip(entries, vectors, strict=True)):
                 raw = json.dumps(entry, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
-                vector = value.astype('<f4').tobytes()
+                vector = math.encode([value])
                 checksum.update(raw.encode('utf-8')); checksum.update(vector)
                 conn.execute('INSERT INTO chunks VALUES (?,?,?)', (index, raw, vector))
             conn.executemany('INSERT INTO meta VALUES (?,?)', [
@@ -188,12 +188,10 @@ class CharacterSemanticIndex:
         # No latest-head lookup: legal old frozen versions remain valid.
         if self._spec(self._snapshot(persona_id, version_id)) != spec:
             raise SemanticFailure('character_source_changed')
-        scores = query_vectors @ vectors.T
         best = {}
-        for index, entry in enumerate(entries):
-            query_index = int(scores[:, index].argmax())
+        for entry, (query_index, score) in zip(entries, vector_math().best_queries(query_vectors, vectors), strict=True):
             row = {k: entry[k] for k in ('kind', 'item_id', 'chunk_index', 'source_hash')}
-            row.update(score=float(scores[query_index, index]), member_index=query_parts[query_index]['member_index'])
+            row.update(score=score, member_index=query_parts[query_index]['member_index'])
             key = (entry['kind'], entry['item_id'])
             if key not in best or row['score'] > best[key]['score']:
                 best[key] = row

@@ -1,9 +1,10 @@
-"""Prefer the Windows system proxy, with a Community-only official API route."""
+"""Prefer the platform system proxy, with a Community-only official API route."""
 import ipaddress
 import urllib.request
 from urllib.parse import urlsplit
 
 from . import community
+from .android_platform import IS_ANDROID, host
 
 
 def official_direct(url):
@@ -13,7 +14,7 @@ def official_direct(url):
             and not parsed.query and not parsed.fragment
             and parsed.path.rstrip('/') in ('', '/v1', '/beta', '/chat/completions',
                 '/v1/chat/completions', '/beta/chat/completions',
-                '/v1/tools/search', '/v1/tools/fetch'))
+                '/v1/tools/search', '/v1/tools/fetch', '/user/balance'))
 
 
 def route_name(url, proxy):
@@ -22,7 +23,33 @@ def route_name(url, proxy):
     return 'official_direct' if official_direct(url) else 'local'
 
 
+def _proxy_url(raw):
+    raw = raw.strip()
+    if not raw or any(ord(char) < 33 for char in raw):
+        return None
+    value = raw if "://" in raw else "http://" + raw
+    parsed = urlsplit(value)
+    if (parsed.scheme in ("http", "https") and parsed.hostname and parsed.port
+            and not parsed.username and not parsed.password
+            and parsed.path in ("", "/") and not parsed.query and not parsed.fragment):
+        return value
+    return None
+
+
 def configured_proxy(scheme="https"):
+    if IS_ANDROID:
+        try:
+            raw = host().systemHttpProxy()
+            if raw is None:
+                return None
+            value = _proxy_url(str(raw))
+            if value:
+                return value
+        except Exception:
+            pass
+        from .chat import ModelError
+        raise ModelError("system_proxy_configuration_unavailable", diagnostics={
+            "request_headers_sent": False, "network_route": "system_proxy_unavailable"})
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
@@ -35,15 +62,7 @@ def configured_proxy(scheme="https"):
         if "=" in raw:
             values = dict(part.strip().split("=", 1) for part in raw.split(";") if "=" in part)
             raw = values.get(scheme, "")
-        raw = raw.strip()
-        if not raw or any(ord(char) < 33 for char in raw):
-            return None
-        value = raw if "://" in raw else "http://" + raw
-        parsed = urlsplit(value)
-        if (parsed.scheme in ("http", "https") and parsed.hostname and parsed.port
-                and not parsed.username and not parsed.password
-                and parsed.path in ("", "/") and not parsed.query and not parsed.fragment):
-            return value
+        return _proxy_url(raw)
     except (ImportError, OSError, ValueError, TypeError):
         pass
     return None
@@ -72,7 +91,7 @@ def outbound_proxy(url):
 
 class _SystemProxyHandler(urllib.request.ProxyHandler):
     # urllib's default ProxyHandler honors proxy_bypass(), including NO_PROXY.
-    # Apply the Windows proxy anew to every request, including redirects.
+    # Apply the system proxy anew to every request, including redirects.
     def __init__(self):
         super().__init__({"http": "system", "https": "system"})
 

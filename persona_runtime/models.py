@@ -12,6 +12,21 @@ class RuntimeErrorBase(ValueError):
 CATEGORIES = ("user_fact", "preference", "shared_experience", "relationship", "world_knowledge")
 ROLES = ("user", "persona", "note")
 LOCAL_USER_ID = "00000000-0000-4000-8000-000000000001"
+PRIVATE_CHAT = "private_chat"
+ROLEPLAY = "roleplay"
+PERSONA_REQUIRED_FIELDS = ("name", "introduction")
+
+
+def chat_mode(value):
+    if value not in (PRIVATE_CHAT, ROLEPLAY):
+        raise RuntimeErrorBase("invalid_chat_mode")
+    return value
+
+
+def persona_chat_mode(db, persona_id):
+    row = db.execute("SELECT json_extract(spec_json,'$.chat_mode') FROM personas WHERE id=?",
+                     (persona_id,)).fetchone()
+    return chat_mode(row[0] if row and row[0] is not None else PRIVATE_CHAT)
 
 
 def timestamp() -> str:
@@ -37,24 +52,32 @@ class PersonaSpec:
     expression_style: str
     values_and_boundaries: list[str]
     initial_background: str
+    chat_mode: str = PRIVATE_CHAT
 
     @classmethod
     def from_dict(cls, data: object) -> "PersonaSpec":
-        if not isinstance(data, dict) or set(data) != set(cls.__dataclass_fields__):
-            raise RuntimeErrorBase("Persona JSON must contain exactly the documented template fields")
+        required = set(cls.__dataclass_fields__) - {"chat_mode"}
+        if not isinstance(data, dict) or set(data) - {"chat_mode"} != required:
+            raise RuntimeErrorBase("Persona JSON must contain the documented template fields")
+        chat_mode(data.get("chat_mode", PRIVATE_CHAT))
         if type(data["format_version"]) is not int or data["format_version"] != 1:
             raise RuntimeErrorBase("Unsupported persona format_version; expected 1")
-        for field in ("name", "introduction", "expression_style", "initial_background"):
+        for field in PERSONA_REQUIRED_FIELDS:
             require_text(data[field], field)
+        for field in ("expression_style", "initial_background"):
+            if data[field] != "":
+                require_text(data[field], field)
         for field in ("core_traits", "values_and_boundaries"):
-            if not isinstance(data[field], list) or not data[field]:
-                raise RuntimeErrorBase(f"{field} must be a non-empty list of strings")
+            if not isinstance(data[field], list):
+                raise RuntimeErrorBase(f"{field} must be a list of strings")
             for value in data[field]:
                 require_text(value, field)
         return cls(**data)
 
     def to_dict(self) -> dict:
         data = asdict(self)
+        if self.chat_mode == PRIVATE_CHAT:
+            del data["chat_mode"]
         self.from_dict(data)
         return data
 

@@ -1,0 +1,83 @@
+[data-pcar-android] { font-size: 15px; font-family: system-ui, sans-serif; }
+[data-pcar-android] .stage { display: block; padding: 0; }
+[data-pcar-android] .window {
+  width: 100%; height: 100dvh; min-height: 0; max-width: none;
+  border: 0; border-radius: 0; box-shadow: none;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+[data-pcar-android] .titlebar { min-height: 45px; padding: 0 15px; }
+[data-pcar-android] .titlebar .brand strong { font-size: 16px; letter-spacing: .02em; }
+[data-pcar-android] .title-actions,
+[data-pcar-android] .demo-label,
+[data-pcar-android] #sidebar-toggle,
+[data-pcar-android] .rail-footer,
+[data-pcar-android] .resize,
+[data-pcar-android] .scrim { display: none !important; }
+[data-pcar-android] .layout { grid-template-columns: minmax(0, 1fr); }
+[data-pcar-android] .layout > :is(.sidebar, .conversation, .mobile-settings) {
+  grid-area: 1 / 1; min-height: 0; min-width: 0;
+}
+[data-pcar-android] .sidebar {
+  position: static; width: auto; border: 0; transform: none; visibility: visible;
+  box-shadow: none; background: var(--surface);
+}
+[data-pcar-android] .sidebar-content { padding: 13px 12px; }
+[data-pcar-android] .rail-row { min-height: 44px; }
+[data-pcar-android]:not([data-mobile-tab="people"]) .sidebar,
+[data-pcar-android]:not([data-mobile-tab="chat"]) .conversation,
+[data-pcar-android]:not([data-mobile-tab="settings"]) .mobile-settings { display: none; }
+[data-pcar-android] .chat-header { padding-left: 12px; padding-right: 12px; }
+[data-pcar-android] .timeline { padding-left: 12px; padding-right: 12px; }
+[data-pcar-android] .composer-wrap { padding-left: 12px; padding-right: 12px; }
+[data-pcar-android] .composer textarea { font-size: 16px; }
+[data-pcar-android] .toast { bottom: 126px; }
+[data-pcar-android] .mobile-tabs {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  background: var(--titlebar); border-top: 1px solid var(--line); padding: 4px 9px 5px; gap: 7px;
+}
+[data-pcar-android] .mobile-tabs button {
+  display: grid; place-items: center; align-content: center; gap: 2px;
+  min-height: 48px; padding: 3px; border: 0; border-radius: 9px;
+  background: transparent; color: var(--muted); font: inherit; font-size: 12px;
+}
+[data-pcar-android] .mobile-tabs button[aria-current="page"] {
+  color: var(--accent); background: var(--selected); font-weight: 650;
+}
+[data-pcar-android] .mobile-tabs .icon { width: 19px; height: 19px; }
+[data-pcar-android] .mobile-settings {
+  overflow: auto; background: var(--surface); padding: 19px 14px 22px;
+}
+[data-pcar-android] .mobile-settings h1 { margin: 0 0 15px; font-size: 22px; }
+[data-pcar-android] .mobile-settings h2 { margin: 0; font-size: 16px; }
+[data-pcar-android] .mobile-card {
+  max-width: 580px; margin-bottom: 12px; border: 1px solid var(--line);
+  border-radius: 12px; background: var(--panel); padding: 13px;
+}
+[data-pcar-android] .mobile-card p { margin: 6px 0 12px; color: var(--muted); }
+[data-pcar-android] .mobile-card .appearance-setting { padding: 8px 0 3px; }
+[data-pcar-android] .mobile-card .button { min-height: 40px; }
+[data-pcar-android] dialog { max-height: calc(100dvh - 20px); }
+[data-pcar-android] .import-card-toast {
+  position: fixed; z-index: 1; inset-block-start: 12px; inset-inline: 0;
+  inline-size: fit-content; max-inline-size: calc(100vw - 28px); margin-inline: auto;
+  padding: 9px 15px; border-radius: 10px; background: var(--ink); color: var(--surface);
+  font-weight: 600; text-align: center; overflow-wrap: anywhere; pointer-events: none;
+  box-shadow: 0 3px 12px var(--shadow);
+}
+[data-pcar-android] textarea[aria-invalid="true"] {
+  border-color: var(--error); outline: 2px solid var(--error); outline-offset: 1px;
+}
+[data-pcar-android] dialog textarea.import-card-prompt {
+  min-height: clamp(180px, 39dvh, 450px); font-size: 16px; line-height: 1.5;
+}
+@keyframes pcar-card-field-shake {
+  25%, 75% { transform: translateX(-3px); }
+  50% { transform: translateX(3px); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  [data-pcar-android] .card-field-shake { animation: pcar-card-field-shake 230ms ease-out; }
+}
+@media (max-height: 420px) {
+  [data-pcar-android] .titlebar { min-height: 38px; }
+  [data-pcar-android] .mobile-tabs button { min-height: 42px; }
+}

@@ -6,7 +6,7 @@ from tempfile import NamedTemporaryFile
 from .character_embedding import private_directory, safe_path
 from .corpus_files import digest
 from .import_library import require
-from .models import RuntimeErrorBase
+from .models import PRIVATE_CHAT, ROLEPLAY, RuntimeErrorBase
 
 VERSION = "pcar-import-prompts-v1"
 BUNDLE_PATH = Path(__file__).with_name("import_prompt_assets") / (VERSION + ".json")
@@ -58,7 +58,9 @@ def _read_bundle(path):
         return _verified(stream.read(MAX_FILE_BYTES + 1))
 
 
-def has_contract(library, kind):
+def has_contract(library, kind, mode=PRIVATE_CHAT):
+    if mode == ROLEPLAY:
+        return contract_source(library, kind, mode)[0] is not None
     if _private_policy(library):
         return _private(library, CONTRACTS[kind][0]).is_file()
     return _private(library, SELECTION).is_file() or BUNDLE_PATH.is_file()
@@ -107,8 +109,21 @@ def import_prompt_file(library, path):
     return install_prompt_bundle(library, raw)
 
 
-def contract_source(library, kind):
+def contract_source(library, kind, mode=PRIVATE_CHAT):
     """Return exact contract bytes and a release identifier for new, opted-in work."""
+    if mode == ROLEPLAY:
+        from .roleplay_prompts import approved
+        purposes = ("profile_extract", "profile_merge") if kind == "profile" else ("card_compose",)
+        reviewed = approved(library.paths, *purposes)
+        if reviewed is None:
+            return None, None
+        release, prompts = reviewed
+        if kind == "profile":
+            settings = {"version": "pcar-dyadic-import-v2", "model": RELEASE_MODEL,
+                        "extract_system": prompts["profile_extract"], "merge_system": prompts["profile_merge"]}
+        else:
+            settings = {"version": "pcar-dual-card-v1", "model": RELEASE_MODEL, "system": prompts["card_compose"]}
+        return _bundle_bytes(settings), release
     filename, keys, checksum = CONTRACTS[kind]
     if _private_policy(library):
         file = _private(library, filename)
@@ -136,7 +151,12 @@ def release_model(model):
 
 def has_release_permission(library, kind, frozen, checksum):
     marker = frozen.get("prompt_release")
-    if not marker or marker != BUNDLE_SHA256 or frozen.get("model") != RELEASE_MODEL:
+    if not marker or frozen.get("model") != RELEASE_MODEL:
         return False
-    raw, current = contract_source(library, kind)
+    mode = frozen.get("chat_mode", PRIVATE_CHAT)
+    if mode == ROLEPLAY:
+        from .roleplay_prompts import official
+        if not official(frozen):
+            return False
+    raw, current = contract_source(library, kind, mode)
     return current == marker and raw is not None and checksum == digest(raw)

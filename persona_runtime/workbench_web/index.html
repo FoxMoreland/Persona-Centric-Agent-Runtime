@@ -226,6 +226,13 @@
     .bubble.own { justify-self: end; background: var(--selected); border-end-end-radius: 5px; }
     .bubble.reply { border-end-start-radius: 5px; }
     button.bubble { border: 0; font: inherit; color: inherit; text-align: start; cursor: pointer; }
+    .message-with-menu { display: flex; align-items: center; gap: 6px; width: fit-content; max-width: min(92%, 600px); }
+    .message-with-menu.own-message { justify-self: end; flex-direction: row-reverse; }
+    .message-with-menu > .bubble { max-width: 100%; min-width: 0; }
+    .message-menu { flex: none; min-width: 28px; min-height: 28px; padding: 2px; border: 0; border-radius: 6px;
+      background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
+    .message-menu:hover, .message-menu:focus-visible { color: var(--text); background: var(--neutral-bubble); }
+    @media (pointer: coarse) { .message-menu { min-width: 44px; min-height: 44px; } }
     .history-reference { display: flex; align-items: center; gap: .7rem; color: var(--muted); margin-bottom: 6px; }
     .history-reference span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
     .input-buffer { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; width: min(100%, 730px); margin: 0 auto 5px; color: var(--muted); font-size: 13px; }
@@ -252,6 +259,21 @@
     .dialog-foot { position: sticky; bottom: 0; display: flex; justify-content: flex-end; gap: 8px; padding: 13px 22px; border-top: 1px solid var(--line); background: var(--surface); }
     .dialog-foot:empty { display: none; }
     .import-original, .import-citation { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .import-range [hidden] { display: none; }
+    .import-range-warning { padding: 9px 11px; border-left: 3px solid var(--accent); background: var(--panel); }
+    .deepseek-guide { display: grid; gap: 12px; }
+    .deepseek-guide figure { margin: 0; padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+    .deepseek-guide figcaption { padding: 8px 2px 0; }
+    .deepseek-guide figcaption p { margin-top: 3px; color: var(--muted); }
+    .deepseek-diagram { display: flex; min-height: 46px; align-items: center; flex-wrap: wrap; gap: 6px; padding: 6px 9px; background: var(--field); border-radius: 6px; }
+    .deepseek-guide-token { padding: 4px 6px; border: 1px solid var(--line-strong); border-radius: 5px; font-size: 13px; font-weight: 600; }
+    .deepseek-guide-token.highlight { background: var(--selected); }
+    .deepseek-guide-token.archive { border-radius: 3px 9px 3px 3px; font-family: monospace; }
+    .deepseek-guide-arrow { line-height: 1; font-size: 19px; color: var(--accent); }
+    .deepseek-guide-avatar { position: relative; width: 28px; height: 28px; border: 1px solid var(--line-strong); border-radius: 50%; background: var(--selected); }
+    .deepseek-guide-avatar::before, .deepseek-guide-avatar::after { content: ""; position: absolute; background: var(--accent); left: 50%; transform: translateX(-50%); }
+    .deepseek-guide-avatar::before { width: 7px; height: 7px; top: 5px; border-radius: 50%; }
+    .deepseek-guide-avatar::after { width: 14px; height: 7px; bottom: 4px; border-radius: 8px 8px 3px 3px; }
     .import-create-actions { width:100%; display:flex; align-items:center; flex-wrap:wrap; justify-content:space-between; gap:7px; }
     .import-create-actions label { display:flex; align-items:center; gap:5px; }
     .import-template-row { display:flex; align-items:center; flex-wrap:wrap; justify-content:space-between; gap:8px; color:var(--muted); }
@@ -485,6 +507,7 @@
     }
 
     function applySidebar() {
+      if (window.pcarMobile) return window.pcarMobile.sync();
       const narrow = sidebarQuery.matches;
       const expanded = narrow ? viewport.drawerOpen : !viewport.collapsed;
       byId("layout").classList.toggle("collapsed", !narrow && !expanded);

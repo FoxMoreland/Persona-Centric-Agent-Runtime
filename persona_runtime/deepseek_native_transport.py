@@ -19,6 +19,8 @@ class DeepSeekNativeClient:
 
     async def complete(self, model, messages):
         from .chat import ModelError, model_tls_context
+        from .desktop_activation import admit, unauthorized
+        admit()
         try:
             payload, contract = build_request(model, messages)
             url = official_endpoint(model)
@@ -51,6 +53,8 @@ class DeepSeekNativeClient:
                 async with client.post(url, json=payload, headers=headers, proxy=proxy, allow_redirects=False) as response:
                     transport.update(response_headers_received=True, http_status=response.status, phase='reading_body')
                     if response.status != 200:
+                        if response.status == 401:
+                            unauthorized(model)
                         # Do not log arbitrary provider error text or retry on a
                         # successful HTTP handshake. A returned status is known.
                         raw = await response.content.read(2*1024*1024)

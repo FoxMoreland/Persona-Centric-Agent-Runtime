@@ -288,7 +288,7 @@ def model_identity(paths,*,source_root=None):
     return CharacterEmbeddingProvider(paths,paths.home/'models/character-embedding'/index['fingerprint']).identity()
 
 
-def prepare_model(paths,*,local_source=None,source_root=None):
+def prepare_model(paths,*,local_source=None,source_root=None,copy_asset=None):
     from .character_embedding import private_directory,file_hash,CharacterEmbeddingProvider
     source=Path(source_root or SOURCE_ROOT);index=read_json(source/'model-assets.json')['character_embedding']
     root=private_directory(paths.home,paths.home/'models/character-embedding');destination=root/index['fingerprint']
@@ -298,7 +298,8 @@ def prepare_model(paths,*,local_source=None,source_root=None):
         for name,expected in index['files'].items():
             if Path(name).name!=name:raise ValueError('模型清单包含无效路径。')
             target=staging/name
-            if local_source:shutil.copyfile(Path(local_source)/name,target)
+            if copy_asset is not None:copy_asset(name,target)
+            elif local_source:shutil.copyfile(Path(local_source)/name,target)
             else:
                 from .network_proxy import system_urlopen
                 url='https://huggingface.co/'+index['artifact_repository']+'/resolve/'+index['revision']+'/'+name

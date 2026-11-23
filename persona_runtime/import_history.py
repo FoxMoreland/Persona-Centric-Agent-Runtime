@@ -63,6 +63,9 @@ def history_allowed(db, session_id, purpose, providers=None):
             or {meta.get("self_role"), meta.get("role")} != {"A","B"}
             or not isinstance(meta.get("providers"),dict)):
         return False
+    from .models import ROLEPLAY
+    if meta.get("chat_mode") == ROLEPLAY and purpose == "jev":
+        return False
     from .ordinary_materials import session_access
     if session_access(db,session_id) and purpose in ("dialogue","jev","memory","evidence"):
         return True
@@ -222,6 +225,9 @@ def page(store,persona_id,session_id,before=None,limit=80,query=None,after=None)
     with store.connection() as db:
         from .workbench_timeline import require_session
         require_session(db,persona_id,session_id)
+        from .desktop_messages import branch, branch_page
+        if branch(db, session_id):
+            return branch_page(db, persona_id, session_id, before=before, after=after, limit=limit, query=query)
         meta=read(db,META+session_id)
         if not meta:
             return {"rows":[],"before":None}

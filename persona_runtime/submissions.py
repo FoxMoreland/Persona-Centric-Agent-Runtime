@@ -2,10 +2,10 @@
 import json
 import threading
 import time
-import msvcrt
 from contextlib import contextmanager
 
 from .config import atomic_json
+from .instance import lock_file, unlock_file
 from .models import RuntimeErrorBase
 from .security import protect, unprotect
 
@@ -33,9 +33,8 @@ class SubmissionJournal:
                 deadline = time.monotonic()+3
                 try:
                     while not acquired:
-                        file.seek(0)
                         try:
-                            msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+                            lock_file(file)
                             acquired = True
                         except OSError:
                             if time.monotonic() >= deadline:
@@ -48,8 +47,7 @@ class SubmissionJournal:
                     yield
                 finally:
                     if acquired:
-                        file.seek(0)
-                        msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
+                        unlock_file(file)
 
     def _read(self):
         if not self.path.exists():

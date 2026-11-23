@@ -1,10 +1,39 @@
 """Single-instance OS file lock, released automatically on process exit."""
-import msvcrt
 import ctypes
 from ctypes import wintypes
 import os
 
+from .android_platform import IS_ANDROID
 from .models import RuntimeErrorBase
+
+if os.name == 'nt':
+    import msvcrt
+else:
+    import fcntl
+
+if IS_ANDROID:
+    import time
+    from uuid import uuid4
+
+    # The Android host owns the runtime in one app process under InstanceLock.
+    _android_identity = {"pid": os.getpid(), "created": time.monotonic_ns(),
+                         "process_token": uuid4().hex}
+
+
+def lock_file(file):
+    if os.name == 'nt':
+        file.seek(0)
+        msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def unlock_file(file):
+    if os.name == 'nt':
+        file.seek(0)
+        msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
 class InstanceLock:
@@ -13,12 +42,12 @@ class InstanceLock:
         self.file = None
         try:
             self.file = path.open("a+b")
-            self.file.seek(0)
-            if not self.file.read(1):
-                self.file.write(b"0")
-                self.file.flush()
-            self.file.seek(0)
-            msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
+            if os.name == 'nt':
+                self.file.seek(0)
+                if not self.file.read(1):
+                    self.file.write(b"0")
+                    self.file.flush()
+            lock_file(self.file)
         except OSError:
             if self.file is not None:
                 self.file.close()
@@ -26,9 +55,10 @@ class InstanceLock:
 
     def close(self):
         if self.file is not None and not self.file.closed:
-            self.file.seek(0)
-            msvcrt.locking(self.file.fileno(), msvcrt.LK_UNLCK, 1)
-            self.file.close()
+            try:
+                unlock_file(self.file)
+            finally:
+                self.file.close()
 
 
 class ProcessIdentityHandle:
@@ -66,6 +96,8 @@ class ProcessIdentityHandle:
 
 
 def current_process_identity():
+    if IS_ANDROID:
+        return dict(_android_identity)
     process = ProcessIdentityHandle(os.getpid())
     try:
         return process.identity
@@ -76,6 +108,8 @@ def current_process_identity():
 def process_identity_alive(identity):
     if not isinstance(identity, dict) or type(identity.get("pid")) is not int or type(identity.get("created")) is not int:
         return False
+    if IS_ANDROID:
+        return identity == _android_identity
     try:
         process = ProcessIdentityHandle(identity["pid"], identity)
     except (OSError, ValueError, RuntimeErrorBase):

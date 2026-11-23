@@ -1,0 +1,67 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+apply from: rootProject.file('pcar-runtime.gradle')
+
+def prepared = rootProject.file(providers.gradleProperty('pcarPrepared').get())
+def workspace = rootProject.projectDir.parentFile
+def packedModel = layout.buildDirectory.dir('pcar-model')
+def packedPage = layout.buildDirectory.dir('pcar-page')
+def stageModel = tasks.register('stageWorkbenchModel', Sync) {
+    from(new File(prepared, 'assets')) { include 'bge/**', 'licenses/**' }
+    into(packedModel)
+}
+def stagePage = tasks.register('stageWorkbenchPage', Exec) {
+    def desktop = new File(workspace, 'persona_runtime/workbench_web')
+    def mobile = project.file('src/main/web')
+    def generator = rootProject.file('tools/stage_workbench.py')
+    inputs.dir(desktop)
+    inputs.dir(mobile)
+    inputs.file(generator)
+    outputs.dir(packedPage)
+    commandLine(providers.gradleProperty('pcarBuildPython').get(), '-B', generator.absolutePath,
+        desktop.absolutePath, mobile.absolutePath, packedPage.get().asFile.absolutePath)
+}
+def testSuite = layout.buildDirectory.dir('pcar-stage3-tests')
+def stageTests = tasks.register('stageWorkbenchReplays', Sync) {
+    from(new File(workspace, 'tests')) {
+        include '__init__.py', 'test_import_prompts.py', 'test_import_history_service.py',
+            'test_import_history_memory.py', 'test_m4.py', 'test_m8d.py', 'test_lookup_target.py',
+            'test_knowledge_study.py', 'test_private_reply_stage2.py', 'test_private_reply_stage3.py'
+        into 'suite/tests'
+    }
+    into(testSuite)
+}
+tasks.configureEach { task ->
+    if (task.name ==~ /merge.*(?:Debug|Release)Assets/ ||
+            task.name.contains('Lint') || task.name.startsWith('lint')) {
+        task.dependsOn(stageModel, stagePage)
+    }
+    if (task.name ==~ /merge.*AndroidTestAssets/) task.dependsOn(stageTests)
+}
+
+android {
+    namespace 'io.github.foxmoreland.pcar.workbench'
+    defaultConfig {
+        applicationId 'io.github.foxmoreland.pcar.community'
+        versionCode 5
+        versionName '1.1.1'
+        testInstrumentationRunner 'io.github.foxmoreland.pcar.workbench.StageThreeProbe'
+    }
+    buildTypes {
+        debug { applicationIdSuffix '.debug' }
+    }
+    sourceSets {
+        main {
+            assets.srcDir(packedModel)
+            assets.srcDir(packedPage)
+        }
+        androidTest { assets.srcDir(testSuite) }
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.15.0'
+}

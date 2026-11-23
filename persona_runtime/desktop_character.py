@@ -5,7 +5,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-from .character import FIELDS, MAX_BYTES, validate_character
+from .character import FIELDS, MAX_BYTES, validate_character, read_package
 from .models import identifier
 
 LABELS = {
@@ -18,13 +18,6 @@ LABELS = {
  'world':('角色世界',{'name':'世界名称','description':'世界说明'}),
 }
 AGE_LABELS={'未设定':'unspecified','固定年龄':'fixed','随现实日期增长':'calendar'}
-
-
-def read_package(path):
-    file=Path(path)
-    if file.stat().st_size>256*1024:
-        raise ValueError('角色包超过256 KiB，未读取。')
-    return json.loads(file.read_text(encoding='utf-8-sig'))
 
 
 from .desktop_disposition import DispositionUI

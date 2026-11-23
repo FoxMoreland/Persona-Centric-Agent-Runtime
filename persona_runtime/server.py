@@ -39,7 +39,8 @@ def health_status(config, engine, organization, ingress):
                               "version": __version__, "assist_admitted": bool(getattr(engine,"assist_admission",None)), "live_admitted": bool(getattr(engine,"live_admission",None)), "decision_capsule_version":"decision-capsule-v1", "selector_configured":bool(config.load()["character_selector"]["enabled"] and config.load()["character_selector"]["name"] and config.load()["character_selector"]["base_url"]), "shadow_audit_gap":bool(HEALTH), "capabilities":["recall_runtime_v1","companion_selective_reply_v1","companion_im_text_v1","companion_native_text_v1","companion_prompt_light_v1","companion_context_rules_workbench_v1","companion_persona_workbench_v1","companion_c2_workbench_v1","companion_workbench_v1","companion_cancel_v1","evaluation_review_v1","disposition_live_candidate_v1","situation_observation_v1","author_relationship_mapping_v2","static_disposition_v1","disposition_shadow_v1","reply_bubbles_v3","rolling_quiet_v2","reply_display_messages_v1","reply_output_contract_v1","character_selection_v1","character_retrieval_v1","reply_batch_v2","reply_rhythm_v1","session_lifecycle_v1","session_package_v1","thread_manual_v1","cognitive_context_v1","archive_search_v1","working_set_preview_v1","archive_exact_v1","input_reference_v1","durable_ingress_v2","input_batch_v1","reply_batch_v1","behavior_resolver_v1","reply_delivery_parts_v1"], "buffer_pending":ingress.unresolved_count()}
 
 
-def create_app(paths, client=None, *, assist_admission=None, live_admission=None, foreground_only=False, engine_factory=None, private_chat_providers=None):
+def create_app(paths, client=None, *, assist_admission=None, live_admission=None, foreground_only=False,
+               interactive_maintenance=False, engine_factory=None, private_chat_providers=None, activation=None):
     config = ConfigStore(paths)
     config.initialize()
     store = Store(paths)
@@ -55,7 +56,8 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
     ingress=IngressService(engine)
     delivery_service=DeliveryService(store)
     if not pending_migration:ingress.recover()
-    organization = OrganizationEngine(store, config, engine.client, engine, foreground_only=foreground_only)
+    organization = OrganizationEngine(store, config, engine.client, engine, foreground_only=foreground_only,
+                                      interactive_maintenance=interactive_maintenance)
     if not pending_migration:organization.recover()
     from .sessions import SessionService
     from .topics import TopicService
@@ -106,6 +108,10 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
             action=None
             if request.method=='POST' and request.path=='/v1/manage':
                 action=(await body(request)).get('action')
+            if activation is not None:
+                from .desktop_activation import ERROR, allowed_while_locked
+                if not allowed_while_locked(request.method, request.path, action) and activation.status()['state'] != 'verified':
+                    return web.json_response({'error': ERROR}, status=423)
             if protected_request(request.method,request.path,action):
                 try:require_open(paths,app['instance_id'])
                 except RepairInProgress:
@@ -352,6 +358,12 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         service = engine.service
         if not isinstance(args, dict):
             raise RuntimeErrorBase("JSON object required")
+        if activation is not None and action == "desktop.activation.status":
+            return web.json_response(activation.status())
+        if activation is not None and action == "desktop.activation.clear":
+            return web.json_response(await activation.clear())
+        if activation is not None and action == "desktop.activation.verify":
+            return web.json_response(await activation.verify(store, **args))
         if action == 'desktop.main_reply.status':
             from .main_reply import status
             return web.json_response(status(config,config.load()))
@@ -390,6 +402,9 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         if action == "desktop.timeline.snapshot":
             from .workbench_timeline import page
             return web.json_response(await asyncio.to_thread(page,store,**args))
+        if action == 'desktop.message.position':
+            from .workbench_timeline import message_position
+            return web.json_response(await asyncio.to_thread(message_position, store, **args))
         if action == "desktop.retrieval.notes":
             from .workbench_timeline import retrieved_notes
             return web.json_response(await asyncio.to_thread(retrieved_notes,store,**args))
@@ -424,7 +439,8 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
             local={'list':imports.library.list,'status':imports.library.status,'evidence':imports.library.evidence,
                    'prepare':imports.library.prepare,'edit':imports.library.edit,'create':imports.create,
                    'card_preview':ordinary_preview,'card_status':imports.cards.status,'card_edit':imports.cards.edit,
-                   'card_create':imports.create_cards,'card_scene_status':imports.card_publisher.info,
+                   'card_create':imports.create_cards,'card_review':imports.card_publisher.review,
+                   'card_scene_status':imports.card_publisher.info,
                    'history_preview':imports.history.preview, 'history_commit':imports.history.commit,
                    'history_status':imports.history.status, 'history_update':imports.history.update,
                    'card_scene_enable':imports.card_publisher.enable,
@@ -625,7 +641,8 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
             return web.json_response(checked)
         if action.startswith('session.') and action not in ('session.select',):
             names={'current':sessions.current,'list':sessions.list,'show':sessions.show,'seal':sessions.seal,
-                   'reopen':sessions.reopen,'package':sessions.package,'replay':sessions.replay,'triggers':sessions.triggers,
+                   'reopen':sessions.reopen,'branch':sessions.branch,'activate_desktop':sessions.activate_desktop,
+                   'package':sessions.package,'replay':sessions.replay,'triggers':sessions.triggers,
                    'delivery.abandon':sessions.abandon_delivery,'organization.preview':session_organization.preview,
                    'organization.submit':session_organization.submit}
             name=action[len('session.'):]
@@ -845,10 +862,13 @@ def pending_deliveries(store, delivery=None):
 
 
 async def serve(paths):
+    from .desktop_activation import DesktopActivation, current
     lock = InstanceLock(paths.home / "runtime" / "service.lock")
+    activation = DesktopActivation(ConfigStore(paths))
+    scope = current.set(activation)
     try:
         setup(paths, "service")
-        app = create_app(paths)
+        app = create_app(paths, activation=activation)
         runner = web.AppRunner(app, access_log=None, shutdown_timeout=65)
         await runner.setup()
         try:
@@ -857,4 +877,5 @@ async def serve(paths):
         finally:
             await runner.cleanup()
     finally:
+        current.reset(scope)
         lock.close()

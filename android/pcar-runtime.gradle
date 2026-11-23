@@ -1,0 +1,73 @@
+def workspace = rootProject.projectDir.parentFile
+def prepared = rootProject.file(providers.gradleProperty('pcarPrepared').get())
+def wheels = rootProject.file(providers.gradleProperty('pcarWheels').get())
+def python = providers.gradleProperty('pcarBuildPython').get()
+def buildRoot = providers.gradleProperty('pcarBuildDirectory')
+if (buildRoot.present) {
+    def root = rootProject.file(buildRoot.get())
+    layout.buildDirectory.set(project.name == 'app' ? root : new File(root, project.name))
+}
+
+def pythonSource = layout.buildDirectory.dir('pcar-python')
+def stageRuntime = tasks.register('stagePcarRuntime', Sync) {
+    from(workspace) {
+        include 'persona_runtime/**', 'model-assets.json', 'templates/**'
+        exclude '**/__pycache__/**', '**/*.pyc'
+    }
+    into(pythonSource)
+}
+tasks.configureEach { task ->
+    if (task.name ==~ /merge.*PythonSources/) {
+        task.dependsOn(stageRuntime)
+    }
+}
+
+android {
+    compileSdk 36
+    buildToolsVersion '36.1.0'
+
+    defaultConfig {
+        minSdk 31
+        targetSdk 36
+    }
+    flavorDimensions 'cpu'
+    productFlavors {
+        emulator {
+            dimension 'cpu'
+            ndk { abiFilters 'x86_64' }
+        }
+        arm64 {
+            dimension 'cpu'
+            ndk { abiFilters 'arm64-v8a' }
+        }
+    }
+    sourceSets {
+        main {
+            java.srcDir(rootProject.file('runtime/src/main/java'))
+            jniLibs.srcDirs = [new File(prepared, 'jniLibs')]
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        version = '3.12'
+        buildPython(python)
+        extractPackages('persona_runtime')
+        pip {
+            options('--no-index', '--find-links', wheels.absolutePath, '--require-hashes')
+            install('-r', rootProject.file('requirements.txt').absolutePath)
+        }
+    }
+    sourceSets {
+        main { srcDir(pythonSource) }
+    }
+}
+
+dependencies {
+    implementation files(new File(prepared, 'onnxruntime-android-1.31.1.aar'))
+}

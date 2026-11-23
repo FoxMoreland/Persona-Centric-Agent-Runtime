@@ -183,6 +183,8 @@ class OrdinaryReply:
                 meter=gate(db,self.store,category,turn_scope(turn))
                 if key=='J1' and draft==0:
                     selection={k:material[k] for k in ('history','memories')}
+                    if 'writer_turns' in material:
+                        selection['writer_turns'] = material['writer_turns']
                     from . import message_time
                     if message_time.enabled(turn):
                         selection[message_time.KEY] = message_time.VERSION
@@ -294,6 +296,13 @@ class OrdinaryReply:
 
     def writer_packet(self,material,decision,proof,phase):
         packet=self.packet(material,decision)
+        if phase == 'main' and material.get('quote_window'):
+            packet['_accepted_quote_window'] = material['quote_window']
+        elif phase == 'main' and material.get('writer_history'):
+            rows = material['catalog']
+            already = {row['id'] for row in packet['evidence']}
+            packet['dialogue'] = [rows[i] for i in material['writer_history'] if i not in already]
+            packet['_bounded_dialogue'] = True
         excluded=set(proof.get('superseded_outline_replies',[]))|set(proof.get('omitted_search_notices',[]))
         if excluded:
             packet['dialogue']=[row for row in packet['dialogue'] if row['id'] not in excluded]
@@ -312,6 +321,15 @@ class OrdinaryReply:
         if 'research' in packet or 'output_constraints' in packet:
             packet['phase']=phase
         return packet
+
+    def preflight_quote(self, db, turn, decision, proof, phase):
+        from .quote_context import in_batch
+        preflight = getattr(self.providers, 'preflight_quote', None)
+        if preflight and in_batch(db, turn.get('input_batch_id')):
+            from .main_reply import MARKER
+            _, _, material = self._snapshot(db, turn['id'], phase)
+            preflight(self.writer_packet(material, decision, proof, phase),
+                      json.loads(turn['model_snapshot']).get(MARKER))
 
     async def plan(self,tid,draft,base,material,reason,research=None,repair_observations=None):
         import asyncio
@@ -349,7 +367,8 @@ class OrdinaryReply:
             target=research['target']
             iterations['J1']=0
         else:
-            target = await decide('J1',initial,('wait','batch',*dict.fromkeys(current+refs)))
+            options = ('batch',) if material.get('quote_window') else ('wait','batch',*dict.fromkeys(current+refs))
+            target = await decide('J1',initial,options)
         if target == 'wait':
             if draft:
                 raise RuntimeErrorBase('private_reply_review_rejected')
@@ -395,6 +414,11 @@ class OrdinaryReply:
         facts=list(dict.fromkeys(refs+groups[selection]))
         boundary=state|{'action':action,'task':task,'facts':[rows[i] for i in facts],'stance':stances[stance]}
         modes=['chat','short_answer']
+        if material.get('quote_window') and getattr(self.providers, 'conversation_systems', None):
+            from .private_lookup import explicit_long
+            with self.store.connection() as db:
+                if explicit_long(db, initial['current'], conversation=True):
+                    modes.append('long_detail')
         if research:
             boundary.update(research={k:v for k,v in research.items() if k!='retained_read'},phase=base['phase'])
             if base['phase']=='search_notice' or research['status']!='ordinary':
@@ -549,7 +573,7 @@ class OrdinaryReply:
                     AND status IN ('queued','running') AND cancelled_at IS NULL""",(turn['session_id'],tid)).fetchone():
                 return
         research=None
-        if base['route']==RESEARCH:
+        if base['route']==RESEARCH and not material.get('quote_window'):
             if not getattr(self.providers,'research',False) or not callable(getattr(self.providers,'retrieve',None)):
                 raise RuntimeErrorBase('private_reply_transport_unavailable')
             if getattr(self.providers,'study_enabled',False) and not callable(getattr(self.providers,'organize',None)):
@@ -601,6 +625,8 @@ class OrdinaryReply:
                 await self.entry.dispatch(tid,phase,proof=proof)
             with self.store.connection() as db:
                 attempt=db.execute("SELECT * FROM private_reply_attempts WHERE turn_id=? AND draft=? AND phase=?",(tid,draft,phase)).fetchone()
+                if not attempt and db.execute("SELECT 1 FROM turns WHERE id=? AND status='interrupted'",(tid,)).fetchone():
+                    return
                 if not attempt or attempt['state']!='received':
                     raise RuntimeErrorBase('reply_dispatch_unknown')
                 saved=db.execute("SELECT contract_json,decision_json FROM private_reply_decisions WHERE id=?",(attempt['decision_id'],)).fetchone()

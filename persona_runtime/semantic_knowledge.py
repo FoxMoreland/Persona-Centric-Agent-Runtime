@@ -311,7 +311,8 @@ def related_questions(paths, current, preceding):
             encoder=provider_for(paths)
             _,left=encoder.embed_query([current[:24000]])
             _,right=encoder.embed_query([preceding[:24000]])
-            return float((left@right.T).max())>=load_config()['thresholds']['lore']
+            from .character_embedding import vector_math
+            return vector_math().max_similarity(left, right) >= load_config()['thresholds']['lore']
         except SemanticFailure as exc:
             raise RuntimeErrorBase('local_knowledge_embedding_unavailable') from exc
 
@@ -337,13 +338,13 @@ def rank(paths, question, rows, *, encoder=None, limit=PASSAGE_LIMIT, minimum_sc
 
 
 def _rank(paths, question, rows, encoder, limit, minimum_score=None, one_per_document=False):
-    from .character_embedding import DIMENSION,numpy_module
+    from .character_embedding import DIMENSION, vector_math
     from .character_retrieval import load_config
-    np=numpy_module()
+    math = vector_math()
     encoder=encoder or provider_for(paths)
     model=encoder.identity()['fingerprint']
-    query=np.concatenate([encoder.embed_query([part])[1] for start in range(0,len(question),24000)
-                          if (part:=question[start:start+24000]).strip()])
+    query = math.join([encoder.embed_query([part])[1] for start in range(0, len(question), 24000)
+                       if (part := question[start:start + 24000]).strip()])
     cutoff=load_config()['thresholds']['lore'] if minimum_score is None else minimum_score
     docs={}
     for r in rows:
@@ -353,34 +354,36 @@ def _rank(paths, question, rows, encoder, limit, minimum_score=None, one_per_doc
     root=safe_path(paths.home,paths.home/'private/local-knowledge-index')
     if not root.exists():private_directory(paths.home,root)
     path=safe_path(paths.home,root/'vectors.sqlite3')
-    scores={}
+    vectors = {}
+    fresh = set()
+    scores = {}
     with closing(sqlite3.connect(path,timeout=10)) as cache:
         cache.execute('CREATE TABLE IF NOT EXISTS vectors (id TEXT PRIMARY KEY, data BLOB NOT NULL)')
         pending=[]
         def embed_pending():
             if not pending:return
-            vectors=encoder.embed_documents([piece for _,piece in pending])
-            for (key,_),vec in zip(pending,vectors):
-                scores[key].append(vec)
+            embedded = encoder.embed_documents([piece for _, piece in pending])
+            for (key, _), vec in zip(pending, embedded, strict=True):
+                vectors[key].append(vec)
             pending.clear()
         for key,(content,_) in docs.items():
             row=cache.execute('SELECT data FROM vectors WHERE id=?',(key,)).fetchone()
             if row and len(row[0]) and len(row[0])%(4*DIMENSION)==0:
-                vec=np.frombuffer(row[0],dtype='<f4').reshape(-1,DIMENSION)
-                if np.isfinite(vec).all() and np.allclose(np.linalg.norm(vec,axis=1),1,atol=1e-3):
-                    scores[key]=vec
+                vec = math.decode(row[0])
+                if math.are_unit(vec, atol=1e-3, rtol=1e-5):
+                    vectors[key] = vec
                     continue
-            scores[key]=[]
+            fresh.add(key)
+            vectors[key] = []
             for chunk in encoder.chunks(content):
                 pending.append((key,chunk['text']))
                 if len(pending)>=32:embed_pending()
         embed_pending()
         with cache:
-            for key,vec in scores.items():
-                if isinstance(vec,list):
-                    vec=np.asarray(vec,dtype='<f4').reshape(-1,DIMENSION)
-                    cache.execute('INSERT OR REPLACE INTO vectors VALUES(?,?)',(key,vec.tobytes()))
-                scores[key]=float(np.max(vec@query.T))
+            for key, vec in vectors.items():
+                if key in fresh:
+                    cache.execute('INSERT OR REPLACE INTO vectors VALUES(?,?)', (key, math.encode(vec)))
+                scores[key] = math.max_similarity(vec, query)
     ranked=sorted(((scores[key],r) for key,(_,items) in docs.items() for r in items if scores[key]>=cutoff),
                   key=lambda pair:(-pair[0],pair[1]['id']))
     seen=set()

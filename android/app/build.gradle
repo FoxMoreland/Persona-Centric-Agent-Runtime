@@ -1,0 +1,20 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+apply from: rootProject.file('pcar-runtime.gradle')
+
+android {
+    namespace 'io.github.foxmoreland.pcar.runtimecheck'
+    defaultConfig {
+        applicationId 'io.github.foxmoreland.pcar.runtimecheck'
+        versionCode 1
+        versionName '0.1-stage1'
+    }
+    sourceSets {
+        main {
+            assets.srcDir(new File(rootProject.file(providers.gradleProperty('pcarPrepared').get()), 'assets'))
+        }
+    }
+}

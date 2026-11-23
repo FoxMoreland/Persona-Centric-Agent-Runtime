@@ -140,6 +140,9 @@ class SessionOrganization:
         row=owned(conn,session_id,selected)
         model=self.engine.model()
         memory_enabled=model.get('encrypted_key') and self.engine.automatic and self.engine.automatic.is_enabled(conn,selected['persona_id'])
+        from .models import ROLEPLAY, persona_chat_mode
+        if persona_chat_mode(conn, selected['persona_id']) == ROLEPLAY and not memory_enabled:
+            raise RuntimeErrorBase("roleplay_story_memory_required")
         p=conn.execute('SELECT * FROM session_packages WHERE session_id=?',(session_id,)).fetchone()
         if not p:raise RuntimeErrorBase('session_not_sealed')
         manifest=json.loads(p['manifest_json']);completed=set();previous=None;coverage_gaps=[]

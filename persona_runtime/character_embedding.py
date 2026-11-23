@@ -10,9 +10,10 @@ import stat
 import threading
 
 from .models import RuntimeErrorBase
+from .android_platform import IS_ANDROID
+from .vector_math import DIMENSION, VectorMath
 
 MODEL_ID = 'BAAI/bge-small-zh-v1.5'
-DIMENSION = 512
 ENCODING = 'plain-no-prefix-l2-f32-v1'
 CHUNKING = 'offset-384-overlap32-v1'
 _gate = threading.Lock()
@@ -23,7 +24,11 @@ _loaded = None
 def provider_for(paths):
     from .installation import SOURCE_ROOT, read_json
     identity=read_json(SOURCE_ROOT/'model-assets.json')['character_embedding']['fingerprint']
-    return CharacterEmbeddingProvider(paths,paths.home/'models/character-embedding'/identity)
+    directory = paths.home / 'models/character-embedding' / identity
+    if IS_ANDROID:
+        from .android_embedding import AndroidEmbeddingProvider
+        return AndroidEmbeddingProvider(paths, directory)
+    return CharacterEmbeddingProvider(paths, directory)
 
 
 class SemanticFailure(RuntimeErrorBase):
@@ -71,15 +76,14 @@ def private_directory(home, path):
 
 
 def checked_vectors(values, count):
-    # NumPy is deliberately imported only in the optional path.
-    np = numpy_module()
-    vectors = np.asarray(values, dtype=np.float32)
-    if vectors.shape != (count, DIMENSION) or not np.isfinite(vectors).all():
-        raise SemanticFailure('embedding_invalid_vector')
-    norms = np.linalg.norm(vectors, axis=1)
-    if not np.isfinite(norms).all() or (norms <= 0).any():
-        raise SemanticFailure('embedding_invalid_vector')
-    return vectors / norms[:, None]
+    try:
+        return vector_math().normalize(values, count)
+    except (TypeError, ValueError, OverflowError):
+        raise SemanticFailure('embedding_invalid_vector') from None
+
+
+def vector_math():
+    return VectorMath() if IS_ANDROID else VectorMath(numpy_module())
 
 
 def numpy_module():
@@ -142,25 +146,10 @@ class CharacterEmbeddingProvider:
             raise SemanticFailure('embedding_busy')
         try:
             identity = self.identity()
-            try:
-                from fastembed import TextEmbedding
-                from tokenizers import Tokenizer
-                for name, version in identity['packages'].items():
-                    if importlib.metadata.version(name) != version:
-                        raise SemanticFailure('embedding_dependency_mismatch')
-            except (ImportError, importlib.metadata.PackageNotFoundError):
-                raise SemanticFailure('embedding_dependency_missing') from None
-            key = (str(self.directory), identity['fingerprint'])
+            key = (type(self), str(self.directory), identity['fingerprint'])
             if _loaded is None or _loaded[0] != key:
-                _loaded = None  # A changed model never shares the old vector space.
-                # specific_model_path bypasses download_model's hub branches entirely.
-                model = TextEmbedding(MODEL_ID, specific_model_path=str(self.directory),
-                                      local_files_only=True, cache_dir=str(self.directory),
-                                      threads=2, providers=['CPUExecutionProvider'])
-                tokenizer = Tokenizer.from_file(str(self.directory / 'tokenizer.json'))
-                tokenizer.no_truncation()
-                tokenizer.no_padding()
-                _loaded = (key, model, tokenizer)
+                _loaded = None
+                _loaded = (key, *self._load_backend(identity))
             yield _loaded[1], _loaded[2]
         except SemanticFailure:
             raise
@@ -168,6 +157,26 @@ class CharacterEmbeddingProvider:
             raise SemanticFailure('embedding_inference_failed') from None
         finally:
             _gate.release()
+
+    def _load_backend(self, identity):
+        try:
+            from fastembed import TextEmbedding
+            from tokenizers import Tokenizer
+            for name, version in identity['packages'].items():
+                if importlib.metadata.version(name) != version:
+                    raise SemanticFailure('embedding_dependency_mismatch')
+        except (ImportError, importlib.metadata.PackageNotFoundError):
+            raise SemanticFailure('embedding_dependency_missing') from None
+        model = TextEmbedding(MODEL_ID, specific_model_path=str(self.directory),
+                              local_files_only=True, cache_dir=str(self.directory),
+                              threads=2, providers=['CPUExecutionProvider'])
+        tokenizer = Tokenizer.from_file(str(self.directory / 'tokenizer.json'))
+        tokenizer.no_truncation()
+        tokenizer.no_padding()
+        return model, tokenizer
+
+    def _embed_batch(self, model, texts, tokenizer):
+        return model.embed(texts, batch_size=16, parallel=None)
 
     def chunks(self, text):
         if not isinstance(text, str) or not text.strip() or len(text) > 24000:
@@ -202,7 +211,7 @@ class CharacterEmbeddingProvider:
             if any(not isinstance(t, str) or not t.strip() or
                    len(tokenizer.encode(t).ids) > 512 for t in texts):
                 raise SemanticFailure('embedding_chunk_too_large')
-            return checked_vectors(list(model.embed(texts, batch_size=16, parallel=None)), len(texts))
+            return checked_vectors(list(self._embed_batch(model, texts, tokenizer)), len(texts))
 
     def embed_query(self, members):
         if not isinstance(members, (list, tuple)) or not 1 <= len(members) <= 20:

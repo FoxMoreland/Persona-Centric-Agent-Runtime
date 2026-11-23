@@ -8,6 +8,7 @@ import re
 
 from .character import FIELDS as CHARACTER_FIELDS, empty_character, validate_character
 from .import_library import FIELDS, require
+from .models import PERSONA_REQUIRED_FIELDS
 from .scene_voice import SCENES
 
 ROLES = ("A", "B")
@@ -306,6 +307,30 @@ def unresolved_conflicts(card):
             or issue.get("reason") in _CONFLICT_REASONS]
 
 
+def publication_card(card):
+    """Project reviewed values without modifying the source draft."""
+    result = deepcopy(card)
+    omitted = sorted({issue["field"] for issue in unresolved_conflicts(card)}
+                     & (CARD_PATHS | {"spec.name"}))
+    blank = {
+        "spec": {field: [] if field in LIST_SPEC else "" for field in ("name", *FIELDS)},
+        "character": empty_character(),
+        "relationship": "", "common": "", "scenes": dict.fromkeys(SCENES, ""),
+        "jev": {"instruction": "", "criteria": dict.fromkeys(SCENES, "")},
+    }
+    for path in omitted:
+        node, key = _at(result, path)
+        default, _ = _at(blank, path)
+        node[key] = default[key]
+        result["sources"].pop(path, None)
+    age = result["character"]["age"]
+    if (age["policy"] == "calendar" and age["birth_date"] is None
+            or age["policy"] == "fixed" and age["fixed_age"] is None):
+        age["policy"] = "unspecified"
+    missing = [field for field in PERSONA_REQUIRED_FIELDS if not result["spec"][field].strip()]
+    return result, missing, omitted
+
+
 def include_profile_conflicts(card, draft, edited_fields=()):
     conflicts = {}
     for claim in draft["claims"]:
@@ -532,13 +557,15 @@ def validate_edit(card, previous, resolved_fields=()):
     return result
 
 
-def ordinary_preview(spec):
+def ordinary_preview(spec, *, sparse=False, relationship=""):
     """Native persona_expression block for a new ordinary v8 desktop character."""
     from .companion_im import INSTRUCTION
+    from .profile import RELATIONSHIP_PREFIX, persona_prompt_fields
     require(isinstance(spec, dict) and set(spec) == {"format_version", "name", *FIELDS}
             and type(spec["format_version"]) is int and spec["format_version"] == 1, "人设字段无效。")
     for field in ("name", *FIELDS):
         _spec_field(field, spec[field], blank=True)
     core = {k: spec[k] for k in sorted(set(spec) - {"format_version", "expression_style"})}
     ordered = {"format_version": 1, **core, "expression_style": spec["expression_style"]}
-    return INSTRUCTION + json.dumps(ordered, ensure_ascii=False)
+    return (INSTRUCTION + json.dumps(persona_prompt_fields(ordered) if sparse else ordered, ensure_ascii=False)
+            + (RELATIONSHIP_PREFIX + relationship if relationship else ""))

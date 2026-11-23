@@ -60,6 +60,8 @@ def usage(value):
     return result or None
 
 async def execute(model,body):
+    from .desktop_activation import admit, unauthorized
+    admit()
     from .chat import ModelCompletion,ModelError,model_tls_context
     from . import community
     if community.enabled():
@@ -94,6 +96,8 @@ async def execute(model,body):
             async with client.post(url,json=body,headers={'Authorization':'Bearer '+key,'Content-Type':'application/json'},
                     allow_redirects=False,proxy=proxy) as response:
                 status=response.status;raw=bytearray()
+                if status == 401:
+                    unauthorized(model)
                 async for part in response.content.iter_chunked(65536):
                     raw.extend(part)
                     if len(raw)>8*1024**2:raise ModelError('jev_response_too_large',diagnostics=diagnostics())

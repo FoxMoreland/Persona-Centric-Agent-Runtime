@@ -2,7 +2,7 @@
 import json
 from .archive import (binding, encoded, read_exact, resolve, scope,
                       reference_group, reference_selection, serialize_reference_block)
-from .models import LOCAL_USER_ID, identifier, timestamp
+from .models import LOCAL_USER_ID, RuntimeErrorBase, identifier, timestamp
 
 
 class ReferenceError(ValueError):
@@ -11,14 +11,34 @@ class ReferenceError(ValueError):
         self.manifest = manifest
 
 
-def capture(conn, event_id, selected_scope, target):
-    result = resolve(conn, selected_scope, target)
-    bound = binding(result)
+def capture(conn, event_id, selected_scope, target, *, max_input_chars=None):
+    from . import quote_context
+    if quote_context.is_quote(target):
+        sid = conn.execute('SELECT session_id FROM events WHERE id=?', (event_id,)).fetchone()[0]
+        bound = quote_context.freeze(conn, selected_scope['persona_id'], sid, event_id, target,
+                                     max_input_chars=max_input_chars)
+        version = quote_context.VERSION
+    else:
+        resolved = resolve(conn, selected_scope, target)
+        if selected_scope['channel'] == 'desktop':
+            from .desktop_messages import branch
+            sid = conn.execute('SELECT session_id FROM events WHERE id=?', (event_id,)).fetchone()[0]
+            if branch(conn, sid) and resolved.get('session_id') != sid:
+                raise RuntimeErrorBase('reference_unavailable')
+        bound = binding(resolved)
+        version = 1
     conn.execute('INSERT INTO input_references VALUES (?,?,?,?,?,?,?,?,?,?)',
-                 (event_id, selected_scope['persona_id'], LOCAL_USER_ID, selected_scope['channel'], selected_scope['bot'], selected_scope['peer'], encoded(target), encoded(bound), 1, timestamp()))
+                 (event_id, selected_scope['persona_id'], LOCAL_USER_ID, selected_scope['channel'], selected_scope['bot'], selected_scope['peer'], encoded(target), encoded(bound), version, timestamp()))
 
 
 def prepare(conn, turn):
+    from . import quote_context
+    try:
+        quote = quote_context.read(conn, turn)
+    except RuntimeErrorBase as error:
+        raise ReferenceError(str(error), {'references': [{'status': str(error)}]}) from error
+    if quote:
+        return quote_context.content(quote), quote_context.manifest(quote)
     rows = conn.execute('SELECT r.* FROM input_references r JOIN input_batch_members m ON m.event_id=r.event_id WHERE m.batch_id=? ORDER BY m.member_order', (turn.get('input_batch_id'),)).fetchall()
     manifest = {'references':[], 'turn_ids':[], 'reference_characters':0}
     groups = []; seen = set(); selections = []

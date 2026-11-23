@@ -8,9 +8,9 @@ from . import character, import_style, scene_policy
 from .archive import fingerprint
 from .character_embedding import private_directory, safe_path
 from .config import ConfigStore, atomic_json
-from .import_library import require
-from .import_card_fields import unresolved_conflicts
-from .models import PersonaSpec, RuntimeErrorBase, identifier
+from .import_library import FIELDS, require
+from .import_card_fields import ordinary_preview, publication_card, unresolved_conflicts
+from .models import PERSONA_REQUIRED_FIELDS, PersonaSpec, RuntimeErrorBase, identifier
 from .persona_management import active as require_live_persona
 from .private_personas import provider_identity
 from .profile import append_version
@@ -21,6 +21,10 @@ from .service import RuntimeService
 
 ORIGIN = "imported-role-card-v1"
 BINDING = "persona.import_card.published."
+
+
+def uses_sparse_card(db, persona_id):
+    return bool((scene_policy.read(db, BINDING + persona_id) or {}).get("omit_unresolved"))
 
 
 def _published_path(paths, version):
@@ -182,7 +186,46 @@ class CardPublisher:
         self.library = library
         self.jobs = card_jobs
 
-    def create(self, ident, revision, plan_id, card_revision, roles, operation_id, enable_scene=False, confirmed=False):
+    def review(self, ident, revision, plan_id, card_revision):
+        from .import_library import document_mode
+        from .models import ROLEPLAY
+        from .profile import head, persona_prompt_fields
+        from .roleplay_prompts import approved
+
+        with self.store.connection() as db, self.library.db() as private:
+            require(not scene_policy.read(db, import_style.REVOKED + ident), "来源已撤回。")
+            cards = self.jobs.material(ident, revision=revision, plan_id=plan_id, card_revision=card_revision, db=private)
+            mode = document_mode(private, ident)
+            story = approved(self.store.paths, "reply") if mode == ROLEPLAY else None
+            result = {}
+            for role, original in cards.items():
+                card, missing, omitted = publication_card(original)
+                spec, relation = card["spec"], card["relationship"]
+                saved = scene_policy.read(db, import_style.PREFIX + "created." + fingerprint([ident, role]))
+                if saved:
+                    try:
+                        require_live_persona(db, saved)
+                    except RuntimeErrorBase:
+                        result[role] = {"unavailable": True, "name": spec["name"]}
+                        continue
+                    spec = {"format_version": 1, **head(db, saved, "core")["data"],
+                            "expression_style": head(db, saved, "expression")["data"]["style"]}
+                    relation = head(db, saved, "relationship")["data"]["description"]
+                    missing, omitted = [], []
+                if mode == ROLEPLAY:
+                    from .roleplay import encoded
+                    material = {"persona": persona_prompt_fields({k: v for k, v in spec.items() if k != "format_version"})}
+                    if relation:
+                        material["relationship"] = relation
+                    prompt = (story[1]["reply"] + "\n" if story else "") + encoded(material)
+                else:
+                    prompt = ordinary_preview(spec, sparse=True, relationship=relation)
+                result[role] = {"name": spec["name"], "saved": saved, "missing": missing, "omitted": omitted,
+                                "prompt": prompt, "template_ready": mode != ROLEPLAY or story is not None}
+        return {"required": list(PERSONA_REQUIRED_FIELDS), "roles": result}
+
+    def create(self, ident, revision, plan_id, card_revision, roles, operation_id, enable_scene=False,
+               confirmed=False, omit_unresolved=False):
         require(confirmed is True, "请确认当前版本的角色卡。")
         require(type(revision) is int and type(card_revision) is int and revision > 0 and card_revision >= 0
                 and scene_policy.digest(ident) and scene_policy.digest(plan_id), "角色卡身份或修订无效。")
@@ -190,7 +233,9 @@ class CardPublisher:
                 and len(set(roles)) == len(roles), "请选择要创建的人物。")
         require(isinstance(operation_id,str) and 0 < len(operation_id) <= 128 and type(enable_scene) is bool,
                 "创建请求无效。")
-        signature = fingerprint([ORIGIN, ident, revision, plan_id, card_revision, roles, enable_scene])
+        require(type(omit_unresolved) is bool and not (omit_unresolved and enable_scene), "建卡方式无效。")
+        request = [ORIGIN, ident, revision, plan_id, card_revision, roles, enable_scene]
+        signature = fingerprint(request + ["omit_unresolved"] if omit_unresolved else request)
         op = import_style.PREFIX+"create."+operation_id
         people = []
         with self.store.connection(write=True) as db:
@@ -201,7 +246,8 @@ class CardPublisher:
             require(not scene_policy.read(db,import_style.REVOKED+ident), "来源已撤回。")
             with self.library.db() as private:
                 private.execute("BEGIN IMMEDIATE")
-                people = self.create_in_transaction(db, private, ident, revision, plan_id, card_revision, roles, enable_scene)
+                people = self.create_in_transaction(db, private, ident, revision, plan_id, card_revision, roles,
+                                                    enable_scene, omit_unresolved=omit_unresolved)
                 scene_policy.save(db,op,{"request":signature,"people":people})
                 # Keep the frozen card revision locked through the business commit.
                 db.commit()
@@ -211,19 +257,35 @@ class CardPublisher:
                 callback(pid)
         return people
 
-    def create_in_transaction(self, db, private, ident, revision, plan_id, card_revision, roles, enable_scene=False):
+    def create_in_transaction(self, db, private, ident, revision, plan_id, card_revision, roles, enable_scene=False,
+                              *, omit_unresolved=False):
         require(isinstance(roles, list) and 1 <= len(roles) <= 2 and all(r in ("A", "B") for r in roles)
                 and len(set(roles)) == len(roles) and type(enable_scene) is bool, "请选择要创建的人物。")
         require(not scene_policy.read(db, import_style.REVOKED + ident), "来源已撤回。")
-        people = []
+        require(type(omit_unresolved) is bool and not (omit_unresolved and enable_scene), "建卡方式无效。")
+        from dataclasses import replace
+        from .import_library import document_mode
+        from .models import ROLEPLAY
+        mode = document_mode(private, ident)
+        require(mode != ROLEPLAY or not enable_scene, "角色扮演使用独立正文模式。")
         cards = self.jobs.material(ident, revision=revision, plan_id=plan_id, card_revision=card_revision, db=private)
+        selected = []
         for role in roles:
             role_key = import_style.PREFIX+"created."+fingerprint([ident,role])
             require(not scene_policy.read(db,role_key), "这个说话人已创建角色。")
-            card = cards[role]
-            require(not unresolved_conflicts(card), role + " 的角色卡还有重大冲突，请先手动处理。")
-            spec = PersonaSpec.from_dict(card["spec"])
+            original = cards[role]
+            if omit_unresolved:
+                card, missing, _ = publication_card(original)
+                require(not missing, role + " 的角色卡缺少必填项目。")
+            else:
+                card = original
+                require(not unresolved_conflicts(card), role + " 的角色卡还有重大冲突，请先手动处理。")
+                require(all(card["spec"][field] for field in FIELDS), "请补齐角色卡的人设字段。")
+            spec = replace(PersonaSpec.from_dict(card["spec"]), chat_mode=mode)
             canon = character.validate_character(card["character"])
+            selected.append((role, role_key, card, fingerprint(original), spec, canon))
+        people = []
+        for role, role_key, card, card_hash, spec, canon in selected:
             pid = RuntimeService.insert_persona(db, spec)
             character.append(db,pid,canon,"user")
             if card["relationship"]:
@@ -232,8 +294,9 @@ class CardPublisher:
             material = _retain(self.store.paths,asset)
             char, profile = scene_policy.head(db,pid)
             binding = {"material":material,"revision":1,"document":ident,"plan":plan_id,"role":role,
-                       "source_revision":revision, "card_revision":card_revision, "card_hash":fingerprint(card),
-                       "character_version":char,"profile_sha256":profile}
+                       "source_revision":revision, "card_revision":card_revision, "card_hash":card_hash,
+                       "character_version":char,"profile_sha256":profile,
+                       **({"omit_unresolved": True} if omit_unresolved else {})}
             scene_policy.save(db,BINDING+pid,binding)
             if enable_scene:
                 providers, _ = _available(self.store,db,pid,binding,asset)
@@ -256,10 +319,12 @@ class CardPublisher:
         editable = bool(source and source["revision"] == saved["source_revision"])
         if editable and source["cards"] and source["card_revision"] != saved["card_revision"]:
             new_card = json.loads(source["cards"])[saved["role"]]
+            new_hash = fingerprint(new_card)
+            if saved.get("omit_unresolved"):
+                new_card, _, _ = publication_card(new_card)
             # Scene consent covers speech materials. A change to the ordinary persona
             # or its canon requires its own formal update before the two routes agree.
             same_persona = all(new_card[k] == asset[k] for k in ("spec","character","relationship"))
-            new_hash = fingerprint(new_card)
             if same_persona and new_hash != saved["card_hash"]:
                 asset = {**new_card, "document":saved["document"],"role":saved["role"],"plan":saved["plan"],
                          "card_revision":source["card_revision"]}
@@ -282,8 +347,9 @@ class CardPublisher:
     def info(self, persona_id):
         with self.store.connection() as db:
             require_live_persona(db, persona_id)
+            from .models import ROLEPLAY, persona_chat_mode
             binding = scene_policy.read(db,BINDING+persona_id)
-            if not binding:
+            if not binding or persona_chat_mode(db, persona_id) == ROLEPLAY:
                 return None
             with self.library.db() as private:
                 return self._review(db,private,persona_id,binding)[0]
@@ -292,6 +358,8 @@ class CardPublisher:
         require(confirmed is True and type(enabled) is bool, "请确认该角色的场景设置。")
         with self.store.connection(write=True) as db:
             require_live_persona(db,persona_id)
+            from .models import ROLEPLAY, persona_chat_mode
+            require(persona_chat_mode(db, persona_id) != ROLEPLAY, "角色扮演使用独立正文模式。")
             saved = scene_policy.read(db,BINDING+persona_id)
             require(saved and type(card_revision) is int and saved["revision"]==card_revision, "场景版本已变化。")
             with self.library.db() as private:

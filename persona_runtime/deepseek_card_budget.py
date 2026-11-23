@@ -4,6 +4,8 @@ from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
 
+from .android_platform import IS_ANDROID
+
 
 # https://api-docs.deepseek.com/api/list-models/
 FLASH_CONTEXT_TOKENS = 1_048_576
@@ -16,17 +18,31 @@ def input_limit(max_output_tokens):
     return (FLASH_CONTEXT_TOKENS - max_output_tokens) * 4 // 5
 
 
+def _verified_asset():
+    raw = _TOKENIZER_PATH.read_bytes()
+    if sha256(raw).hexdigest() != _TOKENIZER_SHA256:
+        raise ValueError('deepseek_flash_tokenizer_digest')
+    return raw
+
+
 @lru_cache(maxsize=1)
 def _tokenizer():
     try:
         from tokenizers import Tokenizer
 
-        raw = _TOKENIZER_PATH.read_bytes()
-        if sha256(raw).hexdigest() != _TOKENIZER_SHA256:
-            raise ValueError('deepseek_flash_tokenizer_digest')
-        return Tokenizer.from_buffer(raw)
+        return Tokenizer.from_buffer(_verified_asset())
     except (ImportError, OSError, ValueError) as error:
         raise ValueError('deepseek_flash_tokenizer_unavailable') from error
+
+
+@lru_cache(maxsize=1)
+def _android_token_counter():
+    from .android_platform import host
+
+    _verified_asset()
+    bridge = host()
+    bridge.openFlash(str(_TOKENIZER_PATH))
+    return bridge.countFlash
 
 
 def input_tokens(messages):
@@ -34,4 +50,9 @@ def input_tokens(messages):
     # The public V4.1 encoding for two text messages in non-thinking mode.
     prompt = (f'<｜begin▁of▁sentence｜><｜System｜>{system["content"]}'
               f'<｜User｜>{user["content"]}<｜Assistant｜></think>')
+    if IS_ANDROID:
+        try:
+            return int(_android_token_counter()(prompt))
+        except Exception as error:
+            raise ValueError('deepseek_flash_tokenizer_unavailable') from error
     return len(_tokenizer().encode(prompt, add_special_tokens=False).ids)

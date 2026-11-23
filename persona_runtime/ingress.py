@@ -424,6 +424,10 @@ class IngressService:
         if self.engine.draining:raise RuntimeErrorBase('service_draining')
         from .archive import target_spec
         if 'reference' in value:value={**value,'reference':target_spec(value['reference'],channel)}
+        from .quote_context import in_batch as has_quote, is_quote
+        quote = is_quote(value.get('reference'))
+        if quote and ('lookup_span' in value or 'public_task' in value):
+            raise RuntimeErrorBase('quote_cannot_request_public_lookup')
         cfg=self.config.load();bot=peer=''
         if channel=='qq':
             if 'expected_input_policy' in value:raise RuntimeErrorBase('desktop_buffer_only')
@@ -449,7 +453,14 @@ class IngressService:
             require_open(self.store.paths,cfg['instance_id'])
             # A v1 intent cannot be silently replayed through v2 after upgrade.
             if conn.execute('SELECT 1 FROM turns WHERE source_key=?',(channel+':'+rid,)).fetchone():raise RuntimeErrorBase('legacy_submission_exists')
-            pid=self.engine.service._persona(conn,value.get('persona_id'))['id']
+            person=self.engine.service._persona(conn,value.get('persona_id'))
+            pid=person['id']
+            from .models import ROLEPLAY
+            from .roleplay import TURN_MODE, admit as admit_roleplay
+            roleplay = person['spec'].get("chat_mode") == ROLEPLAY
+            if roleplay:
+                admit_roleplay(self.store.paths, channel, cfg["model"],
+                               public_lookup=any(key in value for key in ("public_task", "lookup_span")))
             pol=self.policy(conn,pid,channel)
             if 'expected_input_policy' in value and value['expected_input_policy']!=pol['id']:
                 raise RuntimeErrorBase('input_buffer_policy_changed')
@@ -466,15 +477,18 @@ class IngressService:
                 from .desktop_recovery import model_binding
                 policy["desktop_binding"] = model_binding(cfg)
                 from .private_reply_entry import selected
-                route = selected(conn,cfg['instance_id'],pid)
+                route = None if roleplay else selected(conn,cfg['instance_id'],pid)
                 if route:
                     policy["private_reply_instance"] = cfg['instance_id']
                     policy["private_reply_route"] = route
                 from .main_reply import admit, MARKER
-                if accepted_writer := admit(self.config,cfg,route):
+                if not roleplay and (accepted_writer := admit(self.config,cfg,route)):
                     policy[MARKER] = accepted_writer
                 from .desktop_turn_retry import admission_scope
                 policy["desktop_retry_contract"] = admission_scope(conn,self.config,pid,sid)
+            if roleplay:
+                policy.update(mode="legacy_per_message", reply_mode="legacy_full", context=dict(TURN_MODE),
+                              expression=expression_snapshot("legacy_full", pol["id"], version=1))
             from .en5_replay_scope import replay_request
             replay_request(self.store.paths,conn,value,pid,sid)
             if 'desktop_presentation' in value:policy['desktop_presentation']=value['desktop_presentation']
@@ -494,6 +508,13 @@ class IngressService:
             for row in conn.execute("SELECT * FROM input_batches WHERE persona_id=? AND channel=? AND bot=? AND peer=? AND state='collecting' AND scope_key!=? ORDER BY first_seq",(pid,channel,bot,peer,scope)).fetchall():self._seal(conn,dict(row),'scope_changed')
             row=held if manual else conn.execute("SELECT * FROM input_batches WHERE scope_key=? AND state='collecting'",(scope,)).fetchone()
             batch=dict(row) if row else None
+            if batch and 'reference' in value and (has_quote(conn, batch['id']) or quote and conn.execute('''
+                    SELECT 1 FROM input_references r JOIN input_batch_members m ON m.event_id=r.event_id
+                    WHERE m.batch_id=?''', (batch['id'],)).fetchone()):
+                if manual:
+                    raise RuntimeErrorBase('multiple_quote_references')
+                self._seal(conn, batch, 'capacity')
+                batch = None
             if manual:
                 count,chars=conn.execute('SELECT count(*),coalesce(sum(length(e.text)),0) FROM input_batch_members m JOIN events e ON e.id=m.event_id WHERE m.batch_id=?',
                                         (batch['id'] if batch else None,)).fetchone()
@@ -509,7 +530,7 @@ class IngressService:
             chars=0
             for bid in active_ids:chars+=conn.execute('SELECT coalesce(sum(length(e.text)),0) FROM input_batch_members m JOIN events e ON e.id=m.event_id WHERE m.batch_id=?',(bid,)).fetchone()[0]
             if (not batch and len(active_ids)>=10) or chars+len(text)>120000:raise RuntimeErrorBase('buffer_full')
-            if pol['mode']=='legacy_per_message' and conn.execute("SELECT count(*) FROM turns WHERE persona_id=? AND status='queued'",(pid,)).fetchone()[0]>=10:raise RuntimeErrorBase('queue_full')
+            if policy['mode']=='legacy_per_message' and conn.execute("SELECT count(*) FROM turns WHERE persona_id=? AND status='queued'",(pid,)).fetchone()[0]>=10:raise RuntimeErrorBase('queue_full')
             bid=batch['id'] if batch else identifier();eid=identifier();rawid=identifier();receipt=identifier()
             seq=conn.execute('SELECT coalesce(max(accepted_seq),0)+1 FROM ingress_receipts').fetchone()[0]
             if not batch:
@@ -534,7 +555,8 @@ class IngressService:
                 from .ordinary_materials import full_revision,history_access
                 full=channel=='desktop' and full_revision(self.store,conn,pid,sid,cfg['model'],'main')
                 with history_access(conn,sid,bool(full)):
-                    capture(conn,eid,archive_scope(pid,channel,bot,peer),value['reference'])
+                    capture(conn,eid,archive_scope(pid,channel,bot,peer),value['reference'],
+                            max_input_chars=cfg['model']['max_input_chars'])
             order=conn.execute('SELECT count(*)+1 FROM input_batch_members WHERE batch_id=?',(bid,)).fetchone()[0]
             conn.execute('INSERT INTO input_batch_members VALUES (?,?,?,?,?,?)',(bid,pid,LOCAL_USER_ID,receipt,eid,order))
             if manual:
@@ -550,7 +572,7 @@ class IngressService:
                 conn.execute('UPDATE input_batches SET last_epoch=?,deadline_epoch=?,revision=revision+1,updated_at=? WHERE id=?',(now,now+quiet if maximum is None else min(now+quiet,max_epoch),timestamp(),bid))
                 clock_updates[bid]=(first_mono,mono,deadline_mono)
                 chars=conn.execute('SELECT sum(length(e.text)) FROM input_batch_members m JOIN events e ON e.id=m.event_id WHERE m.batch_id=?',(bid,)).fetchone()[0]
-                if pol['mode']=='legacy_per_message' or order>=20 or chars>=12000:self._seal(conn,self._batch(conn,bid),'legacy' if pol['mode']=='legacy_per_message' else 'capacity')
+                if policy['mode']=='legacy_per_message' or order>=20 or chars>=12000:self._seal(conn,self._batch(conn,bid),'legacy' if policy['mode']=='legacy_per_message' else 'capacity')
             conn.execute('UPDATE ingress_receipts SET ingress_ms=? WHERE id=?',((time.perf_counter()-started)*1000,receipt))
             result=self._receipt(conn,conn.execute('SELECT * FROM ingress_receipts WHERE id=?',(receipt,)).fetchone())
             if desktop_ticket is not None:
@@ -688,6 +710,9 @@ class IngressService:
         if self.monotonic() >= self.next_settlement_check:
             self.next_settlement_check = self.monotonic() + 5
             self.engine._recover_saved_replies(pending_only=True)
+        from .desktop_activation import locked
+        if locked():
+            return
         with self.store.connection(write=True) as conn:
             for row in conn.execute("SELECT * FROM input_batches WHERE state='collecting' ORDER BY first_seq").fetchall():
                 clock=self.clocks.get(row['id'])

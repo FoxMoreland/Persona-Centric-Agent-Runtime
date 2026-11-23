@@ -178,20 +178,24 @@ def intent_binding(db, store, config, payload):
     reference = None
     if payload.get("reference"):
         from .ordinary_materials import full_revision,history_access
+        from . import desktop_messages, quote_context
         full=full_revision(store,db,pid,sid,config.load()['model'],'main')
         with history_access(db,sid,bool(full)):
-            result = resolve(db, selected, payload["reference"])
-        if result["status"] != "found":
-            raise RuntimeErrorBase("reference_unavailable")
-        reference = binding(result)
-        event_id = payload["reference"].get("id","")
-        if payload["reference"].get("kind")=="event" and event_id.startswith("imported."):
-            from .import_history import history_allowed
-            source = db.execute("SELECT session_id FROM events WHERE id=? AND persona_id=?",
-                                (event_id,pid)).fetchone()
-            with history_access(db,sid,bool(full)):
-                if not source or not history_allowed(db,source["session_id"],"dialogue"):
-                    raise RuntimeErrorBase("reference_unavailable")
+            if quote_context.is_quote(payload['reference']):
+                row = desktop_messages.resolve(db, pid, payload['reference'])
+                if not row or not desktop_messages.can_read(desktop_messages.segments(db, pid, sid), row):
+                    raise RuntimeErrorBase('reference_unavailable')
+                reference = fingerprint(row)
+            else:
+                result = resolve(db, selected, payload['reference'])
+                if result['status'] != 'found':
+                    raise RuntimeErrorBase('reference_unavailable')
+                reference = binding(result)
+                event_id = payload['reference'].get('id', '')
+                if payload['reference'].get('kind') == 'event' and event_id.startswith('imported.'):
+                    from .import_history import history_allowed
+                    if not history_allowed(db, result['session_id'], 'dialogue'):
+                        raise RuntimeErrorBase('reference_unavailable')
     policy = current(db, pid, "desktop", store)
     sources = read(db, "persona.import_history." + sid)
     return fingerprint([model_binding(config.load()), router, policy, snapshot(db,pid),

@@ -1,8 +1,10 @@
-"""Windows user-bound secret encryption; no plaintext fallback."""
+"""Platform-bound secret encryption; no plaintext fallback."""
 import base64
 import ctypes
 from ctypes import wintypes
 import os
+
+from .android_platform import IS_ANDROID, host
 
 
 class Blob(ctypes.Structure):
@@ -38,8 +40,18 @@ def _crypt(value: bytes, decrypt: bool) -> bytes:
 
 
 def protect(value: str) -> str:
+    if IS_ANDROID:
+        try:
+            return str(host().protectSecret(value))
+        except Exception as error:
+            raise OSError("Android credential encryption failed") from error
     return base64.b64encode(_crypt(value.encode("utf-8"), False)).decode("ascii")
 
 
 def unprotect(value: str) -> str:
+    if IS_ANDROID:
+        try:
+            return str(host().unprotectSecret(value))
+        except Exception as error:
+            raise OSError("Android credential decryption failed") from error
     return _crypt(base64.b64decode(value, validate=True), True).decode("utf-8")

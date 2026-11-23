@@ -163,7 +163,13 @@ class AutomaticMemory:
 
     def is_enabled(self,db,pid):
         p=self.engine.managed.policy(db,pid)['data']
-        return p['enabled'] and p.get('memory_automation',False)
+        if not (p['enabled'] and p.get('memory_automation',False)):
+            return False
+        from .models import ROLEPLAY, persona_chat_mode
+        if persona_chat_mode(db, pid) == ROLEPLAY:
+            from .roleplay_prompts import approved, official
+            return bool(official(self.engine.model()) and approved(self.store.paths, "memory_extract", "memory_verify"))
+        return True
 
     def payload(self,db,pid,sid,selected,turns,purpose='extract',previous=None):
         from .ordinary_materials import full_revision,history_access
@@ -175,12 +181,17 @@ class AutomaticMemory:
         model=self.engine.model()
         from .copy_session_memory import grant,local_fact
         from .private_reply_entry import PRIVATE_ROUTES,selected as route
-        ordinary = selected['channel']=='desktop' and route(db,self.engine.config.load()['instance_id']) in PRIVATE_ROUTES
+        from .models import ROLEPLAY, persona_chat_mode
+        roleplay = persona_chat_mode(db, pid) == ROLEPLAY
+        ordinary = not roleplay and selected['channel']=='desktop' and route(db,self.engine.config.load()['instance_id']) in PRIVATE_ROUTES
         revision=None if full else grant(self.store,db,pid,sid,model)
         p={'persona_id':pid,'user_id':LOCAL_USER_ID,'session_id':sid,'channel':selected['channel'],'scope':selected,
            'mode':'both','source_format':3,'rows':[],'events':[],'bindings':[],'previous':None,
            'existing_memories':facts(db,pid,selected,model,native_session=sid if revision or ordinary else None,ordinary=ordinary),'outdated_claims':[],'recorded_times':{},
            'automatic_memory':{'version':VERSION,'stage':'extract','purpose':purpose,'previous_fragment':previous}}
+        if roleplay:
+            from .roleplay_prompts import story_memory_contract
+            p['automatic_memory']['story_prompts'] = story_memory_contract(self.store.paths, model)
         if revision:p['automatic_memory']['copy_session_revision']=revision
         if ordinary:p['automatic_memory']['ordinary_session']=True
         if full:p['automatic_memory']['session_privacy_revision']=full
@@ -440,7 +451,7 @@ class AutomaticMemory:
                 from .persona_management import active
                 try:active(db,pid)
                 except RuntimeErrorBase:continue
-                if self.engine.managed.policy(db,pid)['id']!=policy['id']:continue
+                if self.engine.managed.policy(db,pid)['id']!=policy['id'] or not self.is_enabled(db,pid):continue
                 for b in page(db,'batches/'+pid,"SELECT rowid AS ordinal,* FROM memory_batches WHERE persona_id=? AND state IN ('extracting','verifying','waiting','blocked_input','history_paused') AND rowid>? ORDER BY rowid LIMIT ?",(pid,),16):
                     advance(db,'batches/'+pid,b['ordinal'])
                     batch=dict(b)

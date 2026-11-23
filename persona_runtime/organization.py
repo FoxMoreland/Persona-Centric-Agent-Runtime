@@ -186,8 +186,9 @@ class CandidateService:
 
 
 class OrganizationEngine:
-    def __init__(self, store, config, client, chat, *, foreground_only=False):
+    def __init__(self, store, config, client, chat, *, foreground_only=False, interactive_maintenance=False):
         self.foreground_only = foreground_only
+        self.interactive_maintenance = interactive_maintenance
         self.store, self.config, self.client, self.chat = store, config, client, chat
         self.summaries, self.candidates = SummaryService(store), CandidateService(store)
         self.draining = False
@@ -251,6 +252,9 @@ class OrganizationEngine:
         previous = latest_summary(conn, session_id) if mode != "candidates" and not rebuild else None
         model = self.model()
         memory_enabled = self.automatic and self.automatic.is_enabled(conn,persona_id)
+        from .models import ROLEPLAY, persona_chat_mode
+        if persona_chat_mode(conn, persona_id) == ROLEPLAY and not memory_enabled:
+            raise RuntimeErrorBase("roleplay_story_memory_required")
         if previous and (previous.get('source_refs_json') or not history_scope.allowed_summary(conn,previous,model,memory_enabled)):
             previous = None  # Typed sealed sources are not legacy generated semantics.
         if start_row is None:
@@ -530,16 +534,18 @@ class OrganizationEngine:
     async def worker(self):
         from .migration import migration_pending,background_allowed
         from .recall_runtime import RecallRuntime
+        from .desktop_activation import locked
         import logging
         if self.maintenance_stop.is_set() and not self.draining:self.maintenance_stop=asyncio.Event()
         stop=self.maintenance_stop
+        run_maintenance = not self.foreground_only or self.interactive_maintenance
         async def supervise(name,operation,interval,background=False):
             failures=0
             while not self.draining and not stop.is_set():
                 delay=interval
                 try:
-                    if not self.chat.draining and not migration_pending(self.store.paths) and (not background or (
-                            not self.foreground_only and background_allowed(self.store.paths))):
+                    if not self.chat.draining and not locked() and not migration_pending(self.store.paths) and (not background or (
+                            run_maintenance and background_allowed(self.store.paths))):
                         result=await operation()
                         if result is True and name in ('foreground','background'):
                             delay=0
@@ -561,11 +567,12 @@ class OrganizationEngine:
                ('foreground',lambda:self.managed.run_next('foreground'),.25,False),
                ('network_routes',self.managed.check_network,1,False)]
         if not self.foreground_only:
-            tasks.extend([('background',lambda:self.managed.run_next('background'),.5,True),
-                          ('proactive',lambda:local_maintenance(self.proactive.tick),1,True),
-                          ('knowledge',self.knowledge.tick,.5,True),
+            tasks.extend([('proactive',lambda:local_maintenance(self.proactive.tick),1,True),
                           ('daily',lambda:local_maintenance(self.schedule.daily_tick),30,True),
-                          ('incremental',lambda:local_maintenance(self.schedule.incremental_tick),30,True),
+                          ('incremental',lambda:local_maintenance(self.schedule.incremental_tick),30,True)])
+        if run_maintenance:
+            tasks.extend([('background',lambda:self.managed.run_next('background'),.5,True),
+                          ('knowledge',self.knowledge.tick,.5,True),
                           ('index',lambda:local_maintenance(RecallRuntime(self.store).maintain,pages=1),2,True)])
             tasks.append(('character_index',lambda:local_maintenance(self.chat.cognitive.characters.maintain),10,True))
             if self.automatic:

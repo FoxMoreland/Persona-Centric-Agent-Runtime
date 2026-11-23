@@ -85,8 +85,10 @@ class ImportAnalysisV2:
         root = self.library.root
         return safe_path(root.parent.parent, root / name)
 
-    def _configuration(self):
-        raw, release = contract_source(self.library, "profile")
+    def _configuration(self, mode=None):
+        from .models import PRIVATE_CHAT, ROLEPLAY
+        mode = mode or PRIVATE_CHAT
+        raw, release = contract_source(self.library, "profile", mode)
         if raw is None:
             contract, checksum = {}, None
         else:
@@ -102,6 +104,10 @@ class ImportAnalysisV2:
             if release:
                 model = release_model(model)
             require_generation_provider(model)
+        if mode == ROLEPLAY:
+            from .roleplay_prompts import official
+            if not official(model):
+                contract, checksum, release = {}, None, None
         identity = {
             "version": VERSION, "configured": bool(contract), "contract_sha256": checksum,
             "model": model.get("name"), "base_url": model["base_url"], "max_tokens": model["max_tokens"],
@@ -109,6 +115,8 @@ class ImportAnalysisV2:
         }
         if release:
             identity["prompt_release"] = release
+        if mode == ROLEPLAY:
+            identity["chat_mode"] = mode
         return contract, model, identity
 
     @staticmethod
@@ -116,14 +124,14 @@ class ImportAnalysisV2:
         overhead = len(encode(_packet("A", "0" * 64, []))) - 2
         return model["max_input_chars"] - len(system) - overhead
 
-    def settings(self):
-        contract, model, identity = self._configuration()
+    def settings(self, mode=None):
+        contract, model, identity = self._configuration(mode)
         capacity = self._capacity(model, contract.get("extract_system", ""))
         require(capacity >= 2, "模型输入容量不足。")
         return identity, capacity
 
     def _frozen(self, plan):
-        contract, model, current = self._configuration()
+        contract, model, current = self._configuration(plan.get("settings", {}).get("chat_mode"))
         require(plan.get("settings") == current, "模型参数或提炼合同已变化，请重新规划。")
         return contract, model, current["contract_sha256"]
 

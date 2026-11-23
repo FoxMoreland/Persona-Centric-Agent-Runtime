@@ -42,7 +42,9 @@ def messages(payload):
                     quote=source.pop('quote');start=events[source['source_id']].index(quote)
                     source.update(start=start,end=start+len(quote))
         data['proposals']=proposals
-    return [{'role':'system','content':VERIFY if review else EXTRACT},{'role':'user','content':encoded(data)}]
+    story = payload['automatic_memory'].get('story_prompts')
+    system = story['verify' if review else 'extract'] if story else (VERIFY if review else EXTRACT)
+    return [{'role':'system','content':system},{'role':'user','content':encoded(data)}]
 
 
 def fail():raise RuntimeErrorBase('automatic_memory_invalid_output')
@@ -84,6 +86,8 @@ def parse(payload,text,audit=None):
     except (ValueError,TypeError):fail()
     if not isinstance(data,dict) or type(data.get('format_version')) is not int or data['format_version']!=3:fail()
     stage=payload['automatic_memory']['stage']
+    roleplay = bool(payload['automatic_memory'].get('story_prompts'))
+    categories = ('shared_experience', 'world_knowledge') if roleplay else ('user_fact', 'preference', 'shared_experience')
     if stage!='verify':
         if set(data)!={'format_version','summary','candidates'}:fail()
         ids=set()
@@ -97,8 +101,8 @@ def parse(payload,text,audit=None):
                 if item['id'] in ids:fail()
                 ids.add(item['id'])
                 summary_index=index if stage=='extract' and kind=='summary' else None
-                quotes(payload,item['sources'],user=kind=='candidates',summary_index=summary_index,audit=audit)
-                if kind=='candidates' and item['category'] not in ('user_fact','preference','shared_experience'):fail()
+                quotes(payload,item['sources'],user=kind=='candidates' and not roleplay,summary_index=summary_index,audit=audit)
+                if kind=='candidates' and item['category'] not in categories:fail()
         if sum(len(i['text']) for i in data['summary'])>3000:fail()
         if payload['automatic_memory']['purpose']=='repair' and data['candidates']:fail()
     else:
@@ -118,11 +122,12 @@ def parse(payload,text,audit=None):
                     item[k]=proposal.get(k,'unresolved')
                     if audit is not None:audit['normalizations'].append({'path':'decisions.'+item['id']+'.'+k,'reason':'nonpublishing_nullable_label'})
                 if not isinstance(item[k],str) or not item[k].strip() or len(item[k])>500:fail()
-            quotes(payload,item['sources'],user=kind=='candidates',empty=action in ('omit','quarantine'))
+            quotes(payload,item['sources'],user=kind=='candidates' and not roleplay,empty=action in ('omit','quarantine'))
             target=item['target_memory_id']
             if action in ('revise','temporal'):
                 if target not in memories or kind!='candidates':fail()
             elif target is not None:fail()
             start=date(item['effective_at']);end=date(item['valid_until'])
+            if roleplay and (start is not None or end is not None):fail()
             if start and end and datetime.fromisoformat(end)<=datetime.fromisoformat(start):fail()
     return data
