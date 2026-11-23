@@ -32,6 +32,16 @@ PCAR（Persona-Centric Agent Runtime）是一款开源桌面 AI 伴侣工作台�
 
 [跨会话记忆验收](docs/acceptance/M4-补验跟踪.md#已通过范围) · [旧聊天接续盲评](docs/acceptance/LT-13-外部历史接续验收.md)
 
+### 一万条旧消息，也能接着聊
+
+在 G‑Auto 的桌面验收中，我们拿 **10,000 条真实聊天消息**来测试工作台。切换到旧会话时，百次测量里有 95% 在约 **0.22 秒**内就能看到内容。另一次测试把 **10,000 轮本机对话与 50,000 条导入消息**放在同一个工作台里，95% 的切换仍在约 **0.40 秒**内可读。这些时间衡量的是打开会话，模型回复还要另等生成。
+
+如果你想接回一件很久以前聊过的事，可以直接引用那条旧消息，PCAR 会把它前后的对话一并带给角色。在两次引用 50 轮以前旧消息的真实对话补验中，角色 **两次都接对了旧话题**。直接提起旧话题的另三次测试里，有两次找回了正确内容。
+
+我们还做了一次自然跨夜测试。关机约 12 小时，第二天打开同一个会话接着聊，关机前后的 **17 轮回复全部完整显示**。这两项桌面验收已通过，G‑Auto 的其余场景继续逐项验证。
+
+[长历史与精确引用验收](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/blob/development/v0.5/docs/acceptance/R01-v0.5-开发验收.md) · [跨夜续聊验收](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/blob/development/v0.5/docs/acceptance/G-AUTO-总验收对账-20261122.md)
+
 ## 下载与开始
 
 ### 安卓社区版 1.1.1
