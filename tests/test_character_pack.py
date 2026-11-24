@@ -217,10 +217,8 @@ class CharacterPackTests(unittest.TestCase):
         copied = self.inbox.restore(handle, preview['digest'], 'first-turn')
         pid, sid = copied['id'], copied['session_id']
         RuntimeService(self.receiver).use_persona(pid)
-        with self.receiver.connection(write=True) as db:
-            self.use(db, self.receiver, sid)
+        with self.receiver.connection() as db:
             mid = db.execute('SELECT id FROM memories WHERE persona_id=?', (pid,)).fetchone()[0]
-        event = import_history.page(self.receiver, pid, sid, query='601')['rows'][0]
 
         async def run():
             client = ReplyDouble()
@@ -245,6 +243,23 @@ class CharacterPackTests(unittest.TestCase):
                                                   '101', identifier(), offer['body_hash'])
                     return engine.get(tid)
 
+                original = ingress.accept({'channel':'desktop','persona_id':pid,'session_id':sid,
+                                            'desktop_presentation':CONTRACT,'request_id':identifier(),'text':'877'})
+                await asyncio.wait_for(engine.wait(), 10)
+                first = acknowledge(original['turn_id'])
+                self.assertEqual(first['status'], 'completed', first['error_code'])
+                with self.receiver.connection(write=True) as db:
+                    from persona_runtime.archive_query import Budget
+                    from persona_runtime.archive_corpus import capture_connection
+                    spec = {'scope':scope(pid,'desktop'),'session_id':sid,'window':'recent_50'}
+                    def history():
+                        return [doc['text'] for doc in capture_connection(db,spec,Budget(5))['documents']
+                                if doc['coverage'] == 'imported_transcript']
+                    self.assertEqual(history(), [])
+                    self.use(db, self.receiver, sid)
+                    self.assertEqual(sorted(history()), ['601', '602'])
+                event = import_history.page(self.receiver, pid, sid, query='601')['rows'][0]
+
                 item = ingress.accept({'channel': 'desktop', 'persona_id': pid, 'session_id': sid,
                                        'desktop_presentation': CONTRACT, 'request_id': identifier(), 'text': '877'})
                 await asyncio.wait_for(engine.wait(), 10)
@@ -264,7 +279,50 @@ class CharacterPackTests(unittest.TestCase):
                 saved = acknowledge(quote['turn_id'])
                 self.assertEqual(saved['status'], 'completed', saved['error_code'])
                 self.assertIn('601', json.dumps(client.calls[-1], ensure_ascii=False))
+                with self.receiver.connection(write=True) as db:
+                    key = import_history.META + sid
+                    scene_policy.save(db,key,dict(scene_policy.read(db,key),providers={},withdrawn=True))
+                    self.assertEqual(history(), [])
+                after = ingress.accept({'channel':'desktop','persona_id':pid,'session_id':sid,
+                                         'desktop_presentation':CONTRACT,'request_id':identifier(),'text':'879'})
+                await asyncio.wait_for(engine.wait(), 10)
+                last = acknowledge(after['turn_id'])
+                self.assertEqual(last['status'], 'completed', last['error_code'])
             finally:
                 await engine.scene.close()
                 engine.cognitive.characters.close()
         asyncio.run(run())
+
+    def test_purge_removes_live_role_and_preserves_other_copy(self):
+        from persona_runtime.persona_management import PersonaManagement
+        from persona_runtime.workbench_appearance import image_path
+        with self.sender.connection(write=True) as db:
+            sid, turns = self.transcript(db, 701)
+            self.memory(db,turns[0]['user_event_id'],'966')
+        handle, preview = self.send([sid],sid)
+        a = self.inbox.restore(handle,preview['digest'],'purge-a')
+        b = self.inbox.restore(handle,preview['digest'],'purge-b')
+        RuntimeService(self.receiver).use_persona(a['id'])
+        avatar = image_path(self.receiver.paths,a['id'],'avatar')
+        avatar.parent.mkdir(parents=True,exist_ok=True)
+        avatar.write_bytes(b'1')
+        manager = PersonaManagement(self.receiver)
+        rev=manager.inspect(a['id'])['revision']
+        with self.receiver.connection(write=True) as db:
+            db.execute("UPDATE turns SET status='queued' WHERE session_id=?",(a['session_id'],))
+        with self.assertRaisesRegex(RuntimeErrorBase,'persona_has_pending_work'):
+            manager.purge(a['id'],rev,a['id'],'delete')
+        with self.receiver.connection(write=True) as db:
+            db.execute("UPDATE turns SET status='completed' WHERE session_id=?",(a['session_id'],))
+        result=manager.purge(a['id'],rev,a['id'],'delete')
+        self.assertEqual(result['current_persona_id'],b['id'])
+        self.assertTrue(result['storage_reclaimed'])
+        self.assertFalse(avatar.exists())
+        self.assertTrue(manager.purge(a['id'],rev,a['id'],'delete')['already_applied'])
+        with self.receiver.connection() as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM personas WHERE id=?',(a['id'],)).fetchone())
+            self.assertIsNone(db.execute('SELECT 1 FROM memories WHERE persona_id=?',(a['id'],)).fetchone())
+            self.assertIsNone(db.execute('PRAGMA foreign_key_check').fetchone())
+        history=import_history.page(self.receiver,b['id'],b['session_id'])['rows']
+        self.assertEqual([row['text'] for row in history],['701','702'])
+        self.assertEqual(self.inbox.preview(handle)['digest'],preview['digest'])

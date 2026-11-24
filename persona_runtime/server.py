@@ -717,7 +717,7 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
             "persona.list": service.list_personas, "persona.show": service.show_persona,
             "persona.use": service.use_persona, "relationship.set": service.set_relationship,
             **{"persona."+name:getattr(PersonaManagement(store),name)
-               for name in ('inspect','clone','trash','restore')},
+               for name in ('inspect','clone','trash','restore','purge')},
             "relationship.show": service.show_relationship, "session.list": service.list_sessions,
             "session.show": service.show_session, "session.select": engine.session,
             "event.append": service.append_event,
@@ -742,6 +742,9 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         if action in ('character.index-status','character.index-prepare'):
             handler=engine.cognitive.characters.status if action.endswith('status') else engine.cognitive.characters.request_prepare
             return web.json_response(await asyncio.to_thread(handler,**args))
+        if action == 'persona.purge':
+            from .organization import local_maintenance
+            return web.json_response(await local_maintenance(handlers[action],**args))
         if action in ('character.update','character.restore','character.import'):
             return web.json_response(await asyncio.to_thread(handlers[action],**args))
         return web.json_response(handlers[action](**args))
