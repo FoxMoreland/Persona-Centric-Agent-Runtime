@@ -236,8 +236,8 @@ def page(store,persona_id,session_id,before=None,limit=80,query=None,after=None)
         direction="seq>? ORDER BY seq ASC" if after is not None else "seq<? ORDER BY seq DESC"
         rows = db.execute("""SELECT id,seq,role,text,created_at,EXISTS(
             SELECT 1 FROM source_exclusions x WHERE x.event_id=e.id) AS excluded FROM events e WHERE session_id=?
-            AND id LIKE 'imported.%' AND """+direction+" LIMIT ?",
-            (session_id,after or before or 2**63-1,cap+1)).fetchall()
+            AND id LIKE 'imported.%' AND (?=0 OR length(e.text)>0) AND """+direction+" LIMIT ?",
+            (session_id,bool(meta.get('portable_package')),after or before or 2**63-1,cap+1)).fetchall()
         origins = {}
         out = []
         cursor = None
@@ -250,7 +250,17 @@ def page(store,persona_id,session_id,before=None,limit=80,query=None,after=None)
             source = origins[tid].get("sources", {}).get(event["id"],{})
             event["referenceable"] = can_use and event["role"]!="note" and not event.pop("excluded",False)
             event.pop("excluded",None)
-            event["source"] = {k:v for k,v in source.items() if k != "original"}
+            event["source"] = {k:v for k,v in source.items() if k not in ("original", "quote")}
+            if source.get('quote') and not meta.get('withdrawn'):
+                from .desktop_messages import MESSAGE_KIND
+                quote = source['quote']
+                anchor = db.execute("""SELECT e.session_id,e.text,x.reason FROM events e
+                    LEFT JOIN source_exclusions x ON x.event_id=e.id WHERE e.id=? AND e.persona_id=? AND e.user_id=?""",
+                                    (quote['id'], persona_id, LOCAL_USER_ID)).fetchone() if quote['id'] else None
+                if not quote['id'] or anchor and not anchor['reason'] and quote['text'] in anchor['text']:
+                    event['quote'] = {'text': quote['text']}
+                    if anchor and history_allowed(db,anchor['session_id'],'dialogue'):
+                        event['quote'].update(target={'kind': MESSAGE_KIND, 'id': quote['id']}, session_id=anchor['session_id'])
             event["text"] = source.get("original",event["text"])
             event["role"] = source.get("role",event["role"])
             event["created_at"] = source.get("time",None if event["created_at"]==meta["imported_at"] else event["created_at"])
