@@ -6,13 +6,13 @@ PCAR 的远期目标是一个以人格为中心的运行环境：人物有持续
 
 “超级大肥鱼”是社区传播主题。大肥鱼沿用既有鲸鱼娘形象，运行时也可以承载其他人格。模型与工具提供能力，身份和经历由 PCAR 持有。
 
-2026-11-22 核对。**v0.4 Windows 公开桌面版（程序 0.4.0，结构 36）**已纳入新版工作台及已审私聊功能。[研发进度](../STATUS.md)
+**PCAR 正式版 1.3.0** 为 Windows 和 Android 带来会话命名、历史加载进度及引用记忆。**v0.4 Windows 桌面版**的已审私聊与部署记录继续保留。[正式版更新说明](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/pcar-v1.3.0) · [研发进度](../STATUS.md)
 
 ## 当前基础：人物与经历有地方保存
 
 Windows 工作台提供人物与关系版本、会话历史、长期记忆、按需联网及备份迁移。[v0.4 发行页](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/v0.4)
 
-自动记忆按角色开启，联网和整理各有配置条件；后台随工作台运行，QQ 接入暂停。通过 Agent 准备环境并配置模型服务后，按[用户入门](../user/getting-started.md)开始体验。
+正式版默认开启自动记忆，可按角色暂停。联网和整理遵循会话资料用途与接收方设置，后台随工作台运行。QQ 接入暂停。[正式版使用指南](../user/社区版.md)
 
 桌面版支持 DeepSeek 原生检索、按角色启用的召回及场景发言。已审角色完成本机部署验收。场景发言的配置和回退见[场景发言接入与回退](../expression/E.N6-场景发言接入与回退.md)。
 

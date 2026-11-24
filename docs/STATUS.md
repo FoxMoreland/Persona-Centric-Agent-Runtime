@@ -1,5 +1,9 @@
 # 当前项目状态
 
+## PCAR 正式版 1.3.0
+
+2026-11-24，Windows 与 Android 同批发布会话命名、历史加载进度和精确引用的邻近记忆优先召回，并修复长引用布局。内部运行时为 0.5.1，业务库结构 36。开发继续在 development/v0.5 分支推进。[正式版发行页](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/pcar-v1.3.0)
+
 ## v0.4 Windows 发行
 
 自定义头像与聊天背景、界面强调色、原回合重试、签收版搜索及 OpenRouter 正文选择合入 0.4.0。公开包的默认正文为 DeepSeek V4 Pro。作者在两个隔离窗口核对首条回复后，认为本次 DeepSeek 的真人感更强。
