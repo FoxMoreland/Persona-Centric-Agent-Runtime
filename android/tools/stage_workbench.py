@@ -30,9 +30,11 @@ def render(source, mobile, output):
         '  <script src="android-transport.js"></script>\n  <script src="appearance.js"></script>', 1)
     page = page.replace("</head>", '  <link rel="stylesheet" href="android.css">\n</head>', 1)
     page = page.replace("</body>", '  <script src="persona_import.js"></script>\n'
+                        '  <script src="announcements.js"></script>\n'
                         '  <script src="android-ui.js"></script>\n</body>', 1)
     (destination / "index.html").write_text(page, encoding="utf-8")
     shutil.copyfile(source / "persona_import.js", destination / "persona_import.js")
+    shutil.copyfile(source / "announcements.js", destination / "announcements.js")
     for name in ("android-transport.js", "android-ui.js", "android.css"):
         shutil.copyfile(mobile / name, destination / name)
 

@@ -10,6 +10,7 @@ from .knowledge_routing import configured_model
 from .models import LOCAL_USER_ID, RuntimeErrorBase, identifier, timestamp
 from .security import protect, unprotect
 from .sessions import owned
+from . import community_lookup
 
 PROTOCOL = 'desktop-session-full-flow-v1'
 PUBLIC_SCOPE = 'desktop-public-lookup-scope-v1'
@@ -138,6 +139,9 @@ def status(store, config, persona_id, session_id):
             public['upgrade']=public_scope(db,config,cfg['instance_id'],persona_id,session_id,state,
                                            protocol=PUBLIC_QUESTION_SCOPE)
         result=state | {'models':models, 'candidate':bool(installed), 'public_lookup':public}
+        from . import community
+        if community.enabled():
+            result["community_search"] = community_lookup.state(db, config, cfg, persona_id, session_id)[0]
         from . import main_reply
         if main_reply.settings(cfg)['active']==main_reply.HYDROGEN:
             result['main_reply_writer']=writer_consent(db,config,cfg,persona_id,session_id)
@@ -222,11 +226,14 @@ def _record(db, config, cfg, pid, sid, rev, enabled, destinations, op, signature
 
 def update(store, config, persona_id, session_id, enabled, revision, recipient_hash, operation_id, protocol):
     if (type(enabled) is not bool or type(revision) is not int or revision < 0
-            or protocol not in (PROTOCOL,PUBLIC_SCOPE,PUBLIC_ATTRIBUTE_SCOPE,PUBLIC_QUESTION_SCOPE)
+            or protocol not in (PROTOCOL,PUBLIC_SCOPE,PUBLIC_ATTRIBUTE_SCOPE,PUBLIC_QUESTION_SCOPE,community_lookup.PROTOCOL)
             or not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 200):
         raise RuntimeErrorBase('invalid_privacy_operation')
     with store.connection(write=True) as db:
         cfg = config.load()
+        if protocol == community_lookup.PROTOCOL:
+            return community_lookup.update(db, config, cfg, persona_id, session_id, enabled,
+                                           revision, recipient_hash, operation_id)
         dest = recipients(config, cfg)
         state = current(db, config, cfg, persona_id, session_id, dest)
         if protocol!=PROTOCOL:

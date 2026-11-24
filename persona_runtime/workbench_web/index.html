@@ -146,6 +146,10 @@
     .stage { padding: 26px; min-height: 100dvh; display: grid; place-items: center; }
     .window { position: relative; display: grid; grid-template-rows: 53px minmax(0, 1fr); width: min(1388px, 100%); height: min(884px, calc(100dvh - 52px)); min-height: 440px; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 10px 30px var(--shadow); overflow: hidden; }
     .titlebar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 20px 0 13px; border-bottom: 1px solid var(--line); background: var(--titlebar); z-index: 3; }
+    #announcement-open { margin-inline-start: auto; flex-shrink: 0; }
+    .announcement-entry + .announcement-entry { border-top: 1px solid var(--line); padding-block-start: 12px; }
+    .announcement-entry ul { padding-inline-start: 1.4em; }
+    .announcement-entry li + li { margin-block-start: 6px; }
     .brand, .title-actions { display: flex; align-items: center; gap: 10px; }
     .brand strong { font-size: 16px; letter-spacing: .065em; }
     .demo-label { color: var(--muted); font-size: 12px; border-left: 1px solid var(--line-strong); padding-left: 10px; white-space: nowrap; }
@@ -342,6 +346,7 @@
     <div class="window">
       <header class="titlebar">
         <div class="brand"><button id="sidebar-toggle" class="icon-button" aria-label="收起侧栏" aria-controls="sidebar" aria-expanded="true"><svg class="icon" aria-hidden="true"><use href="#i-sidebar"/></svg></button><strong>PCAR</strong><span class="demo-label">交互 Demo</span></div>
+        <button class="button ghost" id="announcement-open" type="button" hidden>公告</button>
         <div class="title-actions"><button class="button ghost" id="sample-mode">体验日常聊天</button></div>
       </header>
       <div class="layout" id="layout">
@@ -402,6 +407,7 @@
             <form class="composer off" id="composer" autocomplete="off">
               <textarea id="message" rows="1" aria-label="输入消息" placeholder="准备完成后即可输入消息" maxlength="1500" disabled></textarea>
               <button class="button primary" id="send" disabled>发送</button>
+              <button class="button" type="button" id="community-search" hidden disabled>联网查找</button>
               <button class="button" type="button" id="long-reply-send" title="发送并明确请求完整长文" hidden disabled>请求长文</button>
             </form>
           </div>
@@ -410,6 +416,23 @@
       <div class="toast" id="toast" role="status" hidden></div>
     </div>
   </div>
+  <dialog id="announcement-dialog" aria-labelledby="announcement-title">
+    <div class="dialog-head"><h2 id="announcement-title">公告</h2></div>
+    <div class="dialog-body">
+      <label id="announcement-filters" class="field" hidden>分类
+        <select id="announcement-filter">
+          <option value="all">全部</option><option value="release">版本更新</option><option value="notice">作者通知</option>
+        </select>
+      </label>
+      <div id="announcement-list" class="fields"></div>
+      <p id="announcement-status" class="hint" role="status"></p>
+    </div>
+    <div class="dialog-foot">
+      <button id="announcement-refresh" class="button" type="button" hidden>刷新</button>
+      <button id="announcement-center" class="button" type="button" hidden>查看公告</button>
+      <button id="announcement-ack" class="button primary" type="button">知道了</button>
+    </div>
+  </dialog>
   <dialog id="dialog" aria-labelledby="dialog-title">
     <form id="dialog-form" autocomplete="off">
       <div class="dialog-head"><h2 id="dialog-title"></h2><button class="icon-button" id="dialog-close" type="button" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>

@@ -16,7 +16,7 @@ final class LocalPage extends WebViewClient {
     static final String ORIGIN = "https://appassets.androidplatform.net";
     static final String PAGE = ORIGIN + "/workbench/index.html";
     private static final Set<String> ASSETS = Set.of("index.html", "appearance.js", "base.js", "persona_import.js",
-            "android-transport.js", "android-ui.js", "android.css");
+            "android-transport.js", "android-ui.js", "android.css", "announcements.js");
     private final WebViewAssetLoader loader;
 
     LocalPage(Context context) {

@@ -167,7 +167,7 @@ def composer_span(store,config,request_id,task,*,batch):
     """Preserve old receipts while accepting a legacy composer on the v3 route."""
     from .private_reply_entry import selected,RESEARCH
     from .knowledge_native import public_task
-    if not isinstance(task,dict) or task.get('request_search') is not True:
+    if not isinstance(task,dict) or task.get('request_search') is not True or "community_consent" in task:
         return None
     with store.connection() as db:
         if batch:

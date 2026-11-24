@@ -76,6 +76,16 @@ class KnowledgeProcessing:
         from .knowledge_service import read,POLICY
         from .private_personas import guard_cloud_dispatch
         current=read(db,'processing.'+turn['persona_id'],self.defaults())
+        if "community_consent" in inputs:
+            from .community_lookup import require_consent, task_for_turn
+            task = task_for_turn(db, turn) or {}
+            if (stage != "conversation_search" or current != policy or
+                    inputs != {"query": task.get("question"), "community_consent": task.get("community_consent")}):
+                raise RuntimeErrorBase("native_public_task_scope_changed")
+            require_consent(db, self.engine.config, turn["persona_id"], turn["session_id"], inputs["community_consent"])
+            guard_cloud_dispatch(self.store, turn["persona_id"], "knowledge_native",
+                                 self.engine.config.load()["native_web_model"], db=db)
+            return
         reader=read(db,'policy.'+turn['persona_id'],POLICY)['data']
         web=read(db,'web.policy.'+turn['persona_id'],{'enabled':False})['data']
         if current!=policy or not reader['enabled'] or not web.get('enabled') or turn['channel'] not in reader['channels'] or not current['data'].get('enabled') or current['data'].get('prompt_profile')!=PROFILE:
@@ -227,6 +237,13 @@ class KnowledgeProcessing:
         if turn['channel']=='test' or not turn.get('persona_id'):
             return {'state':'disabled','evidence':[]}
         from .knowledge_service import read
+        from .community import enabled as community_enabled
+        from .community_lookup import task_for_turn
+        if community_enabled():
+            with self.store.connection() as db:
+                task = task_for_turn(db, turn)
+            if task is not None:
+                return self._community_search(turn, task)
         with self.store.connection() as db:
             retired=[row[0] for row in db.execute("SELECT id FROM organization_tasks WHERE json_extract(payload_json,'$.knowledge_processing.root_turn_id')=? AND json_extract(payload_json,'$.knowledge_processing.stage') IN ('conversation_search_plan','conversation_organize')",(turn['id'],))]
             if retired:
@@ -239,6 +256,35 @@ class KnowledgeProcessing:
                     'sources':copy.deepcopy(record.get('sources',[])),'organized':copy.deepcopy(record.get('organized',{})),
                     'retrieval':copy.deepcopy(record.get('retrieval',{})),'legacy_receipt_reused':True}
         return self.native.prepare(turn)
+
+    def _community_search(self, turn, task):
+        from .knowledge_native_memory import apply_states
+
+        attempt = None
+        error = None
+        sources = []
+        pid = turn["persona_id"]
+        try:
+            result, attempt = self._call(turn, "conversation_search", {
+                "query": task["question"], "community_consent": task["community_consent"]})
+            for source in result.get("sources", []):
+                sources.append(source | {"id": fingerprint([pid, source["url"], source["content"], source["summary"]])})
+        except RuntimeErrorBase as exc:
+            attempt = getattr(exc, "task_id", None)
+            error = str(exc)
+        with self.store.connection(write=True) as db:
+            sources, _ = apply_states(db, pid, sources, {})
+            outcome = ("unconfirmed" if error and ("unconfirmed" in error or "unknown" in error) else
+                       "unavailable" if error else "completed")
+            retrieval = {"executor": "community-explicit-search-v1", "needed": True, "used_previous": False,
+                         "material_acquired": bool(sources), "search_outcome": outcome,
+                         "task_ids": [attempt] if attempt else [], "errors": [error] if error else []}
+            record = {"persona_id": pid, "session_id": turn["session_id"], "channel": turn["channel"],
+                      "root_turn_id": turn["id"], "sources": sources, "organized": {}, "retrieval": retrieval}
+            db.execute("INSERT OR REPLACE INTO knowledge_control VALUES(?,?)",
+                       ("knowledge.conversation.record." + turn["id"], json.dumps({"revision":0,"data":record})))
+        return {"mode": PROFILE, "state": "ready" if sources else "unavailable", "record_id": turn["id"],
+                "record_hash": fingerprint(record), "sources": sources, "organized": {}, "retrieval": retrieval}
     def show(self,pid,turn_id):
         with self.store.connection() as db:
             row=db.execute('SELECT value FROM knowledge_control WHERE key=?',('knowledge.conversation.record.'+turn_id,)).fetchone()

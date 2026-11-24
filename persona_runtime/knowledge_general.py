@@ -67,6 +67,9 @@ def validate_record(db,pid,channel,meta):
 class IndependentWebTools:
     def __init__(self,processor):self.processor=processor;self.store=processor.store;self.service=processor.service
     def check(self,db,turn,data):
+        if data["stage"] == "conversation_search" and "community_consent" in data["input"]:
+            # The processing grant validates the frozen query and session consent.
+            return
         from .knowledge_service import read,POLICY
         reader=read(db,'policy.'+turn['persona_id'],POLICY)['data']
         if not reader['enabled'] or turn['channel'] not in reader['channels']:raise RuntimeErrorBase('knowledge_permission_changed')

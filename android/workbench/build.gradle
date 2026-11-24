@@ -7,6 +7,7 @@ apply from: rootProject.file('pcar-runtime.gradle')
 
 def prepared = rootProject.file(providers.gradleProperty('pcarPrepared').get())
 def workspace = rootProject.projectDir.parentFile
+def release = new groovy.json.JsonSlurper().parse(new File(workspace, 'persona_runtime/release_assets/version.json'))
 def packedModel = layout.buildDirectory.dir('pcar-model')
 def packedPage = layout.buildDirectory.dir('pcar-page')
 def stageModel = tasks.register('stageWorkbenchModel', Sync) {
@@ -46,8 +47,8 @@ android {
     namespace 'io.github.foxmoreland.pcar.workbench'
     defaultConfig {
         applicationId 'io.github.foxmoreland.pcar.community'
-        versionCode 5
-        versionName '1.1.1'
+        versionCode(release.android_version_code as int)
+        versionName(release.version as String)
         testInstrumentationRunner 'io.github.foxmoreland.pcar.workbench.StageThreeProbe'
     }
     buildTypes {

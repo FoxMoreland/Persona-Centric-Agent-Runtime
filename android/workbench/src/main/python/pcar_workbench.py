@@ -23,6 +23,7 @@ from persona_runtime.workbench_import import WorkbenchData
 
 
 PAGE_METHODS = frozenset("""
+    release_announcements acknowledge_announcement
     commit_import_scope import_action import_deepseek_session live_ack_submissions live_activate
     live_batch_action live_branch live_cancel live_confirm_inline_main live_create live_draft live_health
     live_location live_lookup_confirm live_memory live_message_position live_network_wake live_page
@@ -30,7 +31,7 @@ PAGE_METHODS = frozenset("""
     live_save_package live_select live_set_buffer live_stage_retry live_submissions live_submit presentation_attach
     presentation_begin presentation_decide presentation_reconcile revise_deepseek_markdown template_spec
 """.split())
-BACKGROUND_WRITES = frozenset(("live_location", "live_draft", "presentation_decide"))
+BACKGROUND_WRITES = frozenset(("live_location", "live_draft", "presentation_decide", "acknowledge_announcement"))
 _runtime = None
 
 

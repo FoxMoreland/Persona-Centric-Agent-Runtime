@@ -540,7 +540,7 @@ class IngressService:
             conn.execute("INSERT INTO events(id,session_id,persona_id,user_id,role,text,created_at) VALUES (?,?,?,?,'user',?,?)",(eid,sid,pid,LOCAL_USER_ID,text,timestamp()))
             if 'public_task' in value:
                 from .knowledge_native import bind_public_event
-                bind_public_event(conn,eid,pid,sid,channel,text,value['public_task'])
+                bind_public_event(conn,eid,pid,sid,channel,text,value['public_task'],config=self.config)
             if 'lookup_span' in value:
                 from .private_lookup import bind_span
                 bind_span(conn,self.config,sid,eid,text,value['lookup_span'])

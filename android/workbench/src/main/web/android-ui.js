@@ -96,6 +96,7 @@
     chat() { show("chat"); },
     recoverDocument,
     back() {
+      if (window.pcarAnnouncements?.close()) return true;
       const modal = document.getElementById("dialog");
       if (modal.open) {
         modal.close();

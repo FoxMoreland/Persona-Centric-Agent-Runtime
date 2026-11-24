@@ -32,6 +32,7 @@
   }
 
   const names = [
+    "release_announcements", "acknowledge_announcement",
     "appearance", "commit_import_scope", "exit_workbench", "export_support_logs", "import_action",
     "import_deepseek_session", "live_ack_submissions", "live_activate", "live_batch_action", "live_branch", "live_cancel",
     "live_confirm_inline_main", "live_create", "live_draft", "live_health", "live_location", "live_lookup_confirm",
