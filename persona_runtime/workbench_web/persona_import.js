@@ -429,9 +429,11 @@ window.pcarLive = (() => {
   }
   function packageContents(box,pack){
     const total=pack.sessions.reduce((sum,s)=>sum+s.messages,0);
-    el("p",pack.name+" · "+total+" 条历史消息 · "+new Intl.NumberFormat("zh-CN",{maximumFractionDigits:2}).format(pack.bytes/1048576)+" MiB",box);
+    const unit=pack.bytes<1048576?1024:1048576;
+    const size=new Intl.NumberFormat("zh-CN",{maximumFractionDigits:2}).format(pack.bytes/unit)+(unit===1024?" KiB":" MiB");
+    el("p",pack.name+" · "+total+" 条历史消息 · "+size,box);
     for(const s of pack.sessions){
-      const item=groupBox(box,(s.title||sessionDate(s.created_at))+(s.id===pack.main_session?" · 主会话":""));
+      const item=groupBox(box,(s.title||sessionDate(s.created_at))+(s.id===pack.main_session?" · 主会话":""),true);
       if(s.first)el("small",sessionDate(s.first)+" 至 "+sessionDate(s.last),item);
       el("p",s.messages+" 条历史 · "+s.memories+" 条长期记忆 · "+s.remaining+" 轮尚未整理",item);
     }
@@ -457,7 +459,7 @@ window.pcarLive = (() => {
     });
     const available=await api().live_package_sessions(person.id);
     if(!box.isConnected)return;
-    const options=groupBox(box,"角色＋历史＋长期记忆");
+    const options=groupBox(box,"角色＋历史＋长期记忆",true);
     if(!available.length){el("p","此角色暂无可导出的桌面会话。",options);return;}
     const main=currentSession()?.id || person.writableSession || available[0].id;
     const choices=new Map();
