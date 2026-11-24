@@ -4,9 +4,9 @@
 
 PCAR（Persona-Centric Agent Runtime）是一款开源 AI 伴侣工作台。**导入微信或 DeepSeek 的聊天记录，就能把熟悉的人设、说话习惯和旧对话带进 PCAR。**
 
-**PCAR 1.4.0 正式版支持 Windows 11 x64 和 Android ARM64。** 打开工作台，填入一把 DeepSeek 官方 API Key，即可开始聊天或从记录建卡。
+**PCAR 1.4.1 正式版支持 Windows 11 x64 和 Android ARM64。** 打开工作台，填入一把 DeepSeek 官方 API Key，即可开始聊天或从记录建卡。
 
-[下载安卓 APK](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/pcar-v1.4.0/PCAR-1.4.0-Android-arm64.apk) · [下载 Windows 安装包](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/pcar-v1.4.0/PCAR-1.4.0-Windows-x64-Setup.exe) · [从聊天记录自动建卡](#从聊天记录自动建卡) · [正式版使用指南](docs/user/社区版.md) · [下载与开始](#下载与开始)
+[下载安卓 APK](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/pcar-v1.4.1/PCAR-1.4.1-Android-arm64.apk) · [下载 Windows 安装包](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/pcar-v1.4.1/PCAR-1.4.1-Windows-x64-Setup.exe) · [从聊天记录自动建卡](#从聊天记录自动建卡) · [正式版使用指南](docs/user/社区版.md) · [下载与开始](#下载与开始)
 
 ## 从聊天记录自动建卡
 
@@ -46,17 +46,17 @@ PCAR（Persona-Centric Agent Runtime）是一款开源 AI 伴侣工作台。**�
 
 ## 下载与开始
 
-### Android 正式版 1.4.0
+### Android 正式版 1.4.1
 
-[下载 ARM64 APK](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/pcar-v1.4.0/PCAR-1.4.0-Android-arm64.apk) · [1.4.0 更新说明](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/pcar-v1.4.0)
+[下载 ARM64 APK](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/pcar-v1.4.1/PCAR-1.4.1-Android-arm64.apk) · [1.4.1 更新说明](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/pcar-v1.4.1)
 
 适用于 **Android 12 及以上的 ARM64 手机**。下载安装后，打开「设置 → DeepSeek 官方连接」，填入 **一个 DeepSeek 官方 API Key** 即可开始使用。运行环境和本地向量检索模型都已随包提供。
 
 可以导入微信或 DeepSeek 聊天记录，在预览中核对人设后保存角色并开聊。建卡只需名称和人物介绍，空白选填项和待核对的冲突字段会从提示词中省略。在线聊天、自动建卡和联网查询使用你的 DeepSeek 账户额度。
 
-### Windows 正式版 1.4.0
+### Windows 正式版 1.4.1
 
-1. 下载 [Windows 11 x64 安装程序](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/pcar-v1.4.0/PCAR-1.4.0-Windows-x64-Setup.exe)，核对发行页的 SHA-256 后双击安装。1.4.0 Windows 安装程序未签名，Python 和本地检索模型随包提供。
+1. 下载 [Windows 11 x64 安装程序](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/pcar-v1.4.1/PCAR-1.4.1-Windows-x64-Setup.exe)，核对发行页的 SHA-256 后双击安装。1.4.1 Windows 安装程序未签名，Python 和本地检索模型随包提供。
 2. 打开 PCAR 社区版，在「DeepSeek 官方连接」保存自己的官方 API Key。
 3. 新建角色，或导入聊天记录生成角色卡。在线聊天、建卡、记忆整理和联网查找会使用你的 DeepSeek 账户额度。
 
@@ -64,13 +64,15 @@ PCAR（Persona-Centric Agent Runtime）是一款开源 AI 伴侣工作台。**�
 
 **完整角色包。** 在人物菜单导出所选聊天和已整理的长期记忆。接收方导入后确认历史用途，即可续聊，未整理的旧回合可以按需补做。
 
-**首次启动与公告。** 首次打开新版时会显示本次更新。之后可从首页「公告」回看历史更新和作者通知。[查看 1.4.0 更新公告](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/pcar-v1.4.0)
+**1.4.1 修复。** 导入角色包后可先发送当前消息，确认历史用途后再引用旧原话。长按人物可确认删除并清理专属资料。
+
+**首次启动与公告。** 首次打开新版时会显示本次更新。之后可从首页「公告」回看历史更新和作者通知。[查看 1.4.1 更新公告](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/pcar-v1.4.1)
 
 ### 内部开发版
 
 开发版探索 Gemini 4 Hydrogen 正文选项、Jev 决策接入和 G‑Auto。原 v0.4 和相应部署说明可继续查阅。[v0.4 发行页](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/v0.4) · [部署与升级](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/blob/v0.4/AGENT_INSTALL.md)
 
-内部开发版当前为 **0.5.2**。源码与验收记录在 [development/v0.5](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/tree/development/v0.5)。
+内部开发版当前为 **0.5.3**。源码与验收记录在 [development/v0.5](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/tree/development/v0.5)。
 
 Windows 和 Android 安装包按同一套正式版规则发布。开发与验收继续在内部开发版推进。[版本、发布与公告管理规则](docs/product/release-and-announcements.md)
 
