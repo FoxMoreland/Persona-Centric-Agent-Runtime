@@ -2,6 +2,20 @@
   "schema": 1,
   "entries": [
     {
+      "id": "release-1.2.1",
+      "kind": "release",
+      "version": "1.2.1",
+      "date": "2026-11-24",
+      "platforms": [
+        "windows",
+        "android"
+      ],
+      "title": "PCAR 正式版 1.2.1",
+      "items": [
+        "修复引用长消息时聊天区被撑宽的问题。输入框、发送和取消引用按钮保持在屏幕内，切换标签页后可继续使用引用草稿。"
+      ]
+    },
+    {
       "id": "release-1.2.0",
       "kind": "release",
       "version": "1.2.0",

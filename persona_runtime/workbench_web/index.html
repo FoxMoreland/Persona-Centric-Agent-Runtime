@@ -179,7 +179,7 @@
     .resize::after { content: ""; position: absolute; top: 47%; left: 3px; width: 2px; height: 28px; background: var(--line-strong); border-radius: 2px; }
     .collapsed .sidebar { visibility: hidden; overflow: hidden; }
     .scrim { display: none; }
-    .conversation { min-width: 0; min-height: 0; display: grid; grid-template-rows: 65px minmax(0, 1fr) auto; }
+    .conversation { min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 65px minmax(0, 1fr) auto; }
     .chat-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 clamp(14px, 3vw, 30px); border-bottom: 1px solid var(--line); }
     .chat-person { display: flex; align-items: center; gap: 10px; min-width: 0; }
     .chat-person h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; font-weight: 700; }
@@ -239,6 +239,7 @@
     @media (pointer: coarse) { .message-menu { min-width: 44px; min-height: 44px; } }
     .history-reference { display: flex; align-items: center; gap: .7rem; color: var(--muted); margin-bottom: 6px; }
     .history-reference span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    #history-reference > button { flex: none; }
     .input-buffer { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; width: min(100%, 730px); margin: 0 auto 5px; color: var(--muted); font-size: 13px; }
     .input-buffer span { flex: 1 0 auto; }
     .input-buffer .button { min-height: 33px; padding: 4px 9px; }
