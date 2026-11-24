@@ -395,11 +395,8 @@ window.pcarLive = (() => {
       if(scope)chooseImportScope(scope,openImport,home);
     });
     button(box,"导入已有角色包",async()=>{
-      const pack=await api().live_package();if(!pack)return;
-      if(pack.format==="pcar_character_v2"){reviewCharacterPackage(pack);return;}
-      const form=panel("核对并导入角色包"),read=specForm(form,pack.persona_spec),request=newId();
-      button(form,"保存为新角色",async()=>{pack.persona_spec=read();const p=await api().live_save_package(pack,request);
-        dialog.close();await reload(p.id);});
+      const pack=await api().live_package();
+      if(pack)reviewCharacterPackage(pack);
     });
     button(box,"空白创建",()=>{
       const form=panel("空白创建"), read=specForm(form,{name:"",introduction:"",core_traits:[],
@@ -439,18 +436,36 @@ window.pcarLive = (() => {
     }
   }
   function reviewCharacterPackage(pack){
-    const box=panel("核对并导入角色包"),operation=newId();
-    packageContents(box,pack);
-    el("p","保存后会打开主会话。可在「历史来源与用途」确认当前接收方，接续聊天并用上已整理的记忆。",box);
-    const save=button(box,"保存为新角色",async()=>{
-      save.disabled=true;
-      try{
-        const p=await api().live_save_package({format:pack.format,handle:pack.handle,digest:pack.digest},operation);
-        await reload(p.id,true,p.session_id);
-      }finally{save.disabled=false;}
+    const portable=pack.format==="pcar_character_v2";
+    const card=portable?pack.card:pack, operation=newId();
+    const box=panel("核对角色卡 · "+card.persona_spec.name);
+    const base=groupBox(box,"基础人设与语言风格",true);
+    const required=["name","introduction"], readSpec=specForm(base,card.persona_spec,required);
+    const readRelationship=portable
+      ? readField(field(base,"关系说明",card.relationship,false,"relationship"),card.relationship)
+      : null;
+    const readCharacter=card.character?characterForm(groupBox(box,"人物资料"),card.character):null;
+    if(portable){
+      const history=groupBox(box,"随包导入的历史和记忆");
+      packageContents(history,pack);
+      el("p","保存后打开包内主会话。可在「历史来源与用途」确认接续聊天和记忆取材。",history);
+    }
+    const actions=byId("dialog-actions");
+    button(actions,"保存为新角色",async()=>{
+      const spec=readSpec(), missing=required.filter(key=>!spec[key].trim());
+      if(missing.length){markRequiredCardFields(box,missing);return;}
+      const edited={...card,persona_spec:spec};
+      if(readRelationship) edited.relationship=readRelationship();
+      if(readCharacter) edited.character=readCharacter();
+      const request=portable?{format:pack.format,handle:pack.handle,digest:pack.digest,card:edited}:edited;
+      const person=await api().live_save_package(request,operation);
+      await reload(person.id,true,person.session_id ?? null);
+      window.pcarMobile?.chat();
+    }).classList.add("primary");
+    button(actions,"取消",async()=>{
+      if(portable) await api().live_discard_package(pack.handle);
+      dialog.close();
     });
-    save.classList.add("primary");
-    button(box,"取消",async()=>{await api().live_discard_package(pack.handle);dialog.close();});
   }
   async function exportCharacterPackage(person){
     const box=panel("导出角色包");

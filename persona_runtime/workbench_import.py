@@ -545,8 +545,9 @@ class WorkbenchData:
         from .character_pack_format import FORMAT
         if package.get('format') == FORMAT:
             self._require_open()
+            edited = {'card': package['card']} if 'card' in package else {}
             result = self._pack_call('import', handle=package['handle'], digest=package['digest'],
-                                     operation_id=operation_id)
+                                     operation_id=operation_id, **edited)
             self.live_discard_package(package['handle'])
             self._use_persona(result['id'])
             return result
