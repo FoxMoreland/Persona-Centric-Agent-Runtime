@@ -73,6 +73,10 @@ class M4Tests(unittest.IsolatedAsyncioTestCase):
         self.chat = ChatEngine(self.store, self.cfg, ChatModel())
         self.model = OrganizerModel()
         self.org = OrganizationEngine(self.store, self.cfg, self.model, self.chat)
+        if type(self) is M4Tests:
+            # This suite exercises the earlier daily/incremental organizer.
+            self.enterContext(patch.dict("persona_runtime.managed_organization.MEMORY_DEFAULTS",
+                                         memory_automation=False))
 
     async def asyncTearDown(self):
         if self.model.gate:

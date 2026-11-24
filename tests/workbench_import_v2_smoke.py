@@ -155,6 +155,7 @@ def select_dialog(screen, label, value):
 
 def confirm_history(screen):
     select_dialog(screen,"原记录中哪一方是我","A")
+    screen.check("整理为长期记忆")
     screen.click("预览接续范围")
     screen.wait("document.querySelector('#dialog-title').textContent==='确认历史接续'")
     assert "deepseek" in screen.eval("document.querySelector('#dialog-body').innerText").lower()

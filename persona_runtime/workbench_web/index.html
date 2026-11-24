@@ -359,7 +359,7 @@
               <button class="rail-row" id="new-person"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg><span>新建角色</span></button>
             </section>
             <section class="rail-section" aria-labelledby="sessions-heading">
-              <div class="section-heading"><h2 id="sessions-heading">会话</h2><button class="icon-button" id="new-session" aria-label="新建会话" hidden><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></button></div>
+              <div class="section-heading"><h2 id="sessions-heading">会话</h2><button class="button ghost" id="rename-session" type="button" hidden>重命名</button><button class="icon-button" id="new-session" aria-label="新建会话" hidden><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></button></div>
               <label class="rail-search" id="search-box" hidden><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="session-search" type="search" placeholder="查找会话" aria-label="查找会话" autocomplete="off"></label>
               <button class="rail-row" id="import-history" hidden><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg><span>导入历史并接着聊</span></button>
               <div class="rail-list" id="sessions"></div>
@@ -593,6 +593,7 @@
       const container = byId("sessions");
       const person = currentPerson();
       byId("new-session").hidden = !person;
+      byId("rename-session").hidden = !window.pcarLive?.active || !currentSession()?.id;
       byId("import-history").hidden = !person || !window.pcarLive?.active;
       byId("search-box").hidden = !person;
       container.replaceChildren();
@@ -669,7 +670,7 @@
       const session=currentSession(), send=byId("send");
       const manual=Boolean(window.pcarLive?.active && session?.inputBuffer?.manual);
       send.textContent=manual?"加入本轮":"发送";
-      send.disabled = !ready() || session?.readOnly || !state.connected || window.pcarLive?.offline ||
+      send.disabled = !ready() || session?.readOnly || session?.historyPreparing || !state.connected || window.pcarLive?.offline ||
         window.pcarLive?.selecting || window.pcarLive?.pendingDraft || session?.sending || session?.bufferWorking || !message.value.trim();
       const longReply=byId("long-reply-send");
       longReply.hidden=!(window.pcarLive?.active && session?.longReplyAvailable);
@@ -692,7 +693,7 @@
       timeline.scrollTop = scrollToEnd ? timeline.scrollHeight : previousScroll;
       if(!scrollToEnd && reading)window.pcarLive.restore(reading);
       byId("composer").classList.toggle("off", !ready());
-      message.disabled = !ready() || Boolean(session?.readOnly) || Boolean(window.pcarLive?.selecting);
+      message.disabled = !ready() || Boolean(session?.readOnly || session?.historyPreparing) || Boolean(window.pcarLive?.selecting);
       if(message.value!==(session?.draft ?? "") && !window.pcarLive?.composing)message.value=session?.draft ?? "";
       message.placeholder = session?.readOnly ? "已封存的会话可供查阅" : ready() ? "输入消息" : "准备完成后即可输入消息";
       updateSendButton();
@@ -968,10 +969,11 @@
       const s=currentSession(); if(s){s.reference=null; if(window.pcarLive?.active)window.pcarLive.reviseDraft(s); render(); message.focus();}
     });
     byId("new-person").addEventListener("click", () => openRoleForm());
+    byId("rename-session").addEventListener("click", () => window.pcarLive?.nameSession(false));
     byId("new-session").addEventListener("click", () => {
       const person = currentPerson();
       if (!person) return;
-      if(window.pcarLive?.active)return window.pcarLive.select(person,true);
+      if(window.pcarLive?.active)return window.pcarLive.nameSession(true);
       createSession(person, "会话 " + (person.sessions.length + 1));
       byId("session-search").value = "";
       closeDrawer();

@@ -133,7 +133,7 @@ def collect(entry, db, turn, contract, frozen=None):
     current_rows = load_turn_input(db,turn)
     current_ids = [e['id'] for e in current_rows]
     catalog = {e['id']:{'id':e['id'],'text':e['text'],'role':'user','time':e['created_at']} for e in current_rows}
-    recent_ids, refs, memory_ids = [], [], []
+    recent_ids, refs, memory_ids, quoted_memory_ids = [], [], [], []
     previous_exchange = []
     writer_history = []
     quote = None
@@ -175,22 +175,39 @@ def collect(entry, db, turn, contract, frozen=None):
                 if e['id'] not in refs:
                     refs.append(e['id'])
         query = terms(' '.join(e['text'] for e in current_rows))
+        from .context_memory import quote_order, quote_priorities, recency
+        from time import time
+        now=time()
+        pinned=quote_priorities(db,turn,quote) if not frozen or frozen.get('quoted_memories') else {}
+        if frozen and quote:
+            pinned={mid:distance for mid,distance in pinned.items() if mid in frozen.get('quoted_memories',())}
+        frozen_order={mid:i for i,mid in enumerate(frozen['memories'])} if frozen else {}
         memories = []
         selection = (" AND m.id IN (SELECT value FROM json_each(?))" if frozen else "")
         parameters = (pid,sid,json.dumps(frozen['memories'])) if frozen else (pid,sid)
-        for row in [] if quote else db.execute("""SELECT m.* FROM memories m JOIN events e ON e.id=m.source_event_id
-                WHERE m.persona_id=? AND e.session_id=? AND m.status='active'""" + selection +
-                " ORDER BY m.rowid DESC LIMIT 128",parameters):
+        memory_query="""SELECT m.* FROM memories m JOIN events e ON e.id=m.source_event_id
+                WHERE m.persona_id=? AND e.session_id=? AND m.status='active'""" + selection
+        if pinned:
+            memory_query+=" ORDER BY (m.id IN (SELECT value FROM json_each(?))) DESC,m.rowid DESC LIMIT 128"
+            parameters=(*parameters,json.dumps(list(pinned)))
+        else:
+            memory_query+=" ORDER BY m.rowid DESC LIMIT 128"
+        for row in db.execute(memory_query,parameters):
             item = dict(row)
             if not memory_in_session(db,item['id'],pid,sid) or not memory_usable(db,turn,item):
                 continue
             if not full and not memory_usable(db,turn,item,purpose='jev',providers=jev):
                 continue
-            memories.append((len(query & terms(item['text'])),item))
-        for _,item in sorted(memories,key=lambda pair:pair[0],reverse=True)[:8]:
+            if not quote or item["id"] in pinned:
+                score=len(query & terms(item['text']))
+                memories.append(((*quote_order(pinned,item['id']),score,recency(db,item,now)),item))
+        key=(lambda pair:-frozen_order[pair[1]['id']]) if frozen else (lambda pair:pair[0])
+        for _,item in sorted(memories,key=key,reverse=True)[:8]:
             mid=item['id']
             catalog[mid]={'id':mid,'role':'memory','text':item['text'],'revision':item['revision']}
             memory_ids.append(mid)
+            if mid in pinned:
+                quoted_memory_ids.append(mid)
         from .import_history import META
         from .scene_policy import read as read_state
         if not quote and read_state(db, META + sid):
@@ -241,6 +258,7 @@ def collect(entry, db, turn, contract, frozen=None):
             if entries:
                 item['message_times'] = entries
     return {**time_proof, **({'quote_window': quote} if quote else {}),
+            **({'quoted_memories':quoted_memory_ids} if quoted_memory_ids else {}),
             **({'writer_history': writer_history, 'writer_turns': ids} if writer_history else {}),
             'current':current_ids,'recent':recent_ids,'references':refs,'memories':memory_ids,'character':character,
             'history':history,'previous_exchange':previous_exchange,'jev_model':jev['name'],

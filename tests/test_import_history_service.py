@@ -64,6 +64,30 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM attempts").fetchone()[0],0)
             self.assertEqual(db.execute("SELECT state FROM session_lifecycle WHERE session_id=?",(self.first,)).fetchone()[0],"sealed")
 
+    def test_loading_gate_waits_for_all_groups_and_keeps_completion(self):
+        from persona_runtime.import_history_service import must_prepare
+        from persona_runtime.models import LOCAL_USER_ID
+        sid=self.history.commit(self.preview(organize=True),"20",True)["session_id"]
+        status=self.history.status(self.pid,sid)
+        self.assertTrue(status["preparing"])
+        with self.store.connection(write=True) as db:
+            self.assertTrue(must_prepare(db,sid))
+            turns=list(db.execute("""SELECT id,updated_at FROM turns WHERE session_id=?
+                AND (user_event_id IS NOT NULL OR reply_event_id IS NOT NULL)""",(sid,)))
+            self.assertGreater(len(turns),1)
+            for i,turn in enumerate(turns):
+                db.execute("INSERT INTO memory_coverage VALUES(?,?,?,?,?,NULL,?,'available',?)",
+                           (self.pid,LOCAL_USER_ID,turn[0],"{}","1",
+                            "processed_with_quarantine" if i==0 else "unprocessed",turn[1]))
+        self.assertTrue(self.history.status(self.pid,sid)["preparing"])
+        with self.store.connection(write=True) as db:
+            db.execute("UPDATE memory_coverage SET disposition='no_memory' WHERE disposition='unprocessed'")
+        self.assertFalse(self.history.status(self.pid,sid)["preparing"])
+        self.assertEqual(self.history.status(self.pid,sid)["memory_state"],"quarantined")
+        with self.store.connection(write=True) as db:
+            db.execute("UPDATE memory_coverage SET disposition='stale'")
+            self.assertFalse(must_prepare(db,sid))
+
     def test_policy_change_and_withdrawal(self):
         sid=self.history.commit(self.preview(organize=True),"21",True)["session_id"]
         eid=page(self.store,self.pid,sid)["rows"][0]["id"]

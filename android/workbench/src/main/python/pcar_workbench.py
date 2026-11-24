@@ -27,7 +27,7 @@ PAGE_METHODS = frozenset("""
     commit_import_scope import_action import_deepseek_session live_ack_submissions live_activate
     live_batch_action live_branch live_cancel live_confirm_inline_main live_create live_draft live_health
     live_location live_lookup_confirm live_memory live_message_position live_network_wake live_page
-    live_people live_persona_image live_privacy live_quota_decide live_quota_settings live_reply_detail
+    live_people live_persona_image live_privacy live_quota_decide live_quota_settings live_rename_session live_reply_detail
     live_save_package live_select live_set_buffer live_stage_retry live_submissions live_submit presentation_attach
     presentation_begin presentation_decide presentation_reconcile revise_deepseek_markdown template_spec
 """.split())

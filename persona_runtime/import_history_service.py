@@ -64,6 +64,24 @@ def _source(private, request):
     return row
 
 
+PREPARED = "desktop.history.prepared."
+FINISHED = {"processed","no_memory","quarantined","partly_withdrawn","withdrawn"}
+
+
+def must_prepare(db,sid,meta=None,state=None,*,complete=True):
+    if meta is None:
+        meta=read(db,META+sid)
+    if not meta or not meta.get("prepare_before_chat") or not meta.get("organize") or meta.get("withdrawn"):
+        return False
+    if read(db,PREPARED+sid):
+        return False
+    if (state if state is not None else HistoryService._memory_state(db,sid)) in FINISHED:
+        if complete:
+            save(db,PREPARED+sid,True)
+        return False
+    return True
+
+
 class HistoryService:
     def __init__(self, store, library, publisher):
         self.store, self.library, self.publisher = store, library, publisher
@@ -146,7 +164,7 @@ class HistoryService:
         meta={"version":2,"revision":1,"withdrawn":False,"organize":req["organize"],"self_role":req["self_role"],
               "names":names,"participant_kinds":fresh["participant_kinds"],"selection":selection,"timezone_offset":req["timezone_offset"],"providers":fresh["providers"],
               "source_revision":req["revision"],"first":req["first"],"last":req["last"],"excluded":req["excluded"],
-              "count":len(chosen)}
+              "count":len(chosen),"prepare_before_chat":bool(req["organize"])}
         if fresh.get("chat_mode") == ROLEPLAY:
             meta["chat_mode"] = ROLEPLAY
         new_people=[]
@@ -267,7 +285,7 @@ class HistoryService:
         enqueue_imported_session(db,pid,sid)
 
     def status(self, persona_id, session_id):
-        with self.store.connection() as db:
+        with self.store.connection(write=True) as db:
             RuntimeService._owned(db,"sessions",session_id,persona_id)
             meta=read(db,META+session_id)
             if not meta:
@@ -280,17 +298,26 @@ class HistoryService:
                 memory="withdrawn"
             elif meta.get("organize"):
                 policy=db.execute("SELECT data_json FROM organization_policies WHERE persona_id=? ORDER BY revision DESC LIMIT 1",(persona_id,)).fetchone()
-                data=json.loads(policy[0]) if policy else {}
+                from .managed_organization import MEMORY_DEFAULTS
+                data={"enabled":True,"channels":["desktop","qq"],**MEMORY_DEFAULTS} | (json.loads(policy[0]) if policy else {})
                 from .config import ConfigStore
                 cfg=ConfigStore(self.store.paths).load()
                 org=cfg["organization"]
                 model=cfg["model"] if org["reuse_chat"] else org["model"]
-                if not (model.get("encrypted_key") and history_allowed(db,session_id,"memory",model) and data.get("enabled")
+                ready=True
+                if meta.get("chat_mode")==ROLEPLAY:
+                    from .roleplay_prompts import approved, official
+                    ready=bool(official(model) and approved(self.store.paths,"memory_extract","memory_verify"))
+                if not (ready and model.get("encrypted_key") and history_allowed(db,session_id,"memory",model) and data.get("enabled")
                         and data.get("memory_automation") and data.get("memory_backfill",True) and "desktop" in data.get("channels",[])):
                     memory="waiting_configuration"
                 else:
                     memory=self._memory_state(db,session_id)
-            return dict(meta,version=meta.get("version",1),revision=meta.get("revision",0),current_providers=models,
+            preparing=must_prepare(db,session_id,meta,memory)
+            counts=self._dispositions(db,session_id) if preparing else {}
+            progress={"total":sum(counts.values()),"done":sum(counts.get(key,0) for key in
+                ("processed","no_memory","processed_with_quarantine","revoked"))}
+            return dict(meta,preparing=preparing,memory_progress=progress,version=meta.get("version",1),revision=meta.get("revision",0),current_providers=models,
                         usage_state=state,memory_state=memory,session_id=session_id,persona_id=persona_id)
 
     @staticmethod
@@ -309,17 +336,22 @@ class HistoryService:
         if states.intersection({"blocked_authorization","history_paused"}): return "waiting_configuration"
         if "waiting_quota" in states: return "waiting_quota"
         if states.intersection({"extracting","verifying","waiting","running","queued"}): return "processing"
-        dispositions=Counter(r[0] for r in db.execute("""SELECT c.disposition FROM turns t LEFT JOIN memory_coverage c ON c.turn_id=t.id
-            WHERE t.session_id=? AND t.source_key LIKE 'imported.%' AND (t.user_event_id IS NOT NULL OR t.reply_event_id IS NOT NULL)""",(sid,)))
+        dispositions=HistoryService._dispositions(db,sid)
         if dispositions["input_too_long"] or "blocked_input" in states: return "blocked_input"
         if 'failed' in states or dispositions['failed']:return 'failed'
         if 'cancelled' in states or dispositions['cancelled']:return 'cancelled'
         if 'stale' in states or dispositions['stale']:return 'stale'
-        if dispositions["processed_with_quarantine"]: return "quarantined"
+        if dispositions["processed_with_quarantine"] and set(dispositions)<={"processed","no_memory","processed_with_quarantine","revoked"}:
+            return "quarantined"
         if set(dispositions)=={'revoked'}:return 'withdrawn'
         if dispositions['revoked'] and set(dispositions)<={'processed','no_memory','revoked'}:return 'partly_withdrawn'
         if set(dispositions)=={'no_memory'}:return 'no_memory'
         return "processed" if dispositions and set(dispositions)<={"processed","no_memory"} else "pending"
+
+    @staticmethod
+    def _dispositions(db,sid):
+        return Counter(r[0] for r in db.execute("""SELECT c.disposition FROM turns t LEFT JOIN memory_coverage c ON c.turn_id=t.id
+            WHERE t.session_id=? AND t.source_key LIKE 'imported.%' AND (t.user_event_id IS NOT NULL OR t.reply_event_id IS NOT NULL)""",(sid,)))
 
     def update(self, persona_id, session_id, expected_revision, action, confirmed=False, expected_providers=None):
         require(type(expected_revision) is int and action in ("pause","organize","withdraw","authorize"),"历史用途操作无效。")
