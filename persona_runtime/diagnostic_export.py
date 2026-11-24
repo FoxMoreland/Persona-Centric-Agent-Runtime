@@ -2,6 +2,7 @@
 from contextlib import closing
 from datetime import datetime
 import json
+import re
 from pathlib import Path
 import sqlite3
 import stat
@@ -102,7 +103,7 @@ def _events(paths):
 
 
 def _operations(paths):
-    result = {"database": "unavailable", "schema": None, "chat": [], "background": []}
+    result = {"database": "unavailable", "schema": None, "chat": [], "background": [], "public_search": []}
     try:
         path = _regular(paths.home, paths.directories()["database"] / "runtime.sqlite3")
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.2)) as db:
@@ -114,6 +115,21 @@ def _operations(paths):
                                 "error": _label(error, _CODES) if error is not None else None}
                                for at, status, error in rows]
             result["database"] = "readable"
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='knowledge_control'").fetchone():
+                from .community_lookup import outcome
+                rows = db.execute("""SELECT t.updated_at, json_extract(k.value,'$.data.retrieval')
+                    FROM knowledge_control k JOIN turns t ON k.key='knowledge.conversation.record.'||t.id
+                    WHERE json_extract(k.value,'$.data.retrieval.executor')='community-explicit-search-v1'
+                    ORDER BY t.rowid DESC LIMIT ?""", (_LIMIT,))
+                for at, raw in rows:
+                    retrieval = json.loads(raw)
+                    error = next(iter(retrieval.get("errors", [])), None)
+                    status = int(error[9:]) if error and re.fullmatch(r"web_http_[1-5][0-9]{2}",error) else None
+                    result["public_search"].append({"at":_date(at), "outcome":outcome(retrieval),
+                        "http_status":status, "error":_label(error,_CODES | {
+                            "community_search_consent_required","native_public_task_scope_changed",
+                            "provider_network_error","web_transport_unconfirmed","organization_effect_unknown"
+                        }) if error and status is None else None})
     except (OSError, RuntimeErrorBase, sqlite3.Error):
         pass
     return result

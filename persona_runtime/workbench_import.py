@@ -12,6 +12,20 @@ from .models import PersonaSpec, RuntimeErrorBase
 
 
 class WorkbenchData:
+    def release_announcements(self, refresh=False):
+        from . import community
+        if not community.enabled():
+            return {"version": None, "entries": [], "startup": [], "freshness": "local"}
+        from .release_notices import Notices
+        return Notices(self._config.paths.home, "windows").view(refresh)
+
+    def acknowledge_announcement(self, announcement_id):
+        from . import community
+        if not community.enabled():
+            raise RuntimeErrorBase("announcement_unavailable")
+        from .release_notices import Notices
+        return Notices(self._config.paths.home, "windows").acknowledge(announcement_id)
+
     def __init__(self, paths, window):
         self._config=ConfigStore(paths)
         self._client=LocalClient(self._config,bind_instance=True)
@@ -403,11 +417,16 @@ class WorkbenchData:
         if public_search is not False:
             from .private_reply_entry import selected,RESEARCH
             from .knowledge_native import public_task
-            chosen=text if public_search is True else public_search
+            explicit=public_search if isinstance(public_search,dict) else None
+            chosen=explicit.get("question") if explicit else text if public_search is True else public_search
             with Store(self._config.paths).connection() as db:
                 research=selected(db,self._config.load()['instance_id'],pid)==RESEARCH
             if not isinstance(chosen,str) or chosen not in text:raise ValueError('native_public_task_scope_changed')
-            if not research:public=public_task({'question':chosen,'intent':'search','request_search':True})
+            if explicit:
+                if research or set(explicit)!={"question","community_consent"}:
+                    raise ValueError("native_public_task_invalid")
+                public=public_task(explicit|{"intent":"search","request_search":True})
+            elif not research:public=public_task({'question':chosen,'intent':'search','request_search':True})
         first=not sid
         if not sid:
             sid=self._client.manage("session.select",persona_id=pid,channel="desktop")["session_id"]

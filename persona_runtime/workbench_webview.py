@@ -60,7 +60,8 @@ def workbench_html(appearance="system", accent=None):
     mode = appearance if appearance in APPEARANCE_MODES else "system"
     seed = f' data-accent="{accent.lower()}"' if isinstance(accent, str) and ACCENT.fullmatch(accent) else ""
     html = html.replace('data-appearance="system"', f'data-appearance="{mode}"{seed} data-native-workbench', 1)
-    script = "\n".join((assets / name).read_text(encoding="utf-8") for name in ("desktop.js","persona_import.js"))
+    script = "\n".join((assets / name).read_text(encoding="utf-8")
+                       for name in ("desktop.js", "persona_import.js", "announcements.js"))
     body, mark, rest = html.rpartition("</body>")
     if not mark:
         raise RuntimeErrorBase("新版工作台页面不完整。")

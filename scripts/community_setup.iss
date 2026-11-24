@@ -1,15 +1,9 @@
 #ifdef FieldTest
   #define DisplayName "PCAR 社区测试版"
   #define ProgramFolder "PCAR Community Test"
-  #define CandidateName "PCAR-Community-v1.1.1-Windows-x64-Test-Setup"
-  #define ProductVersion "1.1.1 Community"
-  #define FileVersion "1.1.1.0"
 #else
   #define DisplayName "PCAR 社区版"
   #define ProgramFolder "PCAR Community"
-  #define CandidateName "PCAR-Community-v1.1.1-Windows-x64-Setup"
-  #define ProductVersion "1.1.1"
-  #define FileVersion "1.1.1.0"
 #endif
 
 [Setup]
@@ -19,8 +13,8 @@ AppId={{BB15DDF3-7034-40E7-9725-2F1C97E1B988}
 AppId={{24615D1B-5CCF-4F72-AE9B-1FFB9D1D9677}
 #endif
 AppName={#DisplayName}
-AppVersion={#ProductVersion}
-VersionInfoVersion={#FileVersion}
+AppVersion={#FormalVersion}
+VersionInfoVersion={#FormalFileVersion}
 DefaultDirName={localappdata}\Programs\{#ProgramFolder}
 DefaultGroupName={#DisplayName}
 DisableProgramGroupPage=yes

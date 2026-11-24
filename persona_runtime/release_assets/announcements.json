@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "id": "release-1.2.0",
+      "kind": "release",
+      "version": "1.2.0",
+      "date": "2026-11-24",
+      "platforms": [
+        "windows",
+        "android"
+      ],
+      "title": "PCAR 正式版 1.2.0",
+      "items": [
+        "首次打开新版会看到更新说明。首页「公告」可以查看历史更新和作者通知。",
+        "修复标准社区会话的联网入口。点击「联网查找」，授权当前会话并确认要公开的片段，即可使用已保存的官方 DeepSeek Key 查找资料。",
+        "诊断日志可以区分搜索未派发、请求失败和没有可用结果。"
+      ]
+    },
+    {
+      "id": "release-1.1.1",
+      "kind": "release",
+      "version": "1.1.1",
+      "date": "2026-11-24",
+      "platforms": [
+        "windows",
+        "android"
+      ],
+      "title": "社区版 1.1.1",
+      "items": [
+        "建卡只需名称和人物介绍。确认前可切换预览 A、B 的人设，开聊时同步保存满足条件的另一张卡。"
+      ]
+    },
+    {
+      "id": "release-1.0.0",
+      "kind": "release",
+      "version": "1.0.0",
+      "date": "2026-11-22",
+      "platforms": [
+        "windows"
+      ],
+      "title": "Windows 社区版 1.0",
+      "items": [
+        "发布 Windows 一键安装包。填入一个官方 DeepSeek Key 即可使用工作台，支持聊天记录导入、角色管理和长期记忆。"
+      ]
+    }
+  ]
+}

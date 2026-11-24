@@ -234,6 +234,11 @@ def turn_card(db,row,store=None):
         elif (research_contract.failed_reply_with_evidence(db,turn)
                 or not public_lookup.active(db,tid) and saved_failed_research(db,turn)):
             card['research_detail']=True
+    from .knowledge_service import read
+    retrieval = read(db, 'conversation.record.' + tid, {})['data'].get("retrieval", {})
+    if retrieval.get("executor") == "community-explicit-search-v1":
+        from .community_lookup import outcome
+        card["community_search"] = outcome(retrieval)
     if card['search_notice'] and (turn['status']=='completed' or turn['error_code']=='knowledge_repeated_notice'):
         card['has_retrieved_notes']=bool(db.execute("""SELECT 1 FROM context_uses WHERE turn_id=?
             AND json_extract(details_json,'$.knowledge.record_id')=?

@@ -16,6 +16,7 @@ ROOT_FILES=('启动PCAR.bat','README.md','AGENTS.md','AGENT_INSTALL.md','LICENSE
 WEBVIEW_FILES = (
     '启动PCAR-新版.bat', 'persona_runtime/workbench_web/index.html',
     'persona_runtime/workbench_web/desktop.js', 'persona_runtime/workbench_web/persona_import.js',
+    'persona_runtime/workbench_web/announcements.js',
 )
 SCENE_DOCS=('docs/user/DeepSeek 对话导入.md','docs/user/历史聊天接续.md','docs/acceptance/LT-13-外部历史接续验收.md','docs/user/双人聊天生成角色卡.md','docs/acceptance/LT-13-双人成卡与场景启用.md','docs/acceptance/LT-13-v2-双人画像证据与建角验收.md','docs/acceptance/工作台双人私聊导入与历史接续.md','docs/expression/E.N6-场景发言接入与回退.md','docs/模型输入与提示词写作总则.md',
             'docs/第三方角色Embedding依赖与许可.md','docs/M9R.5-本机验收与候选交付.md')

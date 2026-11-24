@@ -495,7 +495,7 @@ class ChatEngine:
                              (event_id, session_id, persona_id, LOCAL_USER_ID, text, timestamp()))
                 if public_task is not None:
                     from .knowledge_native import bind_public_event
-                    bind_public_event(conn,event_id,persona_id,session_id,channel,text,public_task)
+                    bind_public_event(conn,event_id,persona_id,session_id,channel,text,public_task,config=self.config)
                 if lookup_span is not None:
                     from .private_lookup import bind_span
                     bind_span(conn,self.config,session_id,event_id,text,lookup_span)

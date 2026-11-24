@@ -12,6 +12,7 @@ import sys
 import zipfile
 
 from .build_desktop_bundle import SOURCE, build
+from persona_runtime.release_notices import release_metadata
 
 
 RUNTIME_DLLS = ('msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll', 'vcruntime140.dll',
@@ -72,11 +73,13 @@ def main():
                     str(SOURCE / 'scripts/community_launcher.cpp'), '/link', 'user32.lib', 'shell32.lib',
                     '/subsystem:windows', f'/out:{payload / "PCAR.exe"}'], cwd=work, check=True)
     test_define = ['/DFieldTest=1'] if args.field_test else []
-    subprocess.run([str(args.iscc.resolve()), *test_define, f'/DPayload={payload}',
+    version = release_metadata()["version"]
+    setup_name = f'PCAR-{version}-Windows-x64' + ('-Test-Setup' if args.field_test else '-Setup')
+    subprocess.run([str(args.iscc.resolve()), *test_define, f'/DFormalVersion={version}',
+                    f'/DFormalFileVersion={version}.0', f'/DCandidateName={setup_name}', f'/DPayload={payload}',
                     f'/DWebView2={args.webview2.resolve()}', f'/O{work}',
                     str(SOURCE / 'scripts/community_setup.iss')], check=True)
-    name = ('PCAR-Community-v1.1.1-Windows-x64-Test-Setup.exe' if args.field_test
-            else 'PCAR-Community-v1.1.1-Windows-x64-Setup.exe')
+    name = setup_name + '.exe'
     installer = work / name
     with installer.open('rb') as stream:
         digest = hashlib.file_digest(stream, 'sha256').hexdigest()

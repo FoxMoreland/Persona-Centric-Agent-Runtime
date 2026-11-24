@@ -88,6 +88,13 @@ class KnowledgeService:
         from .knowledge_general import PROFILE,validate_record
         if (result or {}).get('mode')==PROFILE:
             record=validate_record(db,turn['persona_id'],turn['channel'],result)
+            if record.get("sources") and record.get("retrieval", {}).get("executor") == "community-explicit-search-v1":
+                from .community_lookup import require_consent, task_for_turn
+                task = task_for_turn(db, turn)
+                if task is None:
+                    raise RuntimeErrorBase("native_public_task_scope_changed")
+                require_consent(db, self.processing.engine.config, turn["persona_id"], turn["session_id"],
+                                task["community_consent"])
             from .knowledge_native_memory import validate_live
             validate_live(db,turn['persona_id'],result,record)
         return result or {'state':'disabled','evidence':[]}

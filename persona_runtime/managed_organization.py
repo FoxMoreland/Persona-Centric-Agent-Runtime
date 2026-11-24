@@ -272,6 +272,10 @@ class ManagedOrganization:
                 base=json.loads(db.execute('SELECT model_snapshot FROM turns WHERE id=?',
                     (payload['knowledge_processing']['root_turn_id'],)).fetchone()[0])
             spec=payload.get('knowledge_processing',{})
+            if "community_consent" in spec.get("input", {}):
+                from .config import same_credential
+                if not same_credential(model.get("encrypted_key"), base.get("encrypted_key")):
+                    raise RuntimeErrorBase("community_search_consent_required")
             if 'native_model_route' in spec:
                 from .knowledge_native_route import model_for_task
                 base=model_for_task(db,task['persona_id'],spec,self.engine.config)
@@ -764,6 +768,7 @@ class ManagedOrganization:
             cancelled=isinstance(error,asyncio.CancelledError)
             diagnostics=safe_diagnostics(getattr(error,'diagnostics',None))
             tool=payload.get('knowledge_processing',{}).get('stage') in ('conversation_search','conversation_fetch')
+            explicit_search = tool and 'community_consent' in payload['knowledge_processing']['input']
             routing=payload.get('knowledge_processing',{}).get('stage') in ('conversation_web_decision',)
             native=payload.get('knowledge_processing',{}).get('stage')=='conversation_native'
             notice=payload.get('knowledge_processing',{}).get('stage')=='conversation_search_notice'
@@ -783,7 +788,7 @@ class ManagedOrganization:
                 c=self.contract(db,task['id']);count=db.execute("SELECT count(*) FROM organization_attempts WHERE task_id=? AND coalesce(error_code,'') NOT IN ('organization_network_wait','organization_storage_wait')",(task['id'],)).fetchone()[0]
                 has_receipt=db.execute('SELECT 1 FROM organization_receipts WHERE attempt_id=?',(aid,)).fetchone()
                 from .generation_retry import pause_before_send
-                pause=pause_before_send(code,diagnostics,usage)
+                pause=None if explicit_search else pause_before_send(code,diagnostics,usage)
                 if not has_receipt and not cancelled and not c['data']['cancel_requested'] and pause:
                     retries=c['data'].get('connection_waits',0)+1
                     c['data'].update(connection_waits=retries,next_epoch=self.clock()+min(60,2**min(retries,6)),phase='ready',
@@ -804,7 +809,8 @@ class ManagedOrganization:
                     db.execute('INSERT INTO knowledge_control VALUES(?,?) ON CONFLICT(key) DO NOTHING',('knowledge.web.http_receipt.'+aid,encoded({'revision':0,'data':{'body':error.tool_response,'status':diagnostics.get('http_status')}})))
                 safe_retry=(not has_receipt and not cancelled and not denied_tool and not permanent_decision and (source_read and code=='wiki_transport_unavailable' or (tool or routing) and diagnostics.get('http_status') in (408,429,500,502,503,504) or diagnostics.get('request_headers_sent') is False or
                     code=='provider_http_429' and diagnostics.get('http_status')==429))
-                if native or notice or code=='provider_official_deepseek_required':safe_retry=False
+                if native or notice or explicit_search or code=='provider_official_deepseek_required':safe_retry=False
+                if explicit_search and diagnostics.get('request_headers_sent') is False:known_tool=True
                 known_tool=known_tool or native_not_sent
                 if code=='provider_official_deepseek_required':known_tool=True
                 unknown=not has_receipt and not safe_retry and not known_tool and not provider_completed

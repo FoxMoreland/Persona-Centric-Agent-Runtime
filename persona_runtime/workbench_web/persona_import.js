@@ -47,6 +47,7 @@ window.pcarLive = (() => {
       main_reply_retry_wait:"OpenRouter 正在限流，请在等待时间结束后重试。",
       main_reply_retry_unavailable:"此尝试已有回执或已达到重试上限，请核对当前记录。",
       native_public_task_invalid:"请选取可公开查找的片段，或跳过本次查找。",private_lookup_scope_changed:"本轮授权或原消息已变化，请重新核对。",
+      community_search_consent_required:"本会话的联网授权已变化，请重新确认。",
       private_lookup_confirmation_closed:"本轮查找范围已经处理。",
       invalid_model_connection:"请核对 HTTPS 接口与模型名。",session_privacy_operation_conflict:"授权操作已变化，请重新打开核对。",
       service_draining:"本机服务正在退出，已发送的消息会按原记录核对。",local_repair_active:"本机正在修复，稍后会自动返回聊天。",
@@ -2131,6 +2132,11 @@ window.pcarLive = (() => {
     const plans=t.desktop_publications||[];
     const notices=plans.filter(v=>v.phase==="search_notice");
     if(t.search_notice&&!notices.some(v=>v.kind==="speech"))show("persona",t.search_notice.text,t.search_notice.event_id,t.search_notice.timestamp);
+    if(t.community_search){
+      const labels={found:"联网查找已返回资料",empty:"联网查找未取得可用资料",
+        failed:"联网查找失败",unconfirmed:"联网查找结果待确认",not_dispatched:"联网查找未派发"};
+      el("small",labels[t.community_search],group).className="hint";
+    }
     else for(const plan of notices)for(const m of plan.visible)show("persona",m.text,m.id,m.receipt_id?{recorded_at:m.presented_at,source:"presented"}:null);
     const main=plans.find(v=>v.phase==="main");
     const awaitingNotice=notices.some(plan=>plan.background_lookup && ["pending","partial"].includes(plan.state));
@@ -2424,6 +2430,37 @@ window.pcarLive = (() => {
   }
   const bufferPanel=byId("input-buffer"),bufferStatus=byId("input-buffer-status");
   const privacyButton=byId("session-privacy");
+  const communitySearch=byId("community-search");
+  function communityGrant(person, sid, grant, enabled) {
+    return api().live_privacy(person.id,sid,{enabled,operation_id:newId(),revision:grant.revision,
+      protocol:grant.protocol,recipient_hash:grant.recipient_hash});
+  }
+  communitySearch.onclick=run(async()=>{
+    const person=currentPerson(), session=currentSession(), original=message.value;
+    if(!person||!session||session.reference||session.inputBuffer?.batch) return;
+    const excerpt=original.slice(message.selectionStart,message.selectionEnd).trim()||original.trim();
+    if(!excerpt||[...excerpt].length>128)throw new FormError("请选择 1–128 个字符作为公开查找片段。");
+    const privacy=await api().live_privacy(person.id,session.id);
+    if(currentSession()!==session||currentPerson()?.id!==person.id||message.value!==original)return;
+    let grant=privacy.community_search;
+    if(!grant?.available){await privacyPanel();return;}
+    const box=panel("确认联网查找");
+    el("p","这轮仅把下面的片段发给 DeepSeek 官方搜索。",box);
+    el("p",excerpt,box).className="import-original";
+    const authorize=button(box,"允许本会话发起明确的联网查找",async()=>{
+      grant=await communityGrant(person,privacy.session_id,grant,true);
+      if(box.isConnected&&grant.enabled){authorize.hidden=true;confirm.disabled=false;}
+    });
+    authorize.hidden=grant.enabled;
+    const confirm=button(byId("dialog-actions"),"查找并发送",async()=>{
+      if(currentSession()!==session||currentPerson()?.id!==person.id||message.value!==original)
+        throw new FormError("消息或会话已变化，请重新选择查找片段。");
+      dialog.close();
+      await send(false,{question:excerpt,community_consent:{revision:grant.revision,recipient_hash:grant.recipient_hash}},privacy.session_id);
+    });
+    confirm.disabled=!grant.enabled;
+    confirm.classList.add("primary");
+  });
   const recipientLabels={main:"主回复",organization:"后台整理",selector:"选材",jev:"Jev 决策",lookup_target:"检索对象解析",native_web:"原生联网模型",search_fetch:"联网检索与抓取"};
   async function privacyPanel(){
     const person=currentPerson(),session=currentSession();
@@ -2441,6 +2478,13 @@ window.pcarLive = (() => {
       : "此授权供新版双人私聊链使用。开启后，本会话已有和新增的原话、人物资料、引用、导入记录、记忆及文件内容均可交给以下接收方。联网查询可以包含私人信息。你可以随时关闭。",box);
     for(const [role,url] of Object.entries(state.recipients))el("p",[recipientLabels[role],state.models[role],url].filter(Boolean).join(" · "),box);
     const context=state.public_lookup;
+    if(state.community_search?.enabled){
+      button(box,"撤回本会话的明确联网查找授权",async()=>{
+        if(!sameSession())return;
+        await communityGrant(person,state.session_id,state.community_search,false);
+        if(box.isConnected)dialog.close();
+      });
+    }
     if(state.enabled && state.candidate && (context?.available || context?.enabled)){
       const automatic=context.protocol==="desktop-public-lookup-scope-v3";
       const automaticText=singleRetrieval
@@ -2493,6 +2537,8 @@ window.pcarLive = (() => {
   message.addEventListener("compositionend",updateManualHint);
   function renderInputBuffer(){
     const s=currentSession(), settings=s?.inputBuffer, batch=settings?.batch;
+    communitySearch.hidden=!state.community||!active||!ready()||!s||s.readOnly||currentPerson()?.profile.chat_mode==="roleplay";
+    communitySearch.disabled=Boolean(s?.reference||s?.sending||s?.bufferWorking||batch)||linkState!=="online";
     privacyButton.hidden=!active||!ready()||!s;
     bufferPanel.hidden=!active||!ready()||!settings||s.readOnly;
     if(bufferPanel.hidden){updateManualHint();return;}
@@ -2581,7 +2627,7 @@ window.pcarLive = (() => {
   bufferConfirm.onclick=run(()=>finishBuffer("confirm"));
   bufferCancel.onclick=run(()=>finishBuffer("cancel"));
   byId("long-reply-send").addEventListener("click",()=>run(()=>send(true))());
-  async function send(longRequested=false){
+  async function send(longRequested=false,publicSearch=false,searchSession=null){
     const p=currentPerson(),s=currentSession(),value=message.value;
     if(stopped||!p||!s||s.readOnly||!value.trim()||s.sending||s.bufferWorking||selectionToken!==null||pendingDraft(s)||linkState!=="online")return;
     if(!state.connected){connection();return;}
@@ -2593,7 +2639,7 @@ window.pcarLive = (() => {
     try{
       const policy=s.inputBuffer?{version:s.inputBuffer.version}:null;
       const choice=ref?(s.reference.kind==="desktop_message"?messageTarget(ref,s.reference.index):{kind:"event",id:ref}):null;
-      const args=[p.id,s.id,value,request,choice,revision,false,policy];
+      const args=[p.id,searchSession||s.id,value,request,choice,revision,publicSearch,policy];
       if(longRequested)args.push(true);
       const accepted=await api().live_submit(...args);
       if(accepted.state==="rejected")throw new FormError(bufferErrors[accepted.reason]);

@@ -89,7 +89,7 @@ def call_cost(db, task_ids):
 
 
 def public_task(value):
-    if (type(value) is not dict or set(value) - {'question', 'intent', 'depth', 'url','retain_page','request_search'}
+    if (type(value) is not dict or set(value) - {'question', 'intent', 'depth', 'url','retain_page','request_search','community_consent'}
             or not isinstance(value.get('question'), str) or not value['question'].strip()
             or len(value['question']) > 4000 or value.get('intent', 'search') not in ('search', 'read_link')
             or value.get('depth', 'ordinary') not in ('ordinary', 'deep')
@@ -108,13 +108,25 @@ def public_task(value):
         raise RuntimeErrorBase('native_public_url_required')
     if result['retain_page'] and result['intent']!='read_link':
         raise RuntimeErrorBase('native_retention_requires_explicit_link')
+    if "community_consent" in value:
+        consent = value["community_consent"]
+        if (not result.get("request_search") or len(result["question"]) > 128 or "url" in result
+                or not isinstance(consent, dict) or set(consent) != {"revision", "recipient_hash"}
+                or type(consent["revision"]) is not int or consent["revision"] < 1
+                or not isinstance(consent["recipient_hash"], str)
+                or not re.fullmatch("[0-9a-f]{64}", consent["recipient_hash"])):
+            raise RuntimeErrorBase("native_public_task_invalid")
+        result["community_consent"] = consent.copy()
     return result
 
 
-def bind_public_event(db, event_id, pid, sid, channel, text, task):
+def bind_public_event(db, event_id, pid, sid, channel, text, task, *, config=None):
     task = public_task(task)
     if task.get('request_search') and task['question'] not in text:
         raise RuntimeErrorBase('native_public_task_scope_changed')
+    if "community_consent" in task:
+        from .community_lookup import require_consent
+        require_consent(db, config, pid, sid, task["community_consent"])
     value = {'revision': 0, 'data': {'event_id': event_id, 'persona_id': pid, 'session_id': sid,
         'channel': channel, 'input_hash': fingerprint(text), 'task': task, 'source': 'explicit_public_task'}}
     db.execute('INSERT INTO knowledge_control VALUES(?,?)',
