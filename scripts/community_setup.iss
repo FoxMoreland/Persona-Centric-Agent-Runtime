@@ -7,6 +7,11 @@
 #endif
 
 [Setup]
+#ifdef Authenticode
+SignTool=pcar_authenticode
+SignedUninstaller=yes
+SignedUninstallerDir={#SignedUninstallerCache}
+#endif
 #ifdef FieldTest
 AppId={{BB15DDF3-7034-40E7-9725-2F1C97E1B988}
 #else
