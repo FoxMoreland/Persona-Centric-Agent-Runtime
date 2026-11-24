@@ -44,7 +44,7 @@ def collect_context_materials(engine, conn, turn, evidence=None, *, ablated=Fals
     row = None if quoted else conn.execute("SELECT * FROM summaries WHERE session_id=? AND channel=? AND status='active' AND end_row<? ORDER BY rowid DESC LIMIT 1", (turn['session_id'], turn['channel'], ordinal)).fetchone()
     summary = dict(row) if row else None
     if pending: summary = None
-    if summary and evidence is not None:
+    if summary and (evidence is not None or any(e.startswith('imported.') for e in json.loads(summary['sources_json']))):
         from .context_builders import summary_usable
         if not summary_usable(conn,turn,summary):summary=None
     covered = set(json.loads(summary['covered_json'])) if summary else set()

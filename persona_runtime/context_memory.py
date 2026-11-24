@@ -94,6 +94,7 @@ def quote_order(proximities, ident):
 
 def rank_memories(conn,turn,text,recent_queries,*,enforce_scope=False,pinned=None):
     from .chat import terms
+    from .context_builders import memory_usable, portable_memory_sessions
     current_terms = terms(text)
     previous_terms = terms(' '.join(recent_queries))
     ranked = []
@@ -107,8 +108,7 @@ def rank_memories(conn,turn,text,recent_queries,*,enforce_scope=False,pinned=Non
         memory = dict(memory)
         from .automatic_memory import usable_fact
         if not usable_fact(conn,memory):continue
-        if enforce_scope:
-            from .context_builders import memory_usable
+        if enforce_scope or portable_memory_sessions(conn,memory['id']):
             if not memory_usable(conn,turn,memory):continue
         mt = terms(memory['text'])
         current, history = sorted(mt & current_terms), sorted(mt & previous_terms)

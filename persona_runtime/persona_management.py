@@ -120,6 +120,46 @@ class PersonaManagement:
     def restore(self,persona_id,expected_revision,expected_selected,operation_id):
         return self._change(persona_id,expected_revision,expected_selected,operation_id,False)
 
+    def purge(self, persona_id, expected_revision, expected_selected, operation_id):
+        from .config import ConfigStore
+        from .persona_cleanup import delete_rows, reclaim
+        from .private_personas import guard_acceptance_write
+        if type(expected_revision) is not int:
+            raise RuntimeErrorBase('invalid_revision')
+        config = ConfigStore(self.store.paths)
+        cfg = config.load()
+        with self.store.connection(write=True) as db:
+            fp, old = self._operation(db,operation_id,['purge',persona_id,expected_revision,expected_selected])
+            if old:
+                result = old
+            else:
+                selected = self.store.current(db,required=False)
+                if selected != expected_selected:
+                    raise RuntimeErrorBase('persona_selection_conflict')
+                view = self._view(db,persona_id)
+                if view['revision'] != expected_revision:
+                    raise RuntimeErrorBase('version_conflict')
+                if view['private_original']:
+                    raise RuntimeErrorBase('private_original_delete_forbidden')
+                guard_acceptance_write(self.store,persona_id)
+                self._idle(db,persona_id)
+                if selected == persona_id:
+                    next_person = db.execute("""SELECT p.id FROM personas p LEFT JOIN persona_lifecycle l
+                        ON l.persona_id=p.id WHERE p.id!=? AND l.deleted_at IS NULL
+                        ORDER BY p.created_at,p.id LIMIT 1""",(persona_id,)).fetchone()
+                    selected = next_person[0] if next_person else None
+                    if selected:
+                        db.execute("UPDATE settings SET value=? WHERE key='current_persona'",(selected,))
+                    else:
+                        db.execute("DELETE FROM settings WHERE key='current_persona'")
+                sessions = delete_rows(db,persona_id,cfg['instance_id'])
+                result = self._save(db,operation_id,fp,{'id':persona_id,'deleted':True,
+                    'current_persona_id':selected,'sessions':sessions})
+        result = dict(result)
+        sessions = result.pop('sessions')
+        result['storage_reclaimed'] = reclaim(self.store,persona_id,sessions,config,cfg)
+        return result
+
     def _change(self,pid,revision,selected,op,delete):
         if type(revision) is not int:raise RuntimeErrorBase('invalid_revision')
         with self.store.connection(write=True) as db:
