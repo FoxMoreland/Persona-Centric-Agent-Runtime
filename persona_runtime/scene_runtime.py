@@ -248,8 +248,16 @@ class SceneRuntime:
                     else:
                         self.transport = JevTransport(model)
                     self.connections.append(self.transport)
-                status, raw = await self.transport.complete(wire,on_dispatch=on_dispatch,on_receipt=on_receipt,
-                                                           diagnostics=diagnostics.update)
+                router = getattr(self.engine, 'decision_providers', None)
+                callbacks = {'on_dispatch': on_dispatch, 'on_receipt': on_receipt, 'diagnostics': diagnostics.update}
+                if router is None:
+                    status, raw = await self.transport.complete(wire, **callbacks)
+                else:
+                    def check_fallback():
+                        with self.store.connection() as db:
+                            require(self.snapshot(db,self.root(db,tid)) == (token,wire,model),'sources_changed')
+                    status, raw = await router.complete(tid,'scene',wire,self.transport.complete,
+                                                        check_fallback=check_fallback,**callbacks)
                 require(received.done(),'receipt_clock_missing')
             except Exception:
                 self.revise(tid,scene='fallback',reason='transport_unconfirmed',diagnostics=diagnostics)

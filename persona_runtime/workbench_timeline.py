@@ -262,6 +262,12 @@ def turn_card(db,row,store=None):
     if retrieval.get("executor") == "community-explicit-search-v1":
         from .community_lookup import outcome
         card["community_search"] = outcome(retrieval)
+    from . import community
+    if community.enabled():
+        from .community_decisions import turn_view
+        decision = turn_view(db, tid)
+        if decision:
+            card['decision_provider'] = decision
     if card['search_notice'] and (turn['status']=='completed' or turn['error_code']=='knowledge_repeated_notice'):
         card['has_retrieved_notes']=bool(db.execute("""SELECT 1 FROM context_uses WHERE turn_id=?
             AND json_extract(details_json,'$.knowledge.record_id')=?

@@ -197,8 +197,13 @@ def collect(entry, db, turn, contract, frozen=None):
             memory_query+=" ORDER BY m.rowid DESC LIMIT 128"
         for row in db.execute(memory_query,parameters):
             item = dict(row)
-            if not portable_memory_sessions(db,item['id']) and not memory_in_session(db,item['id'],pid,sid):
+            portable = portable_memory_sessions(db,item['id'])
+            if not portable and not memory_in_session(db,item['id'],pid,sid):
                 continue
+            if len(portable) > 1:
+                from .community_decisions import cross_memory_allowed
+                if not cross_memory_allowed(db,entry.config,turn,portable):
+                    continue
             if not memory_usable(db,turn,item):
                 continue
             if not full and not memory_usable(db,turn,item,purpose='jev',providers=jev):

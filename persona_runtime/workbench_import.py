@@ -369,6 +369,13 @@ class WorkbenchData:
         return self._client.manage("desktop.privacy.connection",role=role,base_url=base_url,
                                    name=name,key=key,confirm=confirm)
 
+    def live_jev(self, operation='status', values=None):
+        self._require_open()
+        require(operation in ('status', 'check', 'activate', 'disable', 'grant')
+                and (values is None or isinstance(values, dict)), "决策模型设置参数无效。")
+        return self._client.call('POST', '/v1/manage',
+                                 {'action': 'desktop.decision.' + operation, 'args': values or {}}, timeout=45)
+
     def live_main_reply(self, change=None):
         self._require_open()
         if change is None:

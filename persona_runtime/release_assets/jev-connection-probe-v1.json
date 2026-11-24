@@ -1,0 +1,7 @@
+{
+  "state": {"first": "A", "second": "B"},
+  "questions": {
+    "check_first": {"type": "choice", "instructions": "选出与 state.first 相同的字母。", "criteria": {"A": "字母 A。", "B": "字母 B。"}},
+    "check_second": {"type": "choice", "instructions": "选出与 state.second 相同的字母。", "criteria": {"A": "字母 A。", "B": "字母 B。"}}
+  }
+}
