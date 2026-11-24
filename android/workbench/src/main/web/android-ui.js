@@ -26,6 +26,7 @@
     '<p id="mobile-key-state" role="status">正在读取保存状态。</p>' +
     '<button type="button" class="button primary" id="mobile-open-key">设置 API Key</button></div>' +
     '<div class="mobile-card" id="mobile-appearance"></div>' +
+    '<div class="mobile-card"><button type="button" class="button" id="mobile-jev">决策模型设置</button></div>' +
     '<div class="mobile-card"><button type="button" class="button" id="mobile-diagnostics">运行与诊断</button></div>';
   layout.append(settings);
   const theme = document.getElementById("mobile-appearance");
@@ -34,6 +35,7 @@
   const connection = document.getElementById("mobile-key-state");
   const keyButton = document.getElementById("mobile-open-key");
   document.getElementById("mobile-diagnostics").addEventListener("click", () => window.pcarLive.diagnostics());
+  document.getElementById("mobile-jev").addEventListener("click", () => window.pcarLive.decisionSettings());
   let revision = 0;
   async function readSettingsStatus() {
     const request = ++revision;

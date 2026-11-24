@@ -59,7 +59,7 @@ def usage(value):
         if incoming is not None and outgoing is not None:result['total_tokens']=incoming+outgoing
     return result or None
 
-async def execute(model,body):
+async def execute(model,body,*,decision_dispatch=None):
     from .desktop_activation import admit, unauthorized
     admit()
     from .chat import ModelCompletion,ModelError,model_tls_context
@@ -69,12 +69,15 @@ async def execute(model,body):
         transport = Transport(model)
         detail = {}
         try:
-            status, raw = await transport.complete(
-                body, on_dispatch=lambda _: None, on_receipt=lambda _: None, diagnostics=detail.update)
+            callbacks = {'on_dispatch': lambda _: None, 'on_receipt': lambda _: None, 'diagnostics': detail.update}
+            status, raw = await (decision_dispatch(body,transport.complete,**callbacks) if decision_dispatch
+                                 else transport.complete(body,**callbacks))
         finally:
             await transport.close()
-        measured = usage(json.loads(raw)) if status == 200 else None
+        measured = usage(json.loads(raw)) if status == 200 or detail.get('decision_provider') == 'jev' else None
         if status != 200:
+            if detail.get('decision_provider') == 'jev':
+                raise ModelError('jev_http_' + str(status), usage=measured, diagnostics=detail | {'provider_terminal_error': True})
             raise ModelError('provider_http_' + str(status), usage=measured, diagnostics=detail)
         return ModelCompletion(raw, measured, detail)
     from .network_proxy import outbound_proxy

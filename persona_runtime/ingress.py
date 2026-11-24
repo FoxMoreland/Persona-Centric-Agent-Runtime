@@ -639,6 +639,10 @@ class IngressService:
             if b['channel']=='qq':conn.execute("INSERT INTO deliveries VALUES (?,'pending',?)",(tid,timestamp()))
             record(conn,tid,'accepted');record(conn,tid,'queued')
             if b['channel']=='desktop':
+                from .community_decisions import freeze
+                from .models import ROLEPLAY, persona_chat_mode
+                if persona_chat_mode(conn,persona_id) != ROLEPLAY:
+                    freeze(conn,self.config,tid,persona_id,b['session_id'])
                 if policy.get('private_reply_instance'):
                     from .private_reply_entry import bind, ROUTE
                     bind(conn,tid,policy['private_reply_instance'],policy.get('private_reply_route',ROUTE))

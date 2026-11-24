@@ -177,8 +177,20 @@ class OrdinaryReply:
                     category=structured
                 else:
                     source_check=node=='J5' and (receipt_node or '').startswith('public.J5.')
-                    bind=getattr(self.providers,'bind_public_source' if source_check else 'bind_choose',None)
-                    choose=bind() if bind else self.providers.choose
+                    router = getattr(self.entry.engine, 'decision_providers', None)
+                    if router and getattr(self.providers, 'community_route', False) and hasattr(self.providers,'bind_community_choice'):
+                        def check_fallback():
+                            with self.store.connection() as current:
+                                _, current_base, current_material = self._snapshot(current, tid, base['phase'])
+                                if current_base != base or current_material != material:
+                                    raise RuntimeErrorBase('private_reply_source_changed')
+                                if check_evidence:
+                                    check_evidence(current)
+                        choose = self.providers.bind_community_choice(
+                            router, tid, key, public_source=source_check, check_fallback=check_fallback)
+                    else:
+                        bind=getattr(self.providers,'bind_public_source' if source_check else 'bind_choose',None)
+                        choose=bind() if bind else self.providers.choose
                     category='private_jev'
                 meter=gate(db,self.store,category,turn_scope(turn))
                 if key=='J1' and draft==0:
@@ -249,6 +261,15 @@ class OrdinaryReply:
                         db.execute("""UPDATE private_reply_nodes SET usage_json=?,result_json='null',state=?
                             WHERE attempt_id=? AND state='sending'""",
                             (encoded(audit),'received' if terminal else 'unknown',aid))
+                    elif not parked and not structured:
+                        diagnostics = getattr(error, 'diagnostics', None) or {}
+                        if diagnostics.get('decision_provider') == 'jev':
+                            known = diagnostics.get('effect_unknown') is False
+                            audit = {'decision_source': 'jev', 'error': str(error), 'usage': getattr(error, 'usage', None),
+                                     'timing': diagnostics}
+                            db.execute("""UPDATE private_reply_nodes SET usage_json=?,result_json='null',state=?
+                                WHERE attempt_id=? AND state='sending'""",
+                                       (encoded(audit),'received' if known else 'unknown',aid))
                 if parked:
                     raise PrivateTransportParked('private_transport_parked') from error
                 if terminal and structured in ('translate','assess','egress'):

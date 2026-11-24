@@ -48,8 +48,12 @@ class KnowledgeRouting:
         from .private_personas import PrivatePersonas
         return PrivatePersonas(self.engine.store.paths).authorize_model(self.engine.store,persona_id,'knowledge_router',expected_provider,operation_id)
     async def execute(self,model,payload):
+        from functools import partial
         body=request(model,payload['knowledge_processing']['input'])
         if getattr(self,'transport',None):return await self.transport(model,body)
-        return await execute(model,body)
+        router = getattr(getattr(self.engine,'chat',None),'decision_providers',None)
+        tid = payload['knowledge_processing'].get('root_turn_id')
+        decision = partial(router.complete,tid,'need_web',check_fallback=lambda: self.grant(payload['persona_id'])) if router and tid else None
+        return await execute(model,body,decision_dispatch=decision)
     def retired(self,*args,**kwargs):raise RuntimeErrorBase('legacy_retrieval_frozen')
     update_policy=retired;prepare=retired;accept=retired

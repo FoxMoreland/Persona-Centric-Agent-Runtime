@@ -62,7 +62,19 @@ window.pcarLive = (() => {
       character_history_package_too_large:"角色包超过 64 MiB，或展开后超过 256 MiB。请减少所选会话。",
       character_history_package_changed:"历史或记忆已变化，请重新预览角色包。",
       character_history_package_session_busy:"所选会话仍有待处理的消息。完成本轮后再导出。",
-      character_history_package_protected:"此角色的历史受保护，无法生成分享包。"};
+      character_history_package_protected:"此角色的历史受保护，无法生成分享包。",
+      community_jev_invalid_url:"请输入有效的 HTTPS 地址。",
+      community_jev_invalid_model:"请核对 Jev 模型名。",
+      community_jev_invalid_key:"请填入该 Jev 地址的 API Key。",
+      community_jev_probe_review_required:"当前候选的 Jev 检查材料待审阅。",
+      community_jev_probe_failed:"Jev 已响应，Choice 结果未通过检查。请核对地址和模型。",
+      community_jev_http_401:"Jev 鉴权未通过，请核对 Key。",
+      community_jev_http_403:"Jev 拒绝这把 Key 访问，请核对模型权限。",
+      community_jev_http_404:"Jev 地址或模型不可用，请核对配置。",
+      community_jev_http_429:"Jev 调用受限，请稍后再检查。",
+      community_jev_settings_changed:"决策设置已更新，请重新打开并检查。",
+      community_jev_check_required:"请重新检查当前配置。",
+      community_jev_grant_changed:"Jev 接收方或授权已更新，请重新确认。"};
     notify(bufferErrors[detail]||known[detail]||(e instanceof FormError||hostMessages.has(detail)?detail:"操作暂未完成，请稍后重试。"));
   });
   const action = (name, args={}) => api().import_action(name,args);
@@ -2351,6 +2363,14 @@ window.pcarLive = (() => {
       return node;
     };
     for(const m of t.input_members||[])if(m.text)show("user",m.text,m.id,m.timestamp);
+    const decision=t.decision_provider;
+    if(decision?.selected==="jev" && decision.actual){
+      const label=decision.fallback
+        ? (decision.outcome==="received"?"Jev 派发前不可用，本轮使用 DeepSeek Flash":"已改用 DeepSeek Flash，本轮决策未完成")
+        : decision.outcome==="unknown"?"Jev 决策结果待确认"
+        : decision.outcome==="received"?"本轮决策 · Jev":"本轮 Jev 决策未完成";
+      el("small",label,group).className="hint";
+    }
     const plans=t.desktop_publications||[];
     const notices=plans.filter(v=>v.phase==="search_notice");
     if(t.search_notice&&!notices.some(v=>v.kind==="speech"))show("persona",t.search_notice.text,t.search_notice.event_id,t.search_notice.timestamp);
@@ -2699,6 +2719,22 @@ window.pcarLive = (() => {
       ? `开启后，原双人私聊链按原授权使用人物和会话资料。检索取材由官方 DeepSeek Flash 完成，读取本轮原话、获准引用和本会话最近最多 ${state.retrieval_history_turns} 个可读回合。判断材料时接收本地原文。公开补查另由下方授权控制。`
       : "此授权供新版双人私聊链使用。开启后，本会话已有和新增的原话、人物资料、引用、导入记录、记忆及文件内容均可交给以下接收方。联网查询可以包含私人信息。你可以随时关闭。",box);
     for(const [role,url] of Object.entries(state.recipients))el("p",[recipientLabels[role],state.models[role],url].filter(Boolean).join(" · "),box);
+    if(state.community_search && currentPerson()?.profile.chat_mode!=="roleplay" && api().live_jev){
+      api().live_jev("status",{persona_id:person.id,session_id:state.session_id}).then(value=>{
+        if(!box.isConnected || !sameSession() || !value.enabled)return;
+        const pane=groupBox(box,"Jev 决策授权");
+        const grant=value.session;
+        el("p",[value.name,value.base_url+"/systemone"].join(" · "),pane);
+        el("p",grant.authorized?"本会话已授权 Jev 决策。":"本会话当前使用 DeepSeek Flash 决策。",pane);
+        el("small","授权后，Jev 可接收本轮内容及获准的必要人物资料、历史、引用和记忆，用于决策。",pane);
+        button(pane,grant.authorized?"撤回本会话的 Jev 授权":"同意本会话使用 Jev 决策",async()=>{
+          if(!sameSession())return;
+          await api().live_jev("grant",{persona_id:person.id,session_id:state.session_id,enabled:!grant.authorized,
+            revision:grant.revision,recipient_hash:grant.recipient});
+          if(sameSession())await privacyPanel();
+        });
+      }).catch(()=>{});
+    }
     const context=state.public_lookup;
     if(state.community_search?.enabled){
       button(box,"撤回本会话的明确联网查找授权",async()=>{
@@ -3106,6 +3142,50 @@ window.pcarLive = (() => {
       button(pane,"保存连接",()=>saveConnection(role.value,url.value.trim(),name.value.trim(),secret.value));
     });
   }
+  async function decisionSettings(){
+    const value=await api().live_jev("status"),box=panel("决策模型设置");
+    const target=groupBox(box,value.enabled?"自定义 Jev 已启用":"当前使用 DeepSeek Flash 决策");
+    el("small","启用 Jev 后，在聊天页确认本会话授权。若本轮 Jev 在请求派发前无法连接，PCAR 可沿用本会话已有的 Flash 权限。",target);
+    const url=inputField(target,"Jev HTTPS URL","url",value.base_url);
+    const name=inputField(target,"模型名","text",value.name);
+    const key=inputField(target,"Jev API Key","password","");
+    key.autocomplete="new-password";
+    key.placeholder=value.key_configured?"同一地址可留空沿用已保存的 Key":"填写独立的 Jev Key";
+    const result=el("p",value.choice_verified?"已保存的配置通过连通和功能检查。":"",target);
+    result.setAttribute("role","status");
+    let approved=null,epoch=0;
+    const verify=button(target,"检查连接与决策功能",async()=>{
+      const checkEpoch=++epoch;
+      approved=null;enable.disabled=true;verify.disabled=true;
+      result.textContent="正在检查 Jev 连接和 Choice 功能。";
+      try{
+        const checked=await api().live_jev("check",{base_url:url.value.trim(),name:name.value.trim(),key:key.value,revision:value.revision});
+        if(!box.isConnected || checkEpoch!==epoch)return;
+        approved=checked.token;
+        result.textContent="连通与 Choice 功能通过 · "+checked.name+" · "+checked.base_url+"/systemone";
+        enable.disabled=false;
+        key.value="";
+      }catch(error){
+        if(checkEpoch===epoch)result.textContent="检查未通过，当前设置仍生效。";
+        throw error;
+      }finally{verify.disabled=false;}
+    });
+    const enable=button(target,"启用 Jev",async()=>{
+      if(!approved)return;
+      enable.disabled=true;
+      try{await api().live_jev("activate",{token:approved,revision:value.revision});}
+      finally{approved=null;}
+      await decisionSettings();
+    });
+    enable.disabled=true;
+    enable.classList.add("primary");
+    for(const input of [url,name,key])input.addEventListener("input",()=>{
+      ++epoch;approved=null;enable.disabled=true;result.textContent="";
+    });
+    if(value.enabled)button(target,"切回 DeepSeek Flash",async()=>{
+      await api().live_jev("disable",{revision:value.revision});await decisionSettings();
+    });
+  }
   async function mainReplySettings(){
     const status=await api().live_main_reply(),box=panel("主回复模型");
     const labels={ds_pro:"DeepSeek V4 Pro",openrouter_hydrogen:"Gemini 4 Hydrogen"};
@@ -3265,6 +3345,7 @@ window.pcarLive = (() => {
     const box=panel("运行与诊断");
     box.dataset.supportPanel="";
     addLogExport(box);
+    if(state.community && api().live_jev)button(box,"决策模型设置",decisionSettings);
     button(box,"模型调用限额",quotaSettings);
     if(api().live_backups&&api().restore_backup_copy)button(box,"本机备份与恢复",backupPanel);
     if(lastHealth?.quotaWaits?.length)button(box,"查看等待额度的任务",()=>quotaPrompt(lastHealth.quotaWaits,true));
@@ -3433,5 +3514,5 @@ window.pcarLive = (() => {
     get selecting(){return selectionToken!==null;},get pendingDraft(){return Boolean(pendingDraft(currentSession()));},
     home:run(home),select:run(select),draw,capture,restore:restoreReading,reviseDraft,renderInputBuffer,manualEnter,
     avatar,appearance,send:run(send),profile:run(profile),importHistory:run(importHistory),
-    diagnostics,connection,recoverDocument:run(recoverDocument),stop,resume,wake,repairStatus,exitStatus};
+    diagnostics,decisionSettings:run(decisionSettings),connection,recoverDocument:run(recoverDocument),stop,resume,wake,repairStatus,exitStatus};
 })();

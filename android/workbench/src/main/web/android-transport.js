@@ -38,6 +38,7 @@
     "live_confirm_inline_main", "live_create", "live_draft", "live_health", "live_location", "live_lookup_confirm",
     "live_memory", "live_message_position", "live_network_wake", "live_package", "live_page", "live_people", "live_persona_image",
     "live_package_sessions", "live_preview_package_export", "live_discard_package", "live_export_package",
+    "live_jev",
     "live_privacy", "live_quota_decide", "live_quota_settings", "live_rename_session", "live_reply_detail", "live_save_package", "live_select",
     "live_set_buffer", "live_stage_retry", "live_submissions", "live_submit", "open_key_settings", "pick_deepseek_export", "pick_transcript",
     "presentation_attach", "presentation_begin", "presentation_decide", "presentation_reconcile",

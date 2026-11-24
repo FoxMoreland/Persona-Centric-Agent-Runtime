@@ -383,6 +383,15 @@ class ReviewedPrivateChatProviders:
             raise RuntimeErrorBase('private_chat_review_incomplete')
         return partial(self._choose,self._model('jev'),source_review=self.bundle['public_lookup_j5'])
 
+    def bind_community_choice(self, router, tid, node, *, public_source, check_fallback):
+        source_review = None
+        if public_source:
+            if not self.public_lookup_version:
+                raise RuntimeErrorBase('private_chat_review_incomplete')
+            source_review = self.bundle['public_lookup_j5']
+        dispatch = partial(router.complete, tid, node, check_fallback=check_fallback)
+        return partial(self._choose, self._model('jev'), source_review=source_review, dispatch=dispatch)
+
     def target_model(self, settings=None):
         model = (self.config.load() if settings is None else settings).get('lookup_target_model')
         if (not model or self.bundle['lookup_target']['model']!={k:model[k] for k in ('base_url','name')}
@@ -478,7 +487,7 @@ class ReviewedPrivateChatProviders:
     async def choose(self,node,attempt,state,options):
         return await self.bind_choose()(node,attempt,state,options)
 
-    async def _choose(self,model,node,attempt,state,options,*,source_review=None):
+    async def _choose(self,model,node,attempt,state,options,*,source_review=None,dispatch=None):
         if self.knowledge_revisions:
             from .knowledge_revisions import model_material
             state=model_material(state)
@@ -510,10 +519,14 @@ class ReviewedPrivateChatProviders:
         if key not in self.connections:
             self.connections[key]=self.jev_factory(model)
         timing={}
-        status,raw=await self.connections[key].complete(body,on_dispatch=lambda _:None,on_receipt=lambda _:None,
-                                                        diagnostics=timing.update)
+        transport = self.connections[key].complete
+        callbacks = {'on_dispatch': lambda _: None, 'on_receipt': lambda _: None, 'diagnostics': timing.update}
+        status,raw=await (dispatch(body,transport,**callbacks) if dispatch else transport(body,**callbacks))
         audit={'model':model['name'],'status':status,'timing':timing,'raw_sha256':sha256(raw.encode()).hexdigest(),
                'options':list(options),'preset_version':self.version}
+        if timing.get('decision_provider') == 'jev':
+            audit['decision_source'] = 'jev'
+            audit['decision_outcome'] = timing.get('decision_outcome')
         if source_review is not None:
             from .archive import fingerprint
             audit.update(purpose='public_lookup_j5',request_sha256=fingerprint(body))
@@ -526,10 +539,13 @@ class ReviewedPrivateChatProviders:
             return None,audit
         answers=result.get('answers') if isinstance(result,dict) else None
         if status!=200 or not isinstance(answers,dict) or set(answers)!={node} or not isinstance(answers[node],dict):
+            if timing.get('decision_provider') == 'jev':
+                audit.update(model=result.get('model',model['name']), usage=usage(result),
+                             provider_receipt_sha256=result.get('provider_receipt_sha256'))
             return None,audit
         answer=answers[node]
         choice=answer.get('choice')
-        if getattr(self,'community_route',False):
+        if getattr(self,'community_route',False) and timing.get('decision_provider') != 'jev':
             from .community_decision import PROFILE
             if (result.get('decision_source') != PROFILE or answer.get('type') != 'choice'
                     or choice not in options):
@@ -541,7 +557,12 @@ class ReviewedPrivateChatProviders:
                 or any(type(v) not in (int,float) or not math.isfinite(v) or not 0<=v<=1 for v in weights.values())
                 or not math.isclose(sum(weights.values()),1,abs_tol=.001)):
             return None,audit
-        return choice,audit|{'usage':usage(result),'probabilities':weights,'confidence':answer.get('confidence')}
+        return choice,audit|{'usage':usage(result),
+                             'probabilities':weights,'confidence':answer.get('confidence'),
+                             **({'model':result.get('model',model['name']),
+                                 'request_sha256':timing.get('request_sha256'),
+                                 'provider_receipt_sha256':result.get('provider_receipt_sha256')}
+                                if timing.get('decision_provider') == 'jev' else {})}
 
     def notice_model(self):
         if 'notice' not in self.bundle:

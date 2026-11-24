@@ -82,7 +82,8 @@ class JevTransport:
                 async for part in response.content.iter_chunked(65536):
                     raw.extend(part)
                     if len(raw)>8*1024**2:
-                        raise ModelError('jev_response_too_large')
+                        raise ModelError('jev_response_too_large', diagnostics={'http_status': status,
+                                         'request_headers_sent': True, 'effect_unknown': False})
                 receipt_at = loop.time()
                 on_receipt(receipt_at)
                 return status,raw.decode('utf-8',errors='replace').replace(key,'[REDACTED]')

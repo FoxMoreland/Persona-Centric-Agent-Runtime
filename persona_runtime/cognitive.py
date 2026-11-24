@@ -289,9 +289,16 @@ class CognitiveService:
             from .knowledge_web_decision import request,VERSION
             from . import community
             model = json.loads(task['model_snapshot'])
-            body = request(model, payload['knowledge_processing']['input'])
             version, source = VERSION, 'explicit_jev'
-            if community.enabled() and model['base_url'] == community.DECISION_BASE:
+            from .community_decisions import TURN
+            from .scene_policy import read
+            plan = read(conn, TURN+payload['knowledge_processing'].get('root_turn_id','')) if community.enabled() else None
+            if plan and plan['provider'] == 'jev':
+                body = request(model | {'name': plan['name']}, payload['knowledge_processing']['input'])
+                source = 'community_custom_jev'
+            else:
+                body = request(model, payload['knowledge_processing']['input'])
+            if source != 'community_custom_jev' and community.enabled() and model['base_url'] == community.DECISION_BASE:
                 from .community_decision import PROFILE, build
                 body = build(body, model['max_input_chars'])
                 version, source = PROFILE, 'community_official_key'

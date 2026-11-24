@@ -286,6 +286,8 @@ class ChatEngine:
         self.direct = DirectReplies(self.expression, dialogue_generation)
         from .scene_runtime import SceneRuntime, SceneDialogue
         from .scene_publication import ScenePublication
+        from .community_decisions import TurnDecisions
+        self.decision_providers = TurnDecisions(store, config)
         self.scene = SceneRuntime(self)
         self.scene_publication = ScenePublication(self)
         self.expression.outlet.scene = self.scene_publication
@@ -540,6 +542,9 @@ class ChatEngine:
                 if channel=='desktop':
                     from .desktop_turn_retry import admission_scope
                     from .main_reply import admit, MARKER
+                    from .community_decisions import freeze
+                    if not roleplay:
+                        freeze(conn,self.config,turn_id,persona_id,session_id)
                     if not roleplay and (accepted_writer := admit(self.config,self.config.load(),candidate_route)):
                         model[MARKER] = accepted_writer
                         conn.execute('UPDATE turns SET model_snapshot=? WHERE id=?',(json.dumps(model),turn_id))

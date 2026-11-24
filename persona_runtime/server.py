@@ -45,6 +45,8 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
     config.initialize()
     store = Store(paths)
     store.initialize()
+    from .community_jev import Settings as JevSettings
+    decision_settings = JevSettings(store, config)
     if private_chat_providers is None and engine_factory is None:
         from .ordinary_providers import registered
         private_chat_providers = registered(config)
@@ -358,6 +360,14 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         service = engine.service
         if not isinstance(args, dict):
             raise RuntimeErrorBase("JSON object required")
+        if action in ('desktop.decision.status', 'desktop.decision.check', 'desktop.decision.activate',
+                      'desktop.decision.disable', 'desktop.decision.grant'):
+            operation = action.rsplit('.', 1)[-1]
+            if operation == 'check':
+                return web.json_response(await decision_settings.check(**args))
+            handler = {'status': decision_settings.status, 'activate': decision_settings.activate,
+                       'disable': decision_settings.disable, 'grant': decision_settings.grant}[operation]
+            return web.json_response(handler(**args))
         if action in ('character.pack.sessions', 'character.pack.preview_export', 'character.pack.export',
                       'character.pack.preview_import', 'character.pack.import'):
             from .character_pack import CharacterPacks
@@ -853,6 +863,8 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
             await asyncio.gather(worker, return_exceptions=True)
         await engine.wait()
         await engine.scene.close()
+        if hasattr(engine, 'decision_providers'):
+            await engine.decision_providers.close()
         ordinary_close=getattr(engine.private_reply.ordinary.providers,'close',None)
         if ordinary_close:
             await ordinary_close()
