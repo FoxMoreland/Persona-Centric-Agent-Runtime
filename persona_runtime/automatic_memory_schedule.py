@@ -25,20 +25,28 @@ def page(db,key,query,args,limit):
 
 
 def scan_sessions(db,pid,settings,model,store=None):
-    from .import_history import history_allowed
+    from .import_history import META, history_allowed
+    from .scene_policy import read
+    from .character_pack_format import FINISHED, UNKNOWN
     sessions=page(db,'sessions/'+pid,"SELECT rowid,id FROM sessions WHERE persona_id=? AND rowid>? ORDER BY rowid LIMIT ?",(pid,),2)
     result=[]
     for ordinal,sid in sessions:
         from .ordinary_materials import full_revision
         full=store and full_revision(store,db,pid,sid,model,'organization')
+        history=read(db,META+sid) or {}
         picks=set();moves={'sessions/'+pid:ordinal}
         for kind in ('native','imported'):
             imported=kind=='imported'
             if imported and not (settings.get('memory_backfill',True) and model.get('encrypted_key') and (full or history_allowed(db,sid,'memory',model))):continue
+            if imported and history.get('portable_package') and not history.get('organize'):continue
             key=kind+'/'+sid
             comparison="GLOB" if imported else "NOT GLOB"
+            filter_done = "AND NOT EXISTS (SELECT 1 FROM memory_coverage c WHERE c.turn_id=turns.id AND c.disposition IN (SELECT value FROM json_each(?)))"
+            filtered = imported and history.get('portable_package')
             rows=page(db,key,f"""SELECT rowid,id FROM turns WHERE session_id=? AND status='completed'
-                AND source_key {comparison} 'imported.*' AND rowid>? ORDER BY rowid LIMIT ?""",(sid,),16)
+                AND source_key {comparison} 'imported.*' {filter_done if filtered else ''}
+                AND rowid>? ORDER BY rowid LIMIT ?""",
+                      (sid,encoded(sorted(FINISHED | UNKNOWN))) if filtered else (sid,),16)
             if rows:moves[key]=rows[-1][0]
             picks.update(r[1] for r in rows)
             picks.update(r[0] for r in db.execute(f"""SELECT c.turn_id FROM memory_coverage c JOIN turns t ON t.id=c.turn_id
@@ -89,6 +97,17 @@ def schedule(coordinator,db,pid,settings,enabled_at,pages,force=False):
                                    (pid,LOCAL_USER_ID,t['id'],key,binding(r).get('hash',''),timestamp()))
                     continue
                 c=db.execute('SELECT * FROM memory_coverage WHERE turn_id=?',(t['id'],)).fetchone();sha=binding(r)['hash']
+                if c and history_scope.imported(t) and json.loads(t['origin_json']).get('portable_package'):
+                    from .character_pack_format import FINISHED, UNKNOWN
+                    if c['disposition'] in FINISHED | UNKNOWN:
+                        continue
+                    if c['batch_id'] is None:
+                        # A recipient explicitly opted into the outstanding work.
+                        db.execute("UPDATE memory_coverage SET disposition='unprocessed',source_hash=? WHERE turn_id=?",
+                                   (sha,t['id']))
+                        if t['id'] not in unknown:
+                            pending.append(t)
+                        continue
                 if not c:db.execute("INSERT INTO memory_coverage VALUES(?,?,?,?,?,NULL,'unprocessed','pending',?)",(pid,LOCAL_USER_ID,t['id'],key,sha,timestamp()))
                 if c and c['source_hash']==sha and c['disposition'] not in ('unprocessed','stale'):continue
                 if t['id'] not in unknown:pending.append(t)
@@ -113,7 +132,9 @@ def schedule(coordinator,db,pid,settings,enabled_at,pages,force=False):
                         choices.setdefault(key,[]).append((priority,historical[0]['ordinal'],sid,historical,None,True,trigger))
             if 'incremental' in settings['triggers']:
                 for fragment in db.execute("SELECT * FROM memory_fragments WHERE session_id=? AND state='invalid' ORDER BY rowid LIMIT 4",(sid,)).fetchall():
-                    p=json.loads(fragment['data_json'])['payload']
+                    data=json.loads(fragment['data_json'])
+                    p=data['payload']
+                    if p.get('portable_package') and not data.get('manual_rebuild_operation'):continue
                     if p['scope']!=selected:continue
                     ids={b['turn_id'] for b in p['bindings']}
                     if ids & unknown:continue

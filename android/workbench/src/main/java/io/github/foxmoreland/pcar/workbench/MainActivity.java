@@ -149,7 +149,7 @@ public final class MainActivity extends Activity {
                     pick(DocumentInput.Kind.SCOPED_TRANSCRIPT, reply);
                 } else reply.error("安卓工作台操作参数无效。");
             }
-            case "export_support_logs", "save_deepseek_markdown" -> saveDocument(method, args, reply);
+            case "export_support_logs", "save_deepseek_markdown", "live_export_package" -> saveDocument(method, args, reply);
             case "pick_deepseek_export", "live_package", "open_key_settings", "exit_workbench" -> {
                 if (args.length() != 0) {
                     reply.error("安卓工作台操作参数无效。");
@@ -212,14 +212,21 @@ public final class MainActivity extends Activity {
             return;
         }
         boolean logs = method.equals("export_support_logs");
-        if (logs ? args.length() != 2 : args.length() != 1 || !(args.opt(0) instanceof String)) {
+        boolean role = method.equals("live_export_package");
+        boolean portable = role && args.length() == 2 && args.opt(1) instanceof JSONObject;
+        boolean valid = logs ? args.length() == 2
+                : args.opt(0) instanceof String && (args.length() == 1 || portable);
+        if (!valid) {
             reply.error("安卓工作台操作参数无效。");
             return;
         }
+        String mime = portable ? "application/octet-stream"
+                : role ? "application/json" : logs ? "application/zip" : "text/markdown";
+        String title = portable ? "PCAR.pcarpack" : role ? "PCAR.json" : logs ? "PCAR-logs.zip" : "DeepSeek.md";
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
                 .addCategory(Intent.CATEGORY_OPENABLE)
-                .setType(logs ? "application/zip" : "text/markdown")
-                .putExtra(Intent.EXTRA_TITLE, logs ? "PCAR-logs.zip" : "DeepSeek.md")
+                .setType(mime)
+                .putExtra(Intent.EXTRA_TITLE, title)
                 .addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
         pendingExport = new PendingExport(method, args.toString(), reply);
         try {

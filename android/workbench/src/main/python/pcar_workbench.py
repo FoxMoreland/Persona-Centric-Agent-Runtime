@@ -28,7 +28,8 @@ PAGE_METHODS = frozenset("""
     live_batch_action live_branch live_cancel live_confirm_inline_main live_create live_draft live_health
     live_location live_lookup_confirm live_memory live_message_position live_network_wake live_page
     live_people live_persona_image live_privacy live_quota_decide live_quota_settings live_rename_session live_reply_detail
-    live_save_package live_select live_set_buffer live_stage_retry live_submissions live_submit presentation_attach
+    live_save_package live_package_sessions live_preview_package_export live_discard_package
+    live_select live_set_buffer live_stage_retry live_submissions live_submit presentation_attach
     presentation_begin presentation_decide presentation_reconcile revise_deepseek_markdown template_spec
 """.split())
 BACKGROUND_WRITES = frozenset(("live_location", "live_draft", "presentation_decide", "acknowledge_announcement"))
@@ -182,6 +183,21 @@ def make_export(kind, serialized_args, directory):
     if kind == "export_support_logs" and len(args) == 2:
         from persona_runtime.diagnostic_export import export_logs
         return str(export_logs(_runtime.paths, *args, output_folder=directory))
+    if kind == "live_export_package" and len(args) in (1, 2):
+        from persona_runtime.character_pack import copy_file
+        source = _runtime.data._stage_package_export(*args)
+        try:
+            with NamedTemporaryFile(dir=directory, prefix="pcar-export-", suffix=source.suffix, delete=False) as stream:
+                output = Path(stream.name)
+                try:
+                    copy_file(source, stream)
+                    return str(output)
+                except BaseException:
+                    stream.close()
+                    output.unlink(missing_ok=True)
+                    raise
+        finally:
+            source.unlink(missing_ok=True)
     if kind == "save_deepseek_markdown" and len(args) == 1:
         raw = _runtime.data.read_deepseek_markdown(args[0])
         with NamedTemporaryFile(dir=directory, prefix="pcar-export-", suffix=".md", delete=False) as stream:

@@ -5,7 +5,7 @@ from contextvars import ContextVar
 
 from .archive import fingerprint, read_exact, turn_scope
 from .config import ConfigStore
-from .context_builders import memory_usable
+from .context_builders import memory_usable, portable_memory_sessions
 from .import_history import chronological, history_allowed
 from .knowledge_routing import configured_model
 from .models import RuntimeErrorBase
@@ -184,9 +184,12 @@ def collect(entry, db, turn, contract, frozen=None):
         frozen_order={mid:i for i,mid in enumerate(frozen['memories'])} if frozen else {}
         memories = []
         selection = (" AND m.id IN (SELECT value FROM json_each(?))" if frozen else "")
-        parameters = (pid,sid,json.dumps(frozen['memories'])) if frozen else (pid,sid)
+        parameters = (pid,sid,sid,json.dumps(frozen['memories'])) if frozen else (pid,sid,sid)
         memory_query="""SELECT m.* FROM memories m JOIN events e ON e.id=m.source_event_id
-                WHERE m.persona_id=? AND e.session_id=? AND m.status='active'""" + selection
+                LEFT JOIN memory_facts f ON f.memory_id=m.id
+                WHERE m.persona_id=? AND (e.session_id=? OR EXISTS(
+                  SELECT 1 FROM json_each(f.data_json,'$.portable_sessions') WHERE value=?))
+                AND m.status='active'""" + selection
         if pinned:
             memory_query+=" ORDER BY (m.id IN (SELECT value FROM json_each(?))) DESC,m.rowid DESC LIMIT 128"
             parameters=(*parameters,json.dumps(list(pinned)))
@@ -194,7 +197,9 @@ def collect(entry, db, turn, contract, frozen=None):
             memory_query+=" ORDER BY m.rowid DESC LIMIT 128"
         for row in db.execute(memory_query,parameters):
             item = dict(row)
-            if not memory_in_session(db,item['id'],pid,sid) or not memory_usable(db,turn,item):
+            if not portable_memory_sessions(db,item['id']) and not memory_in_session(db,item['id'],pid,sid):
+                continue
+            if not memory_usable(db,turn,item):
                 continue
             if not full and not memory_usable(db,turn,item,purpose='jev',providers=jev):
                 continue

@@ -94,7 +94,14 @@ def invalidate(db,pid,event_ids):
         data=json.loads(row['data_json'])
         if ids & {e['id'] for e in data['payload']['events']}:
             invalidate_fragment(db,row,'source_withdrawn')
-    for row in db.execute('SELECT * FROM memory_coverage WHERE persona_id=?',(pid,)).fetchall():
+    portable = {eid.split('.')[1] for eid in ids if eid.startswith('imported.') and eid.count('.') == 2}
+    if portable:
+        db.execute("""UPDATE memory_coverage SET disposition='revoked',summary_state='invalid',updated_at=?
+            WHERE persona_id=? AND batch_id IS NULL AND turn_id IN (
+                SELECT t.id FROM turns t JOIN json_each(?) ids ON ids.value=t.id
+                WHERE json_extract(t.origin_json,'$.portable_package') IS NOT NULL)""",
+                   (timestamp(),pid,encoded(sorted(portable))))
+    for row in db.execute('SELECT * FROM memory_coverage WHERE persona_id=? AND batch_id IS NOT NULL',(pid,)).fetchall():
         b=db.execute('SELECT data_json FROM memory_batches WHERE id=?',(row['batch_id'],)).fetchone()
         if not b:continue
         p=json.loads(b[0])['payload']
@@ -153,6 +160,7 @@ def human_source_check(db,old,event_ids):
 def copy_manual_fact(db,fact,new_id):
     if not fact:return
     data=json.loads(fact['data_json']);data.update(manual_authority=True,import_review_required=False)
+    data.pop('portable_sessions',None)
     db.execute('INSERT INTO memory_facts VALUES(?,?,?,?,?,?,?,?,?,?)',(new_id,fact['persona_id'],fact['user_id'],fact['scope_json'],fact['subject'],fact['attribute'],fact['valid_from'],fact['valid_until'],fact['batch_id'],encoded(data)))
 
 

@@ -17,7 +17,7 @@ final class DocumentInput {
     enum Kind {
         TRANSCRIPT("transcript", ".md", 64L * 1024 * 1024, "请选择 Markdown 文件。", "聊天记录超过 64 MiB。"),
         SCOPED_TRANSCRIPT("scoped_transcript", ".md", 64L * 1024 * 1024, "请选择 Markdown 文件。", "聊天记录超过 64 MiB。"),
-        CHARACTER("character", ".json", 256L * 1024, "请选择 PCAR 角色 JSON 文件。", "角色包超过 256 KiB。"),
+        CHARACTER("character", ".json", 256L * 1024, "请选择 PCAR 角色 JSON 或 .pcarpack 文件。", "纯角色包超过 256 KiB。"),
         DEEPSEEK("deepseek", ".zip", 2L * 1024 * 1024 * 1024, "请选择 DeepSeek 导出 ZIP。", "导出 ZIP 超过 2 GiB。");
 
         final String operation;
@@ -38,21 +38,29 @@ final class DocumentInput {
     static Path copy(Context context, Uri uri, Kind kind) throws IOException {
         if (!ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) throw new IOException(kind.wrongType);
         ContentResolver resolver = context.getContentResolver();
+        String suffix = kind.suffix;
+        long maximum = kind.maximum;
+        String tooLarge = kind.tooLarge;
         try (Cursor cursor = resolver.query(uri, new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE},
                 null, null, null)) {
             if (cursor == null || !cursor.moveToFirst()) throw new IOException("无法读取所选文件。");
             int nameColumn = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
             String name = nameColumn < 0 ? null : cursor.getString(nameColumn);
-            if (name == null || !name.toLowerCase(Locale.ROOT).endsWith(kind.suffix)) {
+            if (kind == Kind.CHARACTER && name != null && name.toLowerCase(Locale.ROOT).endsWith(".pcarpack")) {
+                suffix = ".pcarpack";
+                maximum = 64L * 1024 * 1024;
+                tooLarge = "完整角色包超过 64 MiB。";
+            }
+            if (name == null || !name.toLowerCase(Locale.ROOT).endsWith(suffix)) {
                 throw new IOException(kind.wrongType);
             }
             int sizeColumn = cursor.getColumnIndex(OpenableColumns.SIZE);
-            if (sizeColumn >= 0 && !cursor.isNull(sizeColumn) && cursor.getLong(sizeColumn) > kind.maximum) {
-                throw new IOException(kind.tooLarge);
+            if (sizeColumn >= 0 && !cursor.isNull(sizeColumn) && cursor.getLong(sizeColumn) > maximum) {
+                throw new IOException(tooLarge);
             }
         }
 
-        Path temp = Files.createTempFile(context.getCacheDir().getCanonicalFile().toPath(), "pcar-import-", kind.suffix);
+        Path temp = Files.createTempFile(context.getCacheDir().getCanonicalFile().toPath(), "pcar-import-", suffix);
         boolean complete = false;
         try {
             try (InputStream input = resolver.openInputStream(uri); OutputStream output = Files.newOutputStream(temp)) {
@@ -61,7 +69,7 @@ final class DocumentInput {
                 long total = 0;
                 for (int count; (count = input.read(buffer)) != -1;) {
                     total += count;
-                    if (total > kind.maximum) throw new IOException(kind.tooLarge);
+                    if (total > maximum) throw new IOException(tooLarge);
                     output.write(buffer, 0, count);
                 }
                 if (total == 0) throw new IOException("所选文件为空。");

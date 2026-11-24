@@ -533,13 +533,24 @@ class WorkbenchData:
 
     def live_package(self):
         from webview import FileDialog
-        files=self._window().create_file_dialog(FileDialog.OPEN,allow_multiple=False,file_types=("PCAR JSON (*.json)",))
-        if not files:return None
-        return self.read_character_file(files[0])
+        files=self._window().create_file_dialog(FileDialog.OPEN,allow_multiple=False,
+                                               file_types=("PCAR 角色包 (*.pcarpack;*.json)",))
+        return self.read_character_file(files[0]) if files else None
 
     def read_character_file(self, path):
+        from pathlib import Path
+        from .character_pack import stage_input, stage_path
+        from .character_pack_format import FORMAT, SUFFIX
         from .character import read_package
-
+        self._require_open()
+        if Path(path).suffix.lower() == SUFFIX:
+            handle = stage_input(self._config.paths, path)
+            try:
+                value = self._pack_call('preview_import', handle=handle)
+            except BaseException:
+                stage_path(self._config.paths, handle).unlink(missing_ok=True)
+                raise
+            return value | {'handle': handle, 'format': FORMAT}
         data=read_package(path)
         if isinstance(data,dict) and "persona_spec" in data:
             from .character import validate_character
@@ -551,10 +562,68 @@ class WorkbenchData:
         return {"persona_spec":data}
 
     def live_save_package(self,package,operation_id):
+        from .character_pack_format import FORMAT
+        if package.get('format') == FORMAT:
+            self._require_open()
+            result = self._pack_call('import', handle=package['handle'], digest=package['digest'],
+                                     operation_id=operation_id)
+            self.live_discard_package(package['handle'])
+            self._use_persona(result['id'])
+            return result
         if "character" in package:
             selected=next((p["id"] for p in self._client.manage("persona.list") if p["selected"]),None)
             return self._client.manage("character.import",persona_id=selected,package=package,operation_id=operation_id)
         return self.live_create(package["persona_spec"])
+
+    def _pack_call(self, operation, **args):
+        return self._client.call('POST', '/v1/manage',
+                                 {'action': 'character.pack.' + operation, 'args': args}, timeout=180)
+
+    def live_discard_package(self, handle):
+        from .character_pack import stage_path
+        stage_path(self._config.paths, handle).unlink(missing_ok=True)
+        return True
+
+    def live_package_sessions(self, pid):
+        self._require_open()
+        return self._pack_call('sessions', persona_id=pid)
+
+    def live_preview_package_export(self, pid, session_ids, main_session):
+        self._require_open()
+        return self._pack_call('preview_export', persona_id=pid, session_ids=session_ids, main_session=main_session)
+
+    def live_export_package(self, pid, selection=None):
+        from pathlib import Path
+        from webview import FileDialog
+        from .character_pack import save_selected, stage_path
+        from .character_pack_format import SUFFIX
+        self._require_open()
+        suffix = SUFFIX if selection else '.json'
+        label = "完整角色包" if selection else "纯角色包"
+        files = self._window().create_file_dialog(FileDialog.SAVE, save_filename='PCAR' + suffix,
+                                                  file_types=(f"{label} (*{suffix})",))
+        if not files:
+            return False
+        self._require_open()
+        target = Path(files if isinstance(files, str) else files[0])
+        require(target.suffix.lower() == suffix, "角色包文件扩展名无效。")
+        source = self._stage_package_export(pid, selection)
+        try:
+            save_selected(source, target)
+        finally:
+            source.unlink(missing_ok=True)
+        return True
+
+    def _stage_package_export(self, pid, selection):
+        from pathlib import Path
+        from .character_pack import stage_path
+        from .models import identifier
+        if selection is None:
+            return Path(self._client.manage('character.export', persona_id=pid, name=identifier() + '.json')['path'])
+        require(isinstance(selection, dict) and set(selection) == {'session_ids', 'main_session', 'expected'}
+                and isinstance(selection['expected'], str), "请先预览角色包。")
+        value = self._pack_call('export', persona_id=pid, **selection)
+        return stage_path(self._config.paths, value['handle'])
 
     def live_create(self,spec):
         person=self._client.manage("persona.create",spec=spec)

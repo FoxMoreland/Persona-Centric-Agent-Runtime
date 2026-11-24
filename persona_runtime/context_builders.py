@@ -72,6 +72,9 @@ def memory_usable(conn,turn,memory,*,for_review=False,purpose='dialogue',provide
     from .turn_input import load_turn_sources
     from .automatic_memory import usable_fact
     if not for_review and not usable_fact(conn,memory):return False
+    sessions = portable_memory_sessions(conn, memory['id'])
+    if sessions and turn.get('session_id') not in sessions and (not for_review or turn.get('session_id') is not None):
+        return False
     ids={memory['source_event_id']}
     ids.update(r[0] for r in conn.execute('SELECT event_id FROM memory_sources WHERE memory_id=?',(memory['id'],)))
     selected=turn_scope(conn,turn)
@@ -103,6 +106,12 @@ def memory_usable(conn,turn,memory,*,for_review=False,purpose='dialogue',provide
             if blocked and not (memory['revision']>1 and memory['previous_id'] and blocked[0]=='memory_revised'):
                 return False
     return True
+
+
+def portable_memory_sessions(conn, ident):
+    row = conn.execute("SELECT json_extract(data_json,'$.portable_sessions') FROM memory_facts WHERE memory_id=?",
+                       (ident,)).fetchone()
+    return json.loads(row[0]) if row and row[0] else ()
 
 
 def query_terms(members):
