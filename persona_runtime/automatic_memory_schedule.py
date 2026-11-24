@@ -62,6 +62,7 @@ def schedule(coordinator,db,pid,settings,enabled_at,pages,force=False):
         groups={}
         for key,value in moves.items():advance(db,key,value)
         from .ordinary_materials import full_revision,history_access
+        from .import_history_service import must_prepare
         full=full_revision(coordinator.store,db,pid,sid,model,'organization')
         if not picks or limited and not full and not grant(coordinator.store,db,pid,sid,model):continue
         query="SELECT rowid AS ordinal,* FROM turns WHERE persona_id=? AND session_id=? AND status='completed' AND id IN ("+','.join('?' for _ in picks)+") ORDER BY rowid"
@@ -97,7 +98,8 @@ def schedule(coordinator,db,pid,settings,enabled_at,pages,force=False):
             latest=db.execute("SELECT updated_at FROM turns WHERE session_id=? ORDER BY rowid DESC LIMIT 1",(sid,)).fetchone()
             sealed=lifecycle and lifecycle[0]=='sealed';idle=now-datetime.fromisoformat(latest[0]).timestamp()>=120
             overdue=any(now-datetime.fromisoformat(t['updated_at']).timestamp()>=600 for t in pending)
-            ready=force or sealed or idle or overdue
+            preparing=bool(pending) and must_prepare(db,sid,complete=False)
+            ready=force or sealed or idle or overdue or preparing
             if ready:
                 fresh=[t for t in pending if not history_scope.imported(t) and datetime.fromisoformat(t['created_at']).timestamp()>=s['enabled_epoch']]
                 urgent=[t for t in fresh if t['user_event_id'] and re.search(r'更正|纠正|改为|以这次为准|\bcorrection\b',db.execute('SELECT text FROM events WHERE id=?',(t['user_event_id'],)).fetchone()[0],re.I)]
@@ -106,7 +108,9 @@ def schedule(coordinator,db,pid,settings,enabled_at,pages,force=False):
                 if trigger in settings['triggers']:
                     if urgent:choices.setdefault(key,[]).append((0,urgent[0]['ordinal'],sid,urgent,None,False,trigger))
                     if fresh and not urgent:choices.setdefault(key,[]).append((2,fresh[0]['ordinal'],sid,fresh,None,False,trigger))
-                    if historical and settings.get('memory_backfill',True):choices.setdefault(key,[]).append((2 if now-s['backfill_epoch']>=600 else 3,historical[0]['ordinal'],sid,historical,None,True,trigger))
+                    if historical and settings.get('memory_backfill',True):
+                        priority=1 if preparing else (2 if now-s['backfill_epoch']>=600 else 3)
+                        choices.setdefault(key,[]).append((priority,historical[0]['ordinal'],sid,historical,None,True,trigger))
             if 'incremental' in settings['triggers']:
                 for fragment in db.execute("SELECT * FROM memory_fragments WHERE session_id=? AND state='invalid' ORDER BY rowid LIMIT 4",(sid,)).fetchall():
                     p=json.loads(fragment['data_json'])['payload']

@@ -34,7 +34,11 @@ def collect_context_materials(engine, conn, turn, evidence=None, *, ablated=Fals
     from .context_memory import rank_memories
     from .recall_runtime import selection as recall_selection
     recall_plan=None if quoted else recall_selection(conn,turn)
-    memories=[] if quoted or recall_plan is not None else rank_memories(conn,turn,text,recent_queries,enforce_scope=evidence is not None)[:8]
+    from .quote_context import read as read_quote
+    from .context_memory import quote_priorities
+    pinned=quote_priorities(conn,turn,read_quote(conn,turn)) if quoted else None
+    memories=[] if recall_plan is not None or (quoted and not pinned) else rank_memories(
+        conn,turn,text,recent_queries,enforce_scope=quoted or evidence is not None,pinned=pinned)[:8]
     from .organization_output import pending_conflicts
     pending = [] if quoted else pending_conflicts(conn, turn, {r[3]['id'] for r in memories})
     row = None if quoted else conn.execute("SELECT * FROM summaries WHERE session_id=? AND channel=? AND status='active' AND end_row<? ORDER BY rowid DESC LIMIT 1", (turn['session_id'], turn['channel'], ordinal)).fetchone()
@@ -173,7 +177,7 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
     pending = materials.get('pending_conflicts', [])
     memory_times=[]
     from .automatic_memory import available
-    if not quote and available(conn):
+    if available(conn):
         for _,_,_,memory,*_ in memories:
             f=conn.execute('SELECT valid_from,valid_until FROM memory_facts WHERE memory_id=?',(memory['id'],)).fetchone()
             if f:
@@ -323,7 +327,7 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
             index=max((n for n,i in enumerate(history_items) if i['kind']=='retrieval'),key=lambda n:history_items[n]['rank'])
             old=history_items.pop(index);history.pop(index);history_rows.pop(index)
             removed.append({'kind':'history','id':old['group']['turn_id'],'reason':'input_budget'})
-        elif evidence is not None and memories:
+        elif evidence is not None and memories and not quote:
             old=memories.pop();removed.append({'kind':'memory','id':old[3]['id'],'reason':'input_budget'})
         elif history:
             if evidence is not None and len(history_items[0].get("speech_rows",[])) > 1:
@@ -337,7 +341,7 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
             if history_items:history_items.pop(0)
             history.pop(0)
             removed.append({'kind': 'history', 'ordinal': history_rows.pop(0), 'reason': 'input_budget'})
-        elif memories:
+        elif memories and not quote:
             old = memories.pop()
             removed.append({'kind': 'memory', 'id': old[3]['id'], 'reason': 'input_budget'})
         elif summary_items:
@@ -346,6 +350,9 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
         elif quote and quote_context.trim(quote):
             reference_block = quote_context.content(quote)
             reference_manifest = quote_context.manifest(quote)
+        elif memories:
+            old = memories.pop()
+            removed.append({'kind': 'memory', 'id': old[3]['id'], 'reason': 'input_budget'})
         elif len(prefix) > 1:
             prefix.pop(0)
             reference_block = direct_reference + quote_context.branch_block(prefix)

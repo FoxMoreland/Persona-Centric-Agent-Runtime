@@ -41,6 +41,17 @@ class RecallSupport:
             now,anomaly=self._time(db,confirm_jump=True)
             return {'effective_epoch':now,'anomaly':anomaly}
 
+    @staticmethod
+    def _initial_epoch(data,registered):
+        origin=data['origin_epoch']
+        return min(registered,origin) if data.get('age_from_source') and origin is not None else registered
+
+    def _priority(self,row,data,now):
+        anchor=row['anchor_epoch']
+        if anchor==row['registered_epoch'] and row['anchor_priority']==row['initial_priority']:
+            anchor=self._initial_epoch(data,anchor)
+        return policy.priority(row['kind'],row['anchor_priority'],anchor,now)
+
     def _register(self,db,kind,ref,data,now,*,rebuild_index=False):
         selected=data['scope'];key=fingerprint(selected)
         ident=fingerprint([policy.VERSION,key,kind,data['canonical_id'],ref['offset'],data['version']])
@@ -56,12 +67,13 @@ class RecallSupport:
                 (ident,fingerprint(ref),encoded(ref),data['session_id'],now))
             return ident
         p=policy.INITIAL_PRIORITY
+        anchor=self._initial_epoch(data,now)
         db.execute('''INSERT INTO recall_support_units
             (id,persona_id,scope_key,scope_json,kind,source_id,source_version,fragment_offset,lineage,session_id,reference_json,
              registered_epoch,origin_epoch,policy_version,initial_priority,anchor_priority,anchor_epoch,active_until,indexed_text,metadata_json)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (ident,selected['persona_id'],key,encoded(selected),kind,data['canonical_id'],data['version'],ref['offset'],data['lineage'],
-             data['session_id'],encoded(ref),now,data['origin_epoch'],policy.VERSION,p,p,now,policy.due(kind,p,now),data['text'],
+             data['session_id'],encoded(ref),now,data['origin_epoch'],policy.VERSION,p,p,anchor,policy.due(kind,p,anchor),data['text'],
              encoded({'source_type':data['source_type'],'offset':ref['offset'],'historical_usage':'unknown','index_version':INDEX_VERSION})))
         db.executemany('INSERT INTO recall_support_terms VALUES(?,?)',[(t,ident) for t in tokens(data['text'])])
         # Historical versions and their ledger stay, but superseded postings must
@@ -119,7 +131,7 @@ class RecallSupport:
             if not row:return {'state':'not_found'}
             data,error=self._live(db,row,selected,now)
             if error:return {'state':error}
-            p=policy.priority(row['kind'],row['anchor_priority'],row['anchor_epoch'],now)
+            p=self._priority(row,data,now)
             return {'state':'available','id':ident,'priority':p,'layer':'active' if row['active_until']>now else 'sleeping',
                 'revision':row['revision'],'source_type':data['source_type'],'historical_usage':'unknown',
                 'clock_anomaly':anomaly,'text':data['text']}
@@ -145,7 +157,7 @@ class RecallSupport:
                 seen.add(row['id']);read+=1
                 data,error=self._live(db,row,selected,now,session_id)
                 if error:excluded[error]=excluded.get(error,0)+1;return
-                p=policy.priority(row['kind'],row['anchor_priority'],row['anchor_epoch'],now)
+                p=self._priority(row,data,now)
                 items.append({'id':row['id'],'kind':row['kind'],'source_id':row['source_id'],
                     'source_version':row['source_version'],'lineage':row['lineage'],'text':data['text'],
                     'source_type':data['source_type'],'relevance':hits,'priority':p,'required':required,
@@ -269,7 +281,7 @@ class RecallSupport:
             events=db.execute('SELECT * FROM recall_support_events WHERE unit_id=? AND alpha>0 ORDER BY effective_epoch,root_id LIMIT ?',
                 (unit_id,policy.MAX_REPLAY_EVENTS+1)).fetchall()
             if len(events)>policy.MAX_REPLAY_EVENTS:raise RuntimeErrorBase('recall_replay_budget_exceeded')
-            p=unit['initial_priority'];anchor=unit['registered_epoch']
+            p=unit['initial_priority'];anchor=self._initial_epoch(data,unit['registered_epoch'])
             for event in events:p,anchor=policy.reinforce(unit['kind'],p,anchor,event['effective_epoch'],event['alpha'])
             if alpha:
                 db.execute('UPDATE recall_support_units SET anchor_priority=?,anchor_epoch=?,active_until=?,revision=revision+1 WHERE id=?',

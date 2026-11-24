@@ -11,6 +11,17 @@ def epoch(value):
     if stamp.tzinfo is None:raise RuntimeErrorBase('recall_source_time_unavailable')
     return stamp.timestamp()
 
+def source_epoch(db,event_id):
+    from .import_history import source_time
+    value=source_time(db,event_id)
+    if not value:
+        return None
+    try:
+        return epoch(value)
+    except (ValueError,OverflowError,RuntimeErrorBase):
+        return None
+
+
 def normalize_scope(value):
     expected=make_scope(value['persona_id'],value['channel'],value.get('bot',''),value.get('peer',''))
     if value!=expected:raise RuntimeErrorBase('recall_scope_invalid')
@@ -68,8 +79,11 @@ def material(db,kind,ref,*,now):
         if not memory_usable(db,_scope_turn(selected,event['session_id']),memory,for_review=True):return None
         if not usable_fact(db,memory,datetime.fromtimestamp(now,timezone.utc)):return None
         refs=[dict(r) for r in db.execute('SELECT event_id,quote FROM memory_sources WHERE memory_id=? ORDER BY event_id',(memory['id'],))]
+        imported=event['id'].startswith('imported.')
+        origin=max((stamp for ident in {event['id'],*(r['event_id'] for r in refs)}
+                    if (stamp:=source_epoch(db,ident)) is not None),default=None) if imported else epoch(memory['created_at'])
         data={'text':memory['text'],'scope':selected,'session_id':event['session_id'],
-            'origin_epoch':epoch(memory['created_at']),'version':fingerprint([memory,refs]),
+            'origin_epoch':origin,'age_from_source':imported,'version':fingerprint([memory,refs]),
             'lineage':memory['root_id'],'source_type':'user_memory','canonical_id':memory['id']}
     elif kind=='dialogue':
         event=db.execute('SELECT * FROM events WHERE id=?',(ref['id'],)).fetchone()
@@ -96,7 +110,8 @@ def material(db,kind,ref,*,now):
                 return None
             original_text, recorded = material_row['text'], material_row['created_at']
         data={'text':original_text,'scope':selected,'session_id':event['session_id'],
-            'origin_epoch':epoch(recorded) if recorded else None,'version':fingerprint([dict(event),original_text]) if turn and turn['source_key'].startswith('imported.') else fingerprint(dict(event)),
+            'origin_epoch':epoch(recorded) if recorded else None,'age_from_source':event['id'].startswith('imported.'),
+            'version':fingerprint([dict(event),original_text]) if turn and turn['source_key'].startswith('imported.') else fingerprint(dict(event)),
             'lineage':event['id'],'source_type':'user_statement' if event['role']=='user' else 'assistant_statement',
             'canonical_id':event['id']}
     elif kind=='native':

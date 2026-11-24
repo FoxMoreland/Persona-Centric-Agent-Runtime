@@ -20,7 +20,9 @@ window.pcarLive = (() => {
     manual_confirmation_required:"请点击「确认发送本轮」。",
     input_buffer_policy_changed:"输入缓冲方式已更新，草稿已保留。请核对后再发送。",
     pending_batch_resolution_required:"定时缓冲仍有消息，请等本轮发出后再更改模式。",
-    session_has_pending_work:"当前对话还有未处理的消息，请处理后再新建对话。"
+    session_has_pending_work:"当前对话还有未处理的消息，请处理后再新建对话。",
+    invalid_session_title:"会话名称最多 80 个字符。",
+    history_preparation_pending:"历史正在加载，完成后即可开始聊天。"
   };
   const run = fn => (...args) => Promise.resolve().then(() => fn(...args)).catch(e => {
     const detail=String(e.message||e);
@@ -245,7 +247,7 @@ window.pcarLive = (() => {
   function setupHistory(data,options,draft=null) {
     const boundSelf=options.targetRole ? (options.targetRole==="A"?"B":"A") : "";
     draft ??= {mapping:{...data.mapping},overrides:{...data.overrides},self:boundSelf,first:"",last:"",
-               excluded:"",timezone:String(-new Date().getTimezoneOffset()),organize:false};
+               excluded:"",timezone:String(-new Date().getTimezoneOffset()),organize:true};
     const box=panel("历史聊天接续");
     el("strong",options.targetName ? "接续人物 · "+options.targetName : "从这份记录创建角色",box);
     el("p",data.format+" · "+data.preview.count+" 条记录",box);
@@ -328,19 +330,52 @@ window.pcarLive = (() => {
     if(options.personaId && !options.sessionId && !preview.reused)
       el("p","已有角色会开启独立会话，当前会话按正常流程封存。重复导入可打开原会话。",box);
     const consent=check(box,"确认本人、对方和消息范围，允许上述模型按所选用途使用原话");
-    const operation=newId(), error=el("p",null,box);error.className="error";error.setAttribute("role","alert");
+    const operation=newId();
     const commit=button(box,"保存并打开接续会话",async()=>{
       if(!consent.checked)return;
+      commit.disabled=true;
+      const waiting=historyLoading();
       try {
         const result=await action("history_commit",{preview,confirmed:true,operation_id:operation,creation:options.creation || null});
-        await reload(result.persona_id,true,result.session_id);
-        if(options.targetRole) window.pcarMobile?.chat();
-        if(result.reused) notify("已打开先前导入的会话。");
-      } catch(e){error.textContent=String(e.message||e);}
+        const openChat=async()=>{
+          await reload(result.persona_id,true,result.session_id);
+          if(options.targetRole) window.pcarMobile?.chat();
+          if(result.reused) notify("已打开先前导入的会话。");
+        };
+        if(!waiting.isConnected)return;
+        if(await waitHistory(waiting,result.persona_id,result.session_id))await openChat();
+      } catch(e){
+        confirmHistory(data,options,draft,preview);
+        notify(e instanceof FormError?e.message:"历史加载暂未完成，请重试。");
+      }
     });
     commit.classList.add("primary");commit.disabled=true;
     consent.onchange=()=>{commit.disabled=!consent.checked;};
     button(box,"返回调整范围",()=>setupHistory(data,options,draft));
+  }
+  function historyLoading() {
+    const box=panel("正在加载历史聊天");
+    el("p","首次导入历史聊天，需要一段时间加载",box);
+    return box;
+  }
+  async function waitHistory(box,pid,sid) {
+    const state=el("p","正在读取本地记录…",box);
+    state.setAttribute("role","status");
+    button(box,"稍后查看",()=>dialog.close());
+    while(box.isConnected && dialog.open && !stopped){
+      try{
+        const info=await action("history_status",{persona_id:pid,session_id:sid});
+        if(!box.isConnected || !dialog.open)return false;
+        if(!info?.preparing)return true;
+        const status=memoryStateNames[info.memory_state] || "正在准备长期记忆";
+        const progress=info.memory_progress;
+        state.textContent=progress?.total ? status+" · "+progress.done+"/"+progress.total+" 组" : status;
+      }catch(e){
+        state.textContent="正在重试获取加载进度";
+      }
+      await new Promise(resolve=>setTimeout(resolve,1600));
+    }
+    return false;
   }
   async function home() {
     const box=panel("新建角色");
@@ -1701,24 +1736,54 @@ window.pcarLive = (() => {
     if(chosen)await select(chosen,false,closeDialog,viewSession,reconnect);
     else {state.current=null;state.guide=true;render();}
   }
-  async function select(person,fresh=false,closeDialog=true,viewSession=null,reconnect=false){
+  const sessionDate=value=>value.slice(0,16).replace("T"," ");
+  function nameSession(fresh) {
+    const person=currentPerson(),session=currentSession();
+    if(!person || (!fresh && !session?.id))return;
+    const box=panel(fresh?"新建会话":"重命名会话");
+    const input=inputField(box,"会话名称","text",fresh?"":session.title);
+    input.maxLength=80;
+    input.placeholder="留空使用创建时间";
+    const save=button(box,fresh?"创建会话":"保存名称",async()=>{
+      if(person!==currentPerson() || (!fresh && session!==currentSession()))return;
+      const title=input.value.trim();
+      if(fresh){
+        await select(person,true,true,null,false,title);
+      }else{
+        const result=await api().live_rename_session(person.id,session.id,title);
+        session.title=result.title;
+        session.label=result.title || sessionDate(session.createdAt);
+        if(dialog.open)dialog.close();
+        render();
+      }
+    });
+    save.classList.add("primary");
+    input.addEventListener("keydown",e=>{
+      if(e.key==="Enter" && !e.isComposing){e.preventDefault();save.click();}
+    });
+    input.focus();
+  }
+  async function select(person,fresh=false,closeDialog=true,viewSession=null,reconnect=false,title=null){
     if(!reconnect)saveReading();
     const id=++epoch;
     selectionToken=id;
     message.disabled=true;updateSendButton();
     try{
-      await loadSelection(person,fresh,closeDialog,viewSession,reconnect,id);
+      await loadSelection(person,fresh,closeDialog,viewSession,reconnect,id,title);
     }finally{
       if(selectionToken===id){
-        selectionToken=null;message.disabled=!ready()||Boolean(currentSession()?.readOnly);updateSendButton();
+        selectionToken=null;message.disabled=!ready()||Boolean(currentSession()?.readOnly || currentSession()?.historyPreparing);updateSendButton();
       }
     }
   }
-  async function loadSelection(person,fresh,closeDialog,viewSession,reconnect,id){
-    const result=viewSession ? await api().live_select(person.id,false,viewSession) : await api().live_select(person.id,fresh);
+  async function loadSelection(person,fresh,closeDialog,viewSession,reconnect,id,title){
+    const result=viewSession ? await api().live_select(person.id,false,viewSession)
+      : title===null ? await api().live_select(person.id,fresh)
+      : await api().live_select(person.id,fresh,null,title);
     if(id!==epoch||stopped)return;
-    person.sessions=result.sessions.map(s=>({id:s.id,label:s.created_at.slice(0,16).replace("T"," "),lifecycle:s.state,
-      draft:"",messages:[],past:[],version:null,historyReady:false,turns:[],readOnly:s.id!==result.active}));
+    person.sessions=result.sessions.map(s=>({id:s.id,label:s.title || sessionDate(s.created_at),title:s.title || "",createdAt:s.created_at,lifecycle:s.state,
+      draft:"",messages:[],past:[],version:null,historyReady:false,turns:[],readOnly:s.id!==result.active,
+      historyPreparing:!!s.history_preparing}));
     if(!person.sessions.length)person.sessions.push({id:"",label:"新对话",draft:"",turns:[],past:[],version:null});
     const chosen=person.sessions.find(s=>s.id===viewSession)||person.sessions.find(s=>s.id===result.active)||person.sessions[0];
     person.profile=result.person.spec; person.writableSession=result.active;
@@ -1738,7 +1803,16 @@ window.pcarLive = (() => {
     }
     state.guide=false;closeDrawer();if(closeDialog && dialog.open)dialog.close();render();
     await refresh();
-    if(fresh && id===epoch && target===currentSession() && !dialog.open)await privacyPanel();
+    if(id!==epoch || target!==currentSession())return;
+    if(target?.historyPreparing){
+      const box=historyLoading();
+      button(box,"管理历史用途",()=>historySettings(target));
+      if(await waitHistory(box,person.id,target.id) && id===epoch){
+        target.historyPreparing=false;
+        dialog.close();
+        render();
+      }
+    }else if(fresh && !dialog.open)await privacyPanel();
   }
   function appendTurns(s,cards){
     const rows=new Map(s.turns.map(t=>[t.id,t]));
@@ -1998,13 +2072,14 @@ window.pcarLive = (() => {
     }
     if(info.withdrawn)return;
     async function change(actionName) {
-      await action("history_update",{persona_id:pid,session_id:s.id,expected_revision:info.revision,
+      const result=await action("history_update",{persona_id:pid,session_id:s.id,expected_revision:info.revision,
         action:actionName,confirmed:true,expected_providers:info.current_providers});
       if(actionName==="withdraw") {
         for(const row of s.past) row.referenceable=false;
         s.reference=null;
         await reviseDraft(s);
       }
+      s.historyPreparing=Boolean(result.preparing);
       s.historyRevision=(s.historyRevision||0)+1;
       s.historyReady=false;s.version=null;render();
       await historySettings(s);await refresh();
@@ -2629,7 +2704,7 @@ window.pcarLive = (() => {
   byId("long-reply-send").addEventListener("click",()=>run(()=>send(true))());
   async function send(longRequested=false,publicSearch=false,searchSession=null){
     const p=currentPerson(),s=currentSession(),value=message.value;
-    if(stopped||!p||!s||s.readOnly||!value.trim()||s.sending||s.bufferWorking||selectionToken!==null||pendingDraft(s)||linkState!=="online")return;
+    if(stopped||!p||!s||s.readOnly||s.historyPreparing||!value.trim()||s.sending||s.bufferWorking||selectionToken!==null||pendingDraft(s)||linkState!=="online")return;
     if(!state.connected){connection();return;}
     if(s.reference?.unavailable)throw new FormError("引用已失效，请移除或重新选择。");
     s.bufferRevision=(s.bufferRevision||0)+1;
@@ -3194,7 +3269,7 @@ window.pcarLive = (() => {
   window.addEventListener("pagehide",stop);
   window.addEventListener("pywebviewready",run(connect),{once:true});
   if(window.pywebview?.api)run(connect)();
-  return {get active(){return active;},get offline(){return linkState!=="online";},get composing(){return composing;},
+  return {nameSession:run(nameSession),get active(){return active;},get offline(){return linkState!=="online";},get composing(){return composing;},
     get selecting(){return selectionToken!==null;},get pendingDraft(){return Boolean(pendingDraft(currentSession()));},
     home:run(home),select:run(select),draw,capture,restore:restoreReading,reviseDraft,renderInputBuffer,manualEnter,
     avatar,appearance,send:run(send),profile:run(profile),importHistory:run(importHistory),

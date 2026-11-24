@@ -472,6 +472,10 @@ class IngressService:
             from .private_personas import guard_acceptance_write
             guard_acceptance_write(self.store,pid)
             sid=self.engine._session(conn,pid,channel,value.get('session_id'),origin={'bot':bot,'sender':peer})
+            if channel=='desktop':
+                from .import_history_service import must_prepare
+                if must_prepare(conn,sid):
+                    raise RuntimeErrorBase('history_preparation_pending')
             policy={**buffer_policy(pol),'id':pol['id'],'mode':pol['mode'],'reply_mode':pol['reply_mode'],'revision':pol['revision'],'context':context_snapshot(pol,conn,self.store),'expression':json.loads(pol['data_json']).get('expression') or expression_snapshot(pol['reply_mode'],pol['id'],version=1)}
             if channel == "desktop":
                 from .desktop_recovery import model_binding

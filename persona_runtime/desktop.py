@@ -4,7 +4,7 @@ from pathlib import Path
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
 from .config import ConfigStore, atomic_json
 from .deployment import prepare
@@ -412,7 +412,7 @@ class Workbench(KnowledgeUI, RuntimeUI, SelectorUI, SessionUI, ContextUI, Archiv
         bar = self.bar(parent)
         bar.pack(fill="x", pady=5)
         self.button(bar, "恢复当前会话", self.load_chat, {"chat"})
-        self.button(bar, "新建会话", lambda: self.load_chat(fresh=True), {"chat"})
+        self.button(bar, "新建会话", self.new_named_session, {"chat"})
         self.button(bar, "选择已有会话", self.choose_session, {"chat"})
         self.button(bar, "公开检索", self.edit_public_search, {"chat"})
         self.button(bar, "本轮资料", self.show_current_materials, {"knowledge-read"})
@@ -914,13 +914,19 @@ class Workbench(KnowledgeUI, RuntimeUI, SelectorUI, SessionUI, ContextUI, Archiv
     def edit_relationship(self):
         self.edit_profile_text('relationship')
 
-    def load_chat(self, fresh=False, session_id=None):
+    def new_named_session(self):
+        title=simpledialog.askstring("新建会话", "会话名称（留空使用创建时间）", parent=self.chat_persona.winfo_toplevel())
+        if title is not None:
+            self.load_chat(fresh=True,title=title)
+
+    def load_chat(self, fresh=False, session_id=None, title=None):
         if fresh or (session_id and session_id != self.session_id):
             self.view_epoch += 1
             self.pending_notice_view = None
         epoch = self.view_epoch
         def action(_):
-            current = self.client.manage("session.select", channel="desktop", fresh=fresh, session_id=session_id)
+            args={"title":title} if title is not None else {}
+            current = self.client.manage("session.select", channel="desktop", fresh=fresh, session_id=session_id, **args)
             return current, self.client.manage("chat.history", session_id=current["session_id"])
         def done(result):
             if epoch != self.view_epoch:
@@ -948,12 +954,31 @@ class Workbench(KnowledgeUI, RuntimeUI, SelectorUI, SessionUI, ContextUI, Archiv
             listing = tk.Listbox(body, width=1, height=1)
             listing.grid(row=0, column=0, sticky="nsew")
             for row in rows:
-                listing.insert("end", row["created_at"] + " · " + row["id"])
+                listing.insert("end", row.get("title") or row["created_at"] + " · " + row["id"])
             def select():
                 if listing.curselection():
                     selected_id=rows[listing.curselection()[0]]["id"]
                     self.run_task("只读历史", {"history-read"}, lambda _: self.client.manage("chat.history",session_id=selected_id),lambda value:self.show_json("历史会话（只读）",value))
                     dialog.destroy()
+            def rename():
+                if not listing.curselection():
+                    return
+                index=listing.curselection()[0]
+                row=rows[index]
+                title=simpledialog.askstring("重命名会话","会话名称（留空使用创建时间）",
+                                            initialvalue=row.get("title") or "",parent=dialog)
+                if title is None:
+                    return
+                def saved(result):
+                    if not dialog.winfo_exists():
+                        return
+                    row["title"]=result["title"]
+                    listing.delete(index)
+                    listing.insert(index,row["title"] or row["created_at"] + " · " + row["id"])
+                    listing.selection_set(index)
+                self.run_task("保存会话名称",{"chat"},lambda _:self.client.manage(
+                    "desktop.browser.rename",pid=row["persona_id"],sid=row["id"],value=title),saved)
+            ttk.Button(footer, text="重命名", command=rename).grid(row=0, column=0, padx=(0, 8))
             ttk.Button(footer, text="关闭", command=dialog.destroy).grid(row=0, column=1, padx=(0, 8))
             ttk.Button(footer, text="只读查看历史", command=select).grid(row=0, column=2)
         self.run_task("读取会话列表", {"chat"}, lambda _: self.client.manage("chat.sessions"), done)

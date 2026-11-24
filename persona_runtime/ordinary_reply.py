@@ -183,6 +183,8 @@ class OrdinaryReply:
                 meter=gate(db,self.store,category,turn_scope(turn))
                 if key=='J1' and draft==0:
                     selection={k:material[k] for k in ('history','memories')}
+                    if material.get('quoted_memories'):
+                        selection['quoted_memories']=material['quoted_memories']
                     if 'writer_turns' in material:
                         selection['writer_turns'] = material['writer_turns']
                     from . import message_time
@@ -411,7 +413,8 @@ class OrdinaryReply:
                 root=dict(db.execute('SELECT * FROM turns WHERE id=?',(tid,)).fetchone())
                 research=lookup_continuation.followup(db,root,base,research) or research
         style='profile' if not variations else await decide('J2.style',state|{'action':action,'styles':styles},styles)
-        facts=list(dict.fromkeys(refs+groups[selection]))
+        required_facts=refs+material.get('quoted_memories',[])
+        facts=list(dict.fromkeys(required_facts+groups[selection]))
         boundary=state|{'action':action,'task':task,'facts':[rows[i] for i in facts],'stance':stances[stance]}
         modes=['chat','short_answer']
         if material.get('quote_window') and getattr(self.providers, 'conversation_systems', None):
@@ -428,7 +431,7 @@ class OrdinaryReply:
         mode=await decide('J6.mode',boundary,tuple(modes))
         coverage=await decide('J6.coverage',boundary,('all',*facts))
         if coverage!='all':
-            facts=list(dict.fromkeys(refs+[coverage]))
+            facts=list(dict.fromkeys(required_facts+[coverage]))
         ending=await decide('J6.ending',boundary,('stop','clarify') if action=='clarify' else ('stop',))
         if task=='closed' and ending=='clarify':
             raise RuntimeErrorBase('private_reply_decision_conflict')

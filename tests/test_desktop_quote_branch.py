@@ -60,6 +60,46 @@ class DesktopQuoteBranch(unittest.IsolatedAsyncioTestCase):
         with self.store.connection() as db, self.assertRaisesRegex(ReferenceError, 'reference_source_changed'):
             prepare(db, turn)
 
+    def test_quote_promotes_only_eligible_automatically_organized_events_near_anchor(self):
+        self.seed(4)
+        base = '2026-01-01T02:00:00+00:00'
+        with self.store.connection(write=True) as db:
+            stamps = ['2026-01-01T01:25:00+00:00',base,'2026-01-01T04:00:00+00:00',base]
+            for i,stamp in enumerate(stamps):
+                db.execute('UPDATE events SET created_at=? WHERE id=?',(stamp,f'event-{80000+i}'))
+            db.execute("INSERT INTO memory_batches VALUES(?,?,?,?,?,?,?,?,NULL,NULL,?,?,?)",
+                       ('91',self.pid,LOCAL_USER_ID,self.sid,'{}','92','extract','completed','{}',base,base))
+            for i in range(4):
+                ident=f'93{i}'
+                db.execute('INSERT INTO memories VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                           (ident,self.pid,LOCAL_USER_ID,'preference',ident,f'event-{80000+i}',ident,None,1,'active',base,base))
+                db.execute('INSERT INTO memory_facts VALUES(?,?,?,?,?,?,?,?,?,?)',
+                           (ident,self.pid,LOCAL_USER_ID,'{}','94','95',None,None,'91' if i!=3 else None,'{}'))
+        turn=self.accept(self.anchor(1))
+        with self.store.connection() as db:
+            from persona_runtime.context_m4 import build_context
+            messages,details=build_context(self.chat,db,turn)
+            self.assertEqual([row['id'] for row in details['memories']],['931','930'])
+            self.assertTrue(any('931' in m['content'] and '930' in m['content'] for m in messages))
+        with self.store.connection(write=True) as db:
+            db.execute("UPDATE memories SET status='retracted' WHERE id='931'")
+        with self.store.connection() as db:
+            material=collect_context_materials(self.chat,db,turn)
+            self.assertEqual([row[2] for row in material['memories']],['930'])
+
+    def test_new_and_existing_workbench_sessions_support_scoped_titles(self):
+        from persona_runtime.workbench_timeline import save_session_title,selection
+        self.assertIsNone(selection(self.store,self.pid)['sessions'][0]['title'])
+        fresh=self.chat.session(fresh=True,persona_id=self.pid,title=' 812 ')['session_id']
+        self.assertEqual(selection(self.store,self.pid)['sessions'][-1]['title'],'812')
+        with self.store.connection(write=True) as db:
+            self.assertEqual(save_session_title(db,self.pid,self.sid,'813'),'813')
+            self.assertEqual(save_session_title(db,self.pid,fresh,''),'')
+            with self.assertRaisesRegex(RuntimeErrorBase,"session_unavailable"):
+                save_session_title(db,self.pid,'foreign','814')
+        self.assertEqual({s['id']:s['title'] for s in selection(self.store,self.pid)['sessions']},
+                         {self.sid:'813',fresh:None})
+
     def test_anchor_overlap_is_deduplicated_and_draft_keeps_target(self):
         self.seed(35)
         reference = self.anchor(28)
