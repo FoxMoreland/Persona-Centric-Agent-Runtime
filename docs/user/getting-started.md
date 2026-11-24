@@ -1,6 +1,6 @@
 # 第一次使用 PCAR
 
-使用 Windows 11 或 Android，可以下载 [PCAR 正式版 1.3.0](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/pcar-v1.3.0)，再按[正式版使用指南](社区版.md)连接 DeepSeek。
+使用 Windows 11 或 Android，可以下载 [PCAR 正式版 1.4.2](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/pcar-v1.4.2)，再按[正式版使用指南](社区版.md)连接 DeepSeek。
 
 以下步骤适用于 **v0.4 Windows 桌面包（程序 0.4.0，数据库结构 36）**。部署命令与旧数据升级步骤见[同版本部署手册](../../AGENT_INSTALL.md)。
 

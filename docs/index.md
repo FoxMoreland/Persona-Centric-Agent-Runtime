@@ -1,6 +1,6 @@
 # 超级大肥鱼 · PCAR 文档导航
 
-**PCAR 正式版 1.3.0** 提供 Windows 和 Android 安装包。[下载与更新说明](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/pcar-v1.3.0) · [正式版使用指南](user/社区版.md)
+**PCAR 正式版 1.4.2** 提供 Windows 和 Android 安装包。[下载与更新说明](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/pcar-v1.4.2) · [正式版使用指南](user/社区版.md)
 
 v0.4 Windows 工作台的程序版本为 0.4.0，业务库结构 36。[部署手册](../AGENT_INSTALL.md) · [历史接续](user/历史聊天接续.md) · [场景发言与回退](expression/E.N6-场景发言接入与回退.md)
 

@@ -6,7 +6,7 @@ PCAR 的远期目标是一个以人格为中心的运行环境：人物有持续
 
 “超级大肥鱼”是社区传播主题。大肥鱼沿用既有鲸鱼娘形象，运行时也可以承载其他人格。模型与工具提供能力，身份和经历由 PCAR 持有。
 
-**PCAR 正式版 1.3.0** 为 Windows 和 Android 带来会话命名、历史加载进度及引用记忆。**v0.4 Windows 桌面版**的已审私聊与部署记录继续保留。[正式版更新说明](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/pcar-v1.3.0) · [研发进度](../STATUS.md)
+**PCAR 正式版 1.4.2** 支持在导入角色包时编辑角色卡，并修复 Android 冷启动和日志导出。**v0.4 Windows 桌面版**的已审私聊与部署记录继续保留。[正式版更新说明](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/pcar-v1.4.2) · [研发进度](../STATUS.md)
 
 ## 当前基础：人物与经历有地方保存
 
