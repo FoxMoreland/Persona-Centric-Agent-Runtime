@@ -116,11 +116,11 @@ def _operations(paths):
                                for at, status, error in rows]
             result["database"] = "readable"
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='knowledge_control'").fetchone():
-                from .community_lookup import outcome
+                from .community_lookup import PROTOCOLS, outcome
                 rows = db.execute("""SELECT t.updated_at, json_extract(k.value,'$.data.retrieval')
                     FROM knowledge_control k JOIN turns t ON k.key='knowledge.conversation.record.'||t.id
-                    WHERE json_extract(k.value,'$.data.retrieval.executor')='community-explicit-search-v1'
-                    ORDER BY t.rowid DESC LIMIT ?""", (_LIMIT,))
+                    WHERE json_extract(k.value,'$.data.retrieval.executor') IN (?,?)
+                    ORDER BY t.rowid DESC LIMIT ?""", (*PROTOCOLS, _LIMIT))
                 for at, raw in rows:
                     retrieval = json.loads(raw)
                     error = next(iter(retrieval.get("errors", [])), None)
@@ -151,7 +151,7 @@ def _write(folder, filename, contents):
             temp.unlink(missing_ok=True)
 
 
-def export_logs(paths, service_state=None, key_state=None, *, output_folder=None):
+def export_logs(paths, service_state=None, key_state=None, *, output_folder=None, android_startup=None):
     events, sources = _events(paths)
     operations = _operations(paths)
     version = sys.getwindowsversion() if sys.platform == "win32" else None
@@ -167,6 +167,8 @@ def export_logs(paths, service_state=None, key_state=None, *, output_folder=None
     contents = {"manifest.json": json.dumps(manifest, indent=2) + "\n",
                 "events.jsonl": "".join(json.dumps(event) + "\n" for event in events),
                 "recent-operations.json": json.dumps(operations, indent=2) + "\n"}
+    if android_startup is not None:
+        contents["android-startup.json"] = android_startup
     filename = "PCAR-logs-" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:10] + ".zip"
     if output_folder is None and sys.platform == "win32":
         from .deepseek_download import windows_downloads

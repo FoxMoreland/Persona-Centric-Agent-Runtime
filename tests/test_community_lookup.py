@@ -10,7 +10,7 @@ from aiohttp.test_utils import TestServer
 
 from persona_runtime.chat import ModelCompletion, ModelError
 from persona_runtime.community import BASE, PRO
-from persona_runtime.community_lookup import PROTOCOL
+from persona_runtime.community_lookup import AUTOMATIC, PROTOCOL
 from persona_runtime.config import ConfigStore
 from persona_runtime.diagnostic_export import _operations
 from persona_runtime.models import generic_persona, identifier, RuntimeErrorBase
@@ -35,6 +35,12 @@ class CommunitySearchTests(unittest.IsolatedAsyncioTestCase):
         self.calls = []
         self.reply_inputs = []
         self.result = "found"
+        self.decisions = []
+        self.choice = "none"
+        self.revoke_during_decision = False
+        flash = patch("persona_runtime.community_decision.Transport", self.flash_transport)
+        flash.start()
+        self.addCleanup(flash.stop)
         app = create_app(paths, client=self, foreground_only=True, interactive_maintenance=True)
         self.chat = app["engine"]
         self.store = app["store"]
@@ -60,11 +66,31 @@ class CommunitySearchTests(unittest.IsolatedAsyncioTestCase):
         return ModelCompletion(json.dumps({"results": rows}), {"http_status":200},
                                {"request_headers_sent": True, "http_status":200})
 
-    def grant(self, enabled=True):
-        current = status(self.store, self.config, self.pid, self.sid)["community_search"]
+    def flash_transport(self, model):
+        test = self
+
+        class Flash:
+            async def complete(self, payload, *, on_dispatch, on_receipt, diagnostics):
+                from persona_runtime.community_decision import PROFILE
+
+                test.decisions.append(payload["state"])
+                on_dispatch(1)
+                if test.revoke_during_decision:
+                    test.grant(False, AUTOMATIC)
+                on_receipt(2)
+                return 200, json.dumps({"decision_source": PROFILE, "answers": {"route": {"choice": test.choice}}})
+
+            async def close(self):
+                pass
+
+        return Flash()
+
+    def grant(self, enabled=True, protocol=PROTOCOL):
+        field = "community_auto_search" if protocol == AUTOMATIC else "community_search"
+        current = status(self.store, self.config, self.pid, self.sid)[field]
         self.assertTrue(current["available"])
         return update(self.store, self.config, self.pid, self.sid, enabled, current["revision"],
-                      current["recipient_hash"], identifier(), PROTOCOL)
+                      current["recipient_hash"], identifier(), protocol)
 
     async def submit(self, grant=None):
         task = ({"question":"102", "request_search":True, "community_consent":{
@@ -85,6 +111,74 @@ class CommunitySearchTests(unittest.IsolatedAsyncioTestCase):
         receipts = _operations(self.paths)["public_search"]
         self.assertEqual([row["outcome"] for row in receipts], ["found"])
         self.assertNotIn("904", json.dumps(receipts))
+        self.assertEqual(self.decisions, [])
+
+    async def test_automatic_search_requires_a_positive_decision_and_live_consent(self):
+        self.choice = "web"
+        self.assertEqual((await self.submit())["status"], "completed")
+        self.assertEqual(self.decisions, [])
+        self.grant(protocol=AUTOMATIC)
+        self.choice = "none"
+        self.assertEqual((await self.submit())["status"], "completed")
+        self.assertEqual(self.calls, [])
+        self.choice = "web"
+        turn = await self.submit()
+        self.assertEqual(turn["status"], "completed", turn.get("error_code"))
+        self.assertEqual(self.calls, [("search", {"query": "101 102 103", "count": 8, "need_content": True})])
+        self.assertIn("904", self.reply_inputs[-1][0]["content"])
+        self.assertEqual(len(self.decisions), 2)
+        self.assertEqual(self.decisions[-1]["recent_context"], [])
+        self.assertFalse(self.decisions[-1]["explicit_public_query_requested"])
+        self.assertEqual(_operations(self.paths)["public_search"][0]["outcome"], "found")
+
+    async def test_revoke_while_automatic_decision_is_in_flight(self):
+        self.grant(protocol=AUTOMATIC)
+        self.choice = "web"
+        self.revoke_during_decision = True
+        self.assertEqual((await self.submit())["status"], "completed")
+        self.assertEqual(len(self.decisions), 1)
+        self.assertEqual(self.calls, [])
+
+    async def test_automatic_search_uses_authorized_jev_and_preserves_unknown_dispatch(self):
+        from persona_runtime.community_jev import Settings
+        from tests.test_community_jev import Endpoint
+
+        jev_calls, replies = [], []
+        def endpoint(model):
+            return Endpoint(model, jev_calls, replies)
+
+        self.chat.decision_providers.transport = endpoint
+        settings = Settings(self.store, self.config, transport=endpoint)
+        checked = await settings.check("https://example.test/api", "jev-1.14", "202", 0)
+        self.assertTrue(checked["choice_verified"])
+        settings.activate(checked["token"], 0)
+        grant = settings.status(self.pid, self.sid)["session"]
+        self.assertTrue(settings.grant(self.pid, self.sid, True, grant["revision"], grant["recipient"])["authorized"])
+        self.grant(protocol=AUTOMATIC)
+        jev_calls.clear()
+        self.assertEqual((await self.submit())["status"], "completed")
+        self.assertEqual(len(self.calls), 1)
+        replies.append("unknown")
+        await self.submit()
+        self.assertEqual(len(jev_calls), 2)
+        self.assertEqual(self.decisions, [])
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_workbench_normal_send_routes_to_automatic_search(self):
+        from persona_runtime.workbench_import import WorkbenchData
+
+        self.config.update({"service_port": self.server.port})
+        self.grant(protocol=AUTOMATIC)
+        self.choice = "web"
+        workbench = WorkbenchData(self.paths, lambda: None)
+        accepted = await asyncio.to_thread(workbench.live_submit, self.pid, self.sid, "101 102 103", identifier())
+        self.assertEqual(accepted["state"], "accepted", accepted)
+
+        async def wait_for_search():
+            while not _operations(self.paths)["public_search"]:
+                await asyncio.sleep(.15)
+        await asyncio.wait_for(wait_for_search(), 15)
+        self.assertEqual(self.calls, [("search", {"query": "101 102 103", "count": 8, "need_content": True})])
 
     async def test_empty_and_http_failure_are_distinct(self):
         grant = self.grant()

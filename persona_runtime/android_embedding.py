@@ -14,7 +14,8 @@ def prepare_packaged_model(paths):
     from .installation import prepare_model
 
     bridge = host()
-    return prepare_model(paths, copy_asset=lambda name, path: bridge.installAsset(f"bge/{name}", str(path)))
+    return prepare_model(paths, copy_asset=lambda name, path: bridge.installAsset(f"bge/{name}", str(path)),
+                         repair_cached=True)
 
 
 class AndroidTokenizer:

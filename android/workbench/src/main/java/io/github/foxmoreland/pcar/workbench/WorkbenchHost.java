@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -26,14 +27,21 @@ final class WorkbenchHost {
         void result(String value, String error);
     }
 
+    interface ExportDestination {
+        void write(Path staged) throws IOException;
+    }
+
     private static WorkbenchHost instance;
     private final Context context;
     private final RuntimeBridge bridge;
     private final ExecutorService requests = Executors.newSingleThreadExecutor();
     private final ExecutorService lifecycle = Executors.newSingleThreadExecutor();
+    private final ExecutorService exports = Executors.newSingleThreadExecutor();
+    private final StartupDiagnostics diagnostics = new StartupDiagnostics();
     private final Handler main = new Handler(Looper.getMainLooper());
     private volatile PyObject module;
     private volatile boolean foreground;
+    private volatile boolean starting;
 
     static synchronized WorkbenchHost forApp(Context context) {
         if (instance == null) instance = new WorkbenchHost(context.getApplicationContext());
@@ -51,11 +59,34 @@ final class WorkbenchHost {
     }
 
     void execute(Operation operation, Outcome callback) {
-        requests.execute(() -> {
+        executeOn(requests, () -> operation.perform(ensureStarted()), callback);
+    }
+
+    void exportSupportLogs(String args, ExportDestination destination, Outcome callback) {
+        executeOn(exports, () -> {
+            Path cache = context.getCacheDir().getCanonicalFile().toPath();
+            PyObject current = module;
+            Path staged = null;
+            if (current != null && !starting) {
+                try {
+                    staged = Path.of(value(current, "make_support_export", home(), args,
+                            cache.toString(), diagnostics.snapshot())).normalize();
+                } catch (IOException | RuntimeException | LinkageError failure) {
+                    diagnostics.record("diagnostic_collection", failure.getClass().getSimpleName());
+                }
+            }
+            if (staged == null) staged = diagnostics.fallbackArchive(context, cache);
+            destination.write(staged);
+            return "true";
+        }, callback);
+    }
+
+    private void executeOn(ExecutorService executor, Callable<String> operation, Outcome callback) {
+        executor.execute(() -> {
             String value = null;
             String error = null;
             try {
-                value = operation.perform(ensureStarted());
+                value = operation.call();
             } catch (Exception | LinkageError failure) {
                 error = readableError(failure);
             }
@@ -65,23 +96,33 @@ final class WorkbenchHost {
         });
     }
 
+    private String home() throws IOException {
+        return context.getNoBackupFilesDir().getCanonicalFile().toPath().resolve("community-runtime").toString();
+    }
+
     private PyObject ensureStarted() throws Exception {
-        if (module == null) {
-            clearFilePickerCache();
-            if (!Python.isStarted()) Python.start(new AndroidPlatform(context));
-            PyObject candidate = Python.getInstance().getModule("pcar_workbench");
-            String home = context.getNoBackupFilesDir().getCanonicalFile().toPath()
-                    .resolve("community-runtime").toString();
-            try {
-                candidate.callAttr("start", bridge, home, foreground);
-            } catch (RuntimeException failure) {
-                Log.e("PCARWorkbench", "Workbench startup failed", failure);
-                throw failure;
+        starting = true;
+        String phase = "runtime_start";
+        try {
+            if (module == null) {
+                clearFilePickerCache();
+                phase = "python_start";
+                diagnostics.record(phase, null);
+                if (!Python.isStarted()) Python.start(new AndroidPlatform(context));
+                phase = "runtime_import";
+                diagnostics.record(phase, null);
+                module = Python.getInstance().getModule("pcar_workbench");
             }
-            module = candidate;
+            module.callAttr("start", bridge, home(), foreground, diagnostics);
             syncForeground();
+            return module;
+        } catch (Exception | LinkageError failure) {
+            diagnostics.record(phase, failure.getClass().getSimpleName());
+            Log.e("PCARWorkbench", "Workbench startup failed in " + phase, failure);
+            throw new IOException("本机服务启动失败，正在自动重试。", failure);
+        } finally {
+            starting = false;
         }
-        return module;
     }
 
     private void clearFilePickerCache() {

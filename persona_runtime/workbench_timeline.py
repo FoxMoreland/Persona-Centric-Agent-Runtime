@@ -259,8 +259,8 @@ def turn_card(db,row,store=None):
             card['research_detail']=True
     from .knowledge_service import read
     retrieval = read(db, 'conversation.record.' + tid, {})['data'].get("retrieval", {})
-    if retrieval.get("executor") == "community-explicit-search-v1":
-        from .community_lookup import outcome
+    from .community_lookup import PROTOCOLS, outcome
+    if retrieval.get("executor") in PROTOCOLS:
         card["community_search"] = outcome(retrieval)
     from . import community
     if community.enabled():

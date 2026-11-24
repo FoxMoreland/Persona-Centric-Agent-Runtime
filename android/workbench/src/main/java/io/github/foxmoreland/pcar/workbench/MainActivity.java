@@ -304,19 +304,29 @@ public final class MainActivity extends Activity {
             completeExport(request, null, "请选择系统支持的保存位置。");
             return;
         }
+        if (request.method().equals("export_support_logs")) {
+            host.exportSupportLogs(request.args(), staged -> writeExport(uri, staged),
+                    (value, error) -> completeExport(request, value, error));
+            return;
+        }
         host.execute(module -> {
             Path cache = getCacheDir().getCanonicalFile().toPath();
             Path staged = Path.of(WorkbenchHost.value(module, "make_export", request.method(),
                     request.args(), cache.toString())).normalize();
-            if (!cache.equals(staged.getParent())) throw new IOException("本机导出路径无效。");
-            try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
-                if (output == null) throw new IOException("无法写入所选位置。");
-                Files.copy(staged, output);
-            } finally {
-                Files.deleteIfExists(staged);
-            }
+            writeExport(uri, staged);
             return "true";
         }, (value, error) -> completeExport(request, value, error));
+    }
+
+    private void writeExport(Uri uri, Path staged) throws IOException {
+        Path cache = getCacheDir().getCanonicalFile().toPath();
+        if (!cache.equals(staged.getParent())) throw new IOException("本机导出路径无效。");
+        try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
+            if (output == null) throw new IOException("无法写入所选位置。");
+            Files.copy(staged, output);
+        } finally {
+            Files.deleteIfExists(staged);
+        }
     }
 
     private void completeExport(PendingExport request, String value, String error) {

@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 from tempfile import NamedTemporaryFile
 from threading import Event, Thread
+from time import monotonic
 
 from aiohttp import web
 
@@ -37,11 +38,14 @@ _runtime = None
 
 
 class WorkbenchRuntime:
-    def __init__(self, paths, foreground):
+    def __init__(self, paths, foreground, diagnostics):
         self.paths = paths
         self.foreground = foreground
+        self.diagnostics = diagnostics
+        self.phase = "paths"
         self.ready = Event()
         self.failure = None
+        self.retry_after = 0
         self.loop = None
         self.app = None
         self.selected_archive = None
@@ -49,24 +53,41 @@ class WorkbenchRuntime:
 
     def _run(self):
         try:
+            self.record_phase("paths")
             self.paths.initialize()
+            self.record_phase("instance_lock")
             lock = InstanceLock(self.paths.home / "runtime/service.lock")
             try:
+                self.record_phase("packaged_model")
                 prepare_packaged_model(self.paths)
                 asyncio.run(self._serve())
             finally:
                 lock.close()
         except Exception as error:
             self.failure = error
+            self.retry_after = monotonic() + 2
+            frames = []
+            trace = error.__traceback__
+            while trace is not None:
+                code = trace.tb_frame.f_code
+                frames.append(f"{Path(code.co_filename).name}:{code.co_name}:{trace.tb_lineno}")
+                trace = trace.tb_next
+            self.diagnostics.record(self.phase, type(error).__name__, " > ".join(frames[-6:]))
         finally:
             self.loop = None
             self.app = None
             self.ready.set()
 
+    def record_phase(self, phase):
+        self.phase = phase
+        self.diagnostics.record(phase, None)
+
     async def _serve(self):
+        self.record_phase("configuration")
         config = ConfigStore(self.paths)
         current = config.initialize()
         reserved = {current[k] for k in ("napcat_port", "astrbot_port", "onebot_port", "snowluma_port")}
+        self.record_phase("loopback")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
             # Reserve the port before recording it. Only the site takes over this socket.
             listener.bind(("127.0.0.1", 0))
@@ -74,15 +95,18 @@ class WorkbenchRuntime:
             if port in reserved:
                 raise RuntimeErrorBase("android_runtime_port_conflict")
             config.update({"service_port": port})
+            self.record_phase("service_recovery")
             app = create_app(self.paths, foreground_only=True, interactive_maintenance=True)
             self.app = app
             self.loop = asyncio.get_running_loop()
             self._apply_foreground()
             runner = web.AppRunner(app, access_log=None, shutdown_timeout=65)
+            self.record_phase("workers")
             await runner.setup()
             try:
                 await web.SockSite(runner, listener).start()
                 self.data = WorkbenchData(self.paths, None)
+                self.record_phase("ready")
                 self.ready.set()
                 await app["stop"].wait()
             finally:
@@ -98,10 +122,16 @@ class WorkbenchRuntime:
             app["ingress"].network_wake()
 
     def set_foreground(self, foreground):
+        if self.foreground == foreground:
+            return
         self.foreground = foreground
         loop = self.loop
         if loop is not None and not loop.is_closed():
-            loop.call_soon_threadsafe(self._apply_foreground)
+            try:
+                loop.call_soon_threadsafe(self._apply_foreground)
+            except RuntimeError:
+                if not loop.is_closed():
+                    raise
 
     def require_ready(self):
         if not self.ready.wait(30):
@@ -112,13 +142,14 @@ class WorkbenchRuntime:
             raise RuntimeErrorBase("android_runtime_disconnected")
 
 
-def start(host, home, foreground):
+def start(host, home, foreground, diagnostics):
     global _runtime
     if _runtime is None:
         bind(host)
         os.environ["PCAR_EDITION"] = "community"
         os.environ["PERSONA_RUNTIME_HOME"] = home
-        _runtime = WorkbenchRuntime(RuntimePaths(Path(home)), foreground)
+    if _runtime is None or (not _runtime.thread.is_alive() and monotonic() >= _runtime.retry_after):
+        _runtime = WorkbenchRuntime(RuntimePaths(Path(home)), foreground, diagnostics)
         _runtime.thread.start()
     _runtime.require_ready()
     _runtime.set_foreground(foreground)
@@ -180,9 +211,6 @@ def accept_file(kind, path):
 def make_export(kind, serialized_args, directory):
     _runtime.require_ready()
     args = json.loads(serialized_args)
-    if kind == "export_support_logs" and len(args) == 2:
-        from persona_runtime.diagnostic_export import export_logs
-        return str(export_logs(_runtime.paths, *args, output_folder=directory))
     if kind == "live_export_package" and len(args) in (1, 2):
         from persona_runtime.character_pack import copy_file
         source = _runtime.data._stage_package_export(*args)
@@ -209,6 +237,14 @@ def make_export(kind, serialized_args, directory):
                 raise
             return stream.name
     raise ValueError("android_export_kind_unavailable")
+
+
+def make_support_export(home, serialized_args, directory, startup):
+    from persona_runtime.diagnostic_export import export_logs
+
+    paths = RuntimePaths(Path(home))
+    return str(export_logs(paths, *json.loads(serialized_args), output_folder=directory,
+                           android_startup=startup))
 
 
 def change_key(key, confirmation=None):

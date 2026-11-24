@@ -115,8 +115,23 @@ class CharacterPackTests(unittest.TestCase):
         handle, preview = self.send([sid], sid)
         self.assertEqual(preview['sessions'][0]['remaining'], 0)
         self.assertEqual(preview['sessions'][0]['memories'], 1)
-        result = self.inbox.restore(handle, preview['digest'], '01')
-        self.assertEqual(self.inbox.restore(handle, preview['digest'], '01'), result)
+        self.assertEqual(preview['card']['relationship'], '10')
+        with self.receiver.connection() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM personas').fetchone()[0], 0)
+        card = preview['card']
+        edited = {
+            'persona_spec': card['persona_spec'] | {'name': '671'},
+            'character': card['character'] | {'biography': card['character']['biography'] | {'occupation': '672'}},
+            'relationship': '673',
+        }
+        with self.assertRaisesRegex(RuntimeErrorBase, 'name must be a non-empty string'):
+            self.inbox.restore(handle, preview['digest'], '01',
+                               edited | {'persona_spec': edited['persona_spec'] | {'name': ''}})
+        self.assertEqual(self.inbox.preview(handle)['card'], card)
+        result = self.inbox.restore(handle, preview['digest'], '01', edited)
+        self.assertEqual(self.inbox.restore(handle, preview['digest'], '01', edited), result)
+        with self.assertRaisesRegex(RuntimeErrorBase, 'submission_conflict'):
+            self.inbox.restore(handle, preview['digest'], '01', edited | {'relationship': '674'})
         pid, sid = result['id'], result['session_id']
         self.assertEqual(selection(self.receiver, pid)['sessions'][0]['title'], '101')
         history = import_history.page(self.receiver, pid, sid)['rows']
@@ -126,7 +141,12 @@ class CharacterPackTests(unittest.TestCase):
         with self.receiver.connection(write=True) as db:
             self.assertFalse(must_prepare(db, sid))
             self.assertEqual(db.execute('SELECT count(*) FROM organization_attempts').fetchone()[0], 0)
-            self.assertEqual(db.execute('SELECT description FROM relationships WHERE persona_id=?', (pid,)).fetchone()[0], '10')
+            from persona_runtime.character import head
+
+            self.assertEqual(RuntimeService._persona(db, pid)['spec'], edited['persona_spec'])
+            self.assertEqual(head(db, pid)['data'], edited['character'])
+            self.assertEqual(db.execute('SELECT description FROM relationships WHERE persona_id=?', (pid,)).fetchone()[0],
+                             edited['relationship'])
             memory, = db.execute("SELECT * FROM memories WHERE persona_id=? AND status='active'", (pid,))
             previous, = db.execute("SELECT * FROM memories WHERE id=?", (memory['previous_id'],))
             self.assertEqual((previous['status'], previous['text'], memory['text']), ('superseded', '901', '902'))
@@ -134,13 +154,34 @@ class CharacterPackTests(unittest.TestCase):
             self.assertFalse(memory_usable(db, turn, dict(memory)))
             self.use(db, self.receiver, sid)
             self.assertTrue(memory_usable(db, turn, dict(memory)))
-            self.assertTrue(summary_usable(db, turn, latest_summary(db, sid)))
+            imported_summary = latest_summary(db, sid)
+            self.assertTrue(summary_usable(db, turn, imported_summary))
             receipt = db.execute('SELECT source_hash,disposition FROM memory_coverage WHERE turn_id=?', (turn['id'],)).fetchone()
             replay = binding(import_history.group(db, turn, scope(pid, 'desktop'), {'kind': 'turn', 'id': turn['id']}))
             self.assertEqual(tuple(receipt), (replay['hash'], 'processed'))
             with patch('persona_runtime.ordinary_materials.full_revision', return_value=1):
                 self.assertFalse(scan_sessions(db, pid, {'memory_backfill': True},
                                                {'encrypted_key': '1'}, self.receiver)[0][1])
+
+        async def restart():
+            from persona_runtime.server import create_app
+
+            app = create_app(self.receiver.paths, client=object(), foreground_only=True)
+            try:
+                app["organization"].recover()
+                self.assertFalse(await app["organization"].run_next())
+            finally:
+                await app["engine"].scene.close()
+                app["engine"].cognitive.characters.close()
+
+        asyncio.run(restart())
+        with self.receiver.connection() as db:
+            self.assertEqual(latest_summary(db, sid), imported_summary)
+            self.assertEqual(db.execute("SELECT status, mode FROM organization_tasks WHERE id=?",
+                                       (imported_summary["task_id"],)).fetchone()[:], ("completed", "character_package"))
+            self.assertIsNone(db.execute("SELECT 1 FROM organization_contracts WHERE task_id=?",
+                                        (imported_summary["task_id"],)).fetchone())
+            self.assertEqual(db.execute("SELECT count(*) FROM organization_attempts").fetchone()[0], 0)
         self.assertTrue(import_history.page(self.receiver, pid, sid, query='102')['rows'][0]['referenceable'])
 
     def test_cross_session_previews_recheck_and_authorization(self):

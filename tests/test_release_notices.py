@@ -1,11 +1,12 @@
 """Release announcement tests with local files and an offline feed double."""
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from persona_runtime.release_notices import Notices, entries, release_metadata
+from persona_runtime.release_notices import ASSETS, Notices, entries, release_metadata, version_parts
 
 
 class AnnouncementTests(unittest.TestCase):
@@ -13,7 +14,15 @@ class AnnouncementTests(unittest.TestCase):
         root = tempfile.TemporaryDirectory()
         self.addCleanup(root.cleanup)
         self.home = Path(root.name)
-        self.version = release_metadata()["version"]
+        metadata = release_metadata()
+        bundled = entries(json.loads((ASSETS / "announcements.json").read_bytes()))
+        self.version = max((row["version"] for row in bundled.values() if row["kind"] == "release"),
+                           key=version_parts)
+        # Exercise the published snapshot while the next candidate is still under review.
+        version = patch("persona_runtime.release_notices.release_metadata",
+                        return_value=metadata | {"version": self.version})
+        version.start()
+        self.addCleanup(version.stop)
         self.current = "release-" + self.version
         self.today = datetime.now(timezone(timedelta(hours=8))).date()
         self.notices = Notices(self.home, "windows")
@@ -61,3 +70,12 @@ class AnnouncementTests(unittest.TestCase):
             entries({"schema":1,"entries":[self.entry(important_until="2030-01-01")]})
         with self.assertRaises(ValueError):
             self.notices.acknowledge("notice-does-not-exist")
+
+    def test_unannounced_candidate_keeps_published_history(self):
+        major, minor, patch_number = version_parts(self.version)
+        candidate = f"{major}.{minor}.{patch_number + 1}"
+        with patch("persona_runtime.release_notices.release_metadata", return_value={"version": candidate}):
+            view = self.notices.view()
+        self.assertEqual(view["version"], candidate)
+        self.assertEqual(view["startup"], [])
+        self.assertIn(self.current, [row["id"] for row in view["entries"]])

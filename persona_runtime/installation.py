@@ -288,11 +288,18 @@ def model_identity(paths,*,source_root=None):
     return CharacterEmbeddingProvider(paths,paths.home/'models/character-embedding'/index['fingerprint']).identity()
 
 
-def prepare_model(paths,*,local_source=None,source_root=None,copy_asset=None):
-    from .character_embedding import private_directory,file_hash,CharacterEmbeddingProvider
+def prepare_model(paths,*,local_source=None,source_root=None,copy_asset=None,repair_cached=False):
+    from .character_embedding import private_directory,file_hash,CharacterEmbeddingProvider,SemanticFailure,safe_path
     source=Path(source_root or SOURCE_ROOT);index=read_json(source/'model-assets.json')['character_embedding']
     root=private_directory(paths.home,paths.home/'models/character-embedding');destination=root/index['fingerprint']
-    if destination.exists():return {'reused':True,'identity':CharacterEmbeddingProvider(paths,destination).identity()}
+    replace_cached = False
+    if destination.exists():
+        try:
+            return {'reused':True,'identity':CharacterEmbeddingProvider(paths,destination).identity()}
+        except SemanticFailure as error:
+            if not (repair_cached and copy_asset and str(error) in ('embedding_unavailable','embedding_model_invalid')):
+                raise
+            replace_cached = True
     staging=root/('preparing-'+uuid.uuid4().hex);staging.mkdir()
     try:
         for name,expected in index['files'].items():
@@ -305,7 +312,11 @@ def prepare_model(paths,*,local_source=None,source_root=None,copy_asset=None):
                 url='https://huggingface.co/'+index['artifact_repository']+'/resolve/'+index['revision']+'/'+name
                 with system_urlopen(url,timeout=120) as response,target.open('wb') as output:shutil.copyfileobj(response,output)
             if file_hash(target)!=expected:raise ValueError('模型文件不完整：'+name)
-        atomic_json(staging/'manifest.json',index);os.replace(staging,destination)
+        atomic_json(staging/'manifest.json',index)
+        if replace_cached:
+            # This directory contains only immutable model assets from the installer.
+            shutil.rmtree(safe_path(paths.home, destination))
+        os.replace(staging,destination)
         return {'reused':False,'identity':CharacterEmbeddingProvider(paths,destination).identity()}
     finally:
         if staging.exists():
