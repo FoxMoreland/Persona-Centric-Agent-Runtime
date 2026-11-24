@@ -125,7 +125,7 @@ class WorkbenchSubmissions:
             except (TransportUnknown, LocalAPIError, RuntimeErrorBase) as error:
                 if str(error) in ("manual_buffer_full", "manual_buffer_scope_changed", "input_buffer_policy_changed",
                                   "reference_unavailable", "reference_budget_exceeded", "multiple_quote_references",
-                                  "quote_cannot_request_public_lookup"):
+                                  "quote_cannot_request_public_lookup", "history_preparation_pending"):
                     self.journal.forget(rid)
                     return {"id":rid, "state":"rejected", "reason":str(error)}
                 transient = isinstance(error, TransportUnknown) or str(error) in ("queue_full","buffer_full","service_draining","local_repair_active")

@@ -304,13 +304,19 @@ class WorkbenchData:
             image_path(self._config.paths, pid, kind).unlink(missing_ok=True)
         return {"changed": True, "url": None}
 
-    def live_select(self,pid,fresh=False,view_session_id=None):
+    def live_select(self,pid,fresh=False,view_session_id=None,title=None):
         self._require_open()
         with self._selection_lock:
             if fresh:
                 require(view_session_id is None,"浏览已保存会话时无需新建。")
-                self._client.manage("session.select",channel="desktop",fresh=True,persona_id=pid)
+                args={"title":title} if title is not None else {}
+                self._client.manage("session.select",channel="desktop",fresh=True,persona_id=pid,**args)
             return self._client.manage("desktop.browser.show",persona_id=pid)
+
+    def live_rename_session(self,pid,sid,title):
+        self._require_open()
+        with self._selection_lock:
+            return self._client.manage("desktop.browser.rename",pid=pid,sid=sid,value=title)
 
     def live_branch(self, pid, sid, anchor, operation_id):
         self._require_open()

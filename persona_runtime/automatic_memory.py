@@ -436,21 +436,32 @@ class AutomaticMemory:
         from .automatic_memory_schedule import schedule,scan_sessions,page,position,advance
         import time
         deadline=time.monotonic()+.12
+        model=self.engine.model()
         with self.store.connection(write=True) as db:
             self.reconcile(db)
-            policies=page(db,'personas',"""SELECT p.rowid AS ordinal,p.* FROM organization_policies p
-                WHERE p.revision=(SELECT max(revision) FROM organization_policies WHERE persona_id=p.persona_id)
-                AND json_extract(p.data_json,'$.enabled') AND json_extract(p.data_json,'$.memory_automation')
+            if not model.get('encrypted_key'):
+                return
+            people=page(db,'memory-personas-v2',"""SELECT p.rowid AS ordinal,p.id FROM personas p
+                LEFT JOIN organization_policies o ON o.persona_id=p.id AND o.revision=(
+                    SELECT max(o2.revision) FROM organization_policies o2 WHERE o2.persona_id=p.id)
+                LEFT JOIN persona_lifecycle l ON l.persona_id=p.id
+                WHERE l.deleted_at IS NULL AND coalesce(json_extract(o.data_json,'$.enabled'),1)
+                AND coalesce(json_extract(o.data_json,'$.memory_automation'),1)
+                AND EXISTS(SELECT 1 FROM turns t WHERE t.persona_id=p.id AND t.status='completed')
                 AND p.rowid>? ORDER BY p.rowid LIMIT ?""",(),2)
-        for policy in policies:
-            pid=policy['persona_id'];settings=json.loads(policy['data_json'])
-            with self.store.connection() as db:
-                pages=scan_sessions(db,pid,settings,self.engine.model(),self.store)
+        for person in people:
+            pid=person['id']
             with self.store.connection(write=True) as db:
-                advance(db,'personas',policy['ordinal'])
+                advance(db,'memory-personas-v2',person['ordinal'])
                 from .persona_management import active
                 try:active(db,pid)
                 except RuntimeErrorBase:continue
+                if not self.is_enabled(db,pid):continue
+                policy=self.engine.managed.policy(db,pid,create=True)
+            settings=policy['data']
+            with self.store.connection() as db:
+                pages=scan_sessions(db,pid,settings,model,self.store)
+            with self.store.connection(write=True) as db:
                 if self.engine.managed.policy(db,pid)['id']!=policy['id'] or not self.is_enabled(db,pid):continue
                 for b in page(db,'batches/'+pid,"SELECT rowid AS ordinal,* FROM memory_batches WHERE persona_id=? AND state IN ('extracting','verifying','waiting','blocked_input','history_paused') AND rowid>? ORDER BY rowid LIMIT ?",(pid,),16):
                     advance(db,'batches/'+pid,b['ordinal'])

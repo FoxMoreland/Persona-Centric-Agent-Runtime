@@ -10,6 +10,8 @@ from .private_personas import provider_identity,guard_cloud_dispatch
 from .instance import current_process_identity,process_identity_alive
 
 VERSION='organization-contract-v1'
+MEMORY_DEFAULTS={'memory_automation':True,'memory_backfill':True}
+MEMORY_DEFAULTS={'memory_automation':True,'memory_backfill':True}
 TRIGGERS=('manual','daily','incremental','sealed','probe','scheduled')
 WAITING=('queued','waiting_quota')
 LANES={'background':'organization_execution','foreground':'organization_foreground_execution'}
@@ -32,9 +34,9 @@ class ManagedOrganization:
     def policy(self,db,pid,create=False):
         row=db.execute('SELECT * FROM organization_policies WHERE persona_id=? ORDER BY revision DESC LIMIT 1',(pid,)).fetchone()
         if row:
-            result=dict(row);result['data']=json.loads(result.pop('data_json'));return result
+            result=dict(row);result['data']=MEMORY_DEFAULTS | json.loads(result.pop('data_json'));return result
         cfg=self.engine.config.load()
-        data={'version':1,'enabled':True,'triggers':list(TRIGGERS),'channels':['desktop','qq'],
+        data={**MEMORY_DEFAULTS,'version':1,'enabled':True,'triggers':list(TRIGGERS),'channels':['desktop','qq'],
               'qq':{'bot':cfg['bot_qq'],'peer':cfg['owner_qq']},
               'provider':provider_identity(self.engine.model())}
         if not create:return {'id':None,'revision':0,'persona_id':pid,'data':data}

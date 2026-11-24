@@ -420,6 +420,10 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
             applied=confirm(store,**args)
             ingress.schedule_committed()
             return web.json_response(applied)
+        if action == "desktop.browser.rename":
+            from .workbench_timeline import save_session_title
+            with store.connection(write=True) as db:
+                return web.json_response({"title":save_session_title(db,**args)})
         if action == "desktop.browser.show":
             from .workbench_timeline import selection
             return web.json_response(selection(store,**args))

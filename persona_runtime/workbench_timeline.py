@@ -35,12 +35,35 @@ DESKTOP = """s.persona_id=? AND s.user_id=? AND coalesce(l.channel,'desktop')='d
     AND NOT EXISTS (SELECT 1 FROM channel_sessions c WHERE c.session_id=s.id AND c.channel!='desktop')"""
 
 
+SESSION_TITLES = "desktop.session.title."
+
+def session_title(value):
+    if not isinstance(value, str):
+        raise RuntimeErrorBase("invalid_session_title")
+    value = value.strip()
+    if len(value)>80 or any(ord(char)<32 or ord(char)==127 for char in value):
+        raise RuntimeErrorBase("invalid_session_title")
+    return value
+
+def save_session_title(db, pid, sid, value):
+    require_session(db,pid,sid)
+    title=session_title(value)
+    if title:
+        db.execute("""INSERT INTO knowledge_control(key,value) VALUES(?,?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value""",(SESSION_TITLES+sid,json.dumps(title,ensure_ascii=False)))
+    else:
+        db.execute("DELETE FROM knowledge_control WHERE key=?",(SESSION_TITLES+sid,))
+    return title
+
 def selection(store, persona_id):
     with store.connection() as db:
         person = RuntimeService._persona(db, persona_id)
-        rows = db.execute(f"""SELECT s.id,s.created_at,l.state FROM sessions s LEFT JOIN session_lifecycle l ON l.session_id=s.id
+        rows = db.execute(f"""SELECT s.id,s.created_at,l.state,json_extract(n.value,'$') AS title
+                               FROM sessions s LEFT JOIN session_lifecycle l ON l.session_id=s.id
+                               LEFT JOIN knowledge_control n ON n.key='{SESSION_TITLES}' || s.id
                                WHERE {DESKTOP} ORDER BY s.created_at,s.rowid""", (persona_id,LOCAL_USER_ID))
-        sessions = [dict(row) for row in rows]
+        from .import_history_service import must_prepare
+        sessions = [dict(row, history_preparing=must_prepare(db,row["id"],complete=False)) for row in rows]
         head = db.execute("""SELECT session_id FROM session_heads WHERE persona_id=? AND user_id=?
                              AND channel='desktop' AND bot='' AND peer=''""",(persona_id,LOCAL_USER_ID)).fetchone()
         return {"person":person,"sessions":sessions,"active":head[0] if head else None,

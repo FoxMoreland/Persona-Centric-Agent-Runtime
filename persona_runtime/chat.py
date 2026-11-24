@@ -387,7 +387,12 @@ class ChatEngine:
             raise RuntimeErrorBase('use_session_service_for_new_session')
         return select(conn,persona_id,channel,session_id,origin)
 
-    def session(self, channel="desktop", session_id=None, fresh=False, persona_id=None):
+    def session(self, channel="desktop", session_id=None, fresh=False, persona_id=None, title=None):
+        if title is not None:
+            from .workbench_timeline import session_title, save_session_title
+            if channel!="desktop" or not fresh:
+                raise RuntimeErrorBase("invalid_session_title")
+            title=session_title(title)
         from .sessions import SessionService
         if channel not in ('desktop','qq'):raise RuntimeErrorBase('Unsupported channel')
         cfg=self.config.load();origin={'bot':cfg['bot_qq'],'sender':cfg['owner_qq']} if channel=='qq' else None
@@ -403,16 +408,22 @@ class ChatEngine:
                 if result['state']!='sealed':raise RuntimeErrorBase('session_has_pending_work')
             session_id=None
         with self.store.connection(write=True) as conn:
-            return {'session_id':self._session(conn,pid,channel,session_id,origin=origin),'persona_id':pid,'channel':channel}
+            sid=self._session(conn,pid,channel,session_id,origin=origin)
+            if title:
+                save_session_title(conn,pid,sid,title)
+            return {'session_id':sid,'persona_id':pid,'channel':channel}
 
     def desktop_sessions(self):
+        from .workbench_timeline import SESSION_TITLES
         with self.store.connection() as conn:
             persona_id = self.service._persona(conn)["id"]
             return [dict(row) for row in conn.execute(
-                "SELECT s.* FROM sessions s WHERE s.persona_id=? AND s.user_id=? "
+                "SELECT s.*,json_extract(n.value,'$') AS title FROM sessions s "
+                "LEFT JOIN knowledge_control n ON n.key = ? || s.id "
+                "WHERE s.persona_id=? AND s.user_id=? "
                 "AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.id AND t.channel='qq') "
                 "AND NOT EXISTS (SELECT 1 FROM channel_sessions c WHERE c.session_id=s.id AND c.channel='qq') "
-                "ORDER BY s.created_at", (persona_id, LOCAL_USER_ID))]
+                "ORDER BY s.created_at", (SESSION_TITLES, persona_id, LOCAL_USER_ID))]
 
     async def submit(self, channel, text, request_id, session_id=None, *, test=False, origin=None, persona_id=None, test_reply_mode=None, public_task=None, lookup_span=None, long_requested=False):
         from .local_repair import require_open
@@ -485,6 +496,10 @@ class ChatEngine:
                 raise RuntimeErrorBase("queue_full")
             if not test:
                 session_id = self._session(conn, persona_id, channel, session_id, origin=origin or ({'bot':self.config.load()['bot_qq'],'sender':self.config.load()['owner_qq']} if channel=='qq' else None))
+            if not test and channel=='desktop':
+                from .import_history_service import must_prepare
+                if must_prepare(conn,session_id):
+                    raise RuntimeErrorBase('history_preparation_pending')
             event_id = None if test else identifier()
             if event_id:
                 conn.execute("INSERT INTO events (id,session_id,persona_id,user_id,role,text,created_at) "

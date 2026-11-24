@@ -20,7 +20,7 @@ class HistoryMemoryTests(unittest.IsolatedAsyncioTestCase):
     setUp = test_m4.M4Tests.setUp
     asyncTearDown = test_m4.M4Tests.asyncTearDown
 
-    def restore(self, organize=True, *, undated=False):
+    def restore(self, organize=True, *, undated=False, explicit_policy=True):
         self.pid = self.persona["id"]
         self.cfg.update({'organization':{'model':{'api_key':'111'}}})
         settings=self.cfg.load()
@@ -36,8 +36,9 @@ class HistoryMemoryTests(unittest.IsolatedAsyncioTestCase):
         with self.store.connection(write=True) as db:
             sid=import_history.restore(db,self.pid,"0"*64,"B",rows,meta=meta)
         policy=self.org.managed.current_policy()
-        self.org.managed.update_policy(self.pid,dict(policy["data"],memory_automation=True,memory_backfill=True),
-                                       policy["id"],self.pid,identifier())
+        if explicit_policy:
+            self.org.managed.update_policy(self.pid,dict(policy["data"],memory_automation=True,memory_backfill=True),
+                                           policy["id"],self.pid,identifier())
         self.org.client=Model()
         return sid
 
@@ -78,6 +79,33 @@ class HistoryMemoryTests(unittest.IsolatedAsyncioTestCase):
         await self.finish()
         self.assertEqual(len(self.org.client.calls),2)
         self.assertEqual(len(self.service.search_memories()),2)
+
+    async def test_default_organizes_import_and_uses_original_time_for_decay(self):
+        from datetime import datetime,timezone
+        from persona_runtime.recall_support import RecallSupport
+        from persona_runtime.recall_policy import priority, INITIAL_PRIORITY
+        from persona_runtime.recall_sources import epoch
+
+        sid=self.restore(explicit_policy=False)
+        self.assertTrue(self.org.managed.current_policy()["data"]["memory_automation"])
+        self.assertIsNone(self.org.managed.current_policy()["id"])
+        await self.finish()
+        self.assertEqual(len(self.org.client.calls),2)
+        self.assertEqual(self.history_memory_state(sid),"processed")
+        with self.store.connection() as db:
+            memory=db.execute("SELECT * FROM memories WHERE persona_id=? ORDER BY rowid LIMIT 1",(self.pid,)).fetchone()
+            origin=epoch(import_history.source_time(db,memory["source_event_id"]))
+        now=datetime.now(timezone.utc).timestamp()
+        recall=RecallSupport(self.store,clock=lambda:now)
+        selected=scope(self.pid,"desktop")
+        ident=recall.register("memory",{"id":memory["id"]},selected)
+        self.assertAlmostEqual(recall.inspect(ident,selected)["priority"],priority("memory",INITIAL_PRIORITY,origin,now))
+        self.assertLess(recall.inspect(ident,selected)["priority"],INITIAL_PRIORITY)
+
+    def history_memory_state(self,sid):
+        from persona_runtime.import_history_service import HistoryService
+        with self.store.connection() as db:
+            return HistoryService._memory_state(db,sid)
 
     async def test_pause_during_call_preserves_receipt_then_reuses_it_on_resume(self):
         sid=self.restore()
