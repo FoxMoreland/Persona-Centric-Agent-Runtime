@@ -56,7 +56,13 @@ window.pcarLive = (() => {
       backup_target_must_be_new_and_independent:"请选择当前实例数据目录以外的位置。",
       backup_not_available:"没有可通过校验的备份。",backup_invalid:"所选备份未通过校验，请选择另一份。",
       backup_index_unverified:"备份登记无法核验，请保留原文件。",
-      retrieved_notes_unavailable:"本轮资料或来源权限已变化，暂时无法打开。"};
+      retrieved_notes_unavailable:"本轮资料或来源权限已变化，暂时无法打开。",
+      invalid_character_history_package:"角色包校验失败，请重新导出或选择完整的原文件。",
+      character_history_package_expired:"角色包预览已失效，请重新选择文件。",
+      character_history_package_too_large:"角色包超过 64 MiB，或展开后超过 256 MiB。请减少所选会话。",
+      character_history_package_changed:"历史或记忆已变化，请重新预览角色包。",
+      character_history_package_session_busy:"所选会话仍有待处理的消息。完成本轮后再导出。",
+      character_history_package_protected:"此角色的历史受保护，无法生成分享包。"};
     notify(bufferErrors[detail]||known[detail]||(e instanceof FormError||hostMessages.has(detail)?detail:"操作暂未完成，请稍后重试。"));
   });
   const action = (name, args={}) => api().import_action(name,args);
@@ -391,6 +397,7 @@ window.pcarLive = (() => {
     });
     button(box,"导入已有角色包",async()=>{
       const pack=await api().live_package();if(!pack)return;
+      if(pack.format==="pcar_character_v2"){reviewCharacterPackage(pack);return;}
       const form=panel("核对并导入角色包"),read=specForm(form,pack.persona_spec),request=newId();
       button(form,"保存为新角色",async()=>{pack.persona_spec=read();const p=await api().live_save_package(pack,request);
         dialog.close();await reload(p.id);});
@@ -420,6 +427,69 @@ window.pcarLive = (() => {
     if(!status.textContent) showTemplate(template);
     for(const d of docs)button(box,d.format+" · "+d.created.slice(0,16)+" · "+(jobs[d.status]||d.status),
       async()=>openImport(await action("status",{ident:d.id})));
+  }
+  function packageContents(box,pack){
+    const total=pack.sessions.reduce((sum,s)=>sum+s.messages,0);
+    el("p",pack.name+" · "+total+" 条历史消息 · "+new Intl.NumberFormat("zh-CN",{maximumFractionDigits:2}).format(pack.bytes/1048576)+" MiB",box);
+    for(const s of pack.sessions){
+      const item=groupBox(box,(s.title||sessionDate(s.created_at))+(s.id===pack.main_session?" · 主会话":""));
+      if(s.first)el("small",sessionDate(s.first)+" 至 "+sessionDate(s.last),item);
+      el("p",s.messages+" 条历史 · "+s.memories+" 条长期记忆 · "+s.remaining+" 轮尚未整理",item);
+    }
+  }
+  function reviewCharacterPackage(pack){
+    const box=panel("核对并导入角色包"),operation=newId();
+    packageContents(box,pack);
+    el("p","保存后会打开主会话。可在「历史来源与用途」确认当前接收方，接续聊天并用上已整理的记忆。",box);
+    const save=button(box,"保存为新角色",async()=>{
+      save.disabled=true;
+      try{
+        const p=await api().live_save_package({format:pack.format,handle:pack.handle,digest:pack.digest},operation);
+        await reload(p.id,true,p.session_id);
+      }finally{save.disabled=false;}
+    });
+    save.classList.add("primary");
+    button(box,"取消",async()=>{await api().live_discard_package(pack.handle);dialog.close();});
+  }
+  async function exportCharacterPackage(person){
+    const box=panel("导出角色包");
+    button(box,"导出纯角色 JSON",async()=>{
+      if(await api().live_export_package(person.id))notify("纯角色包已保存。");
+    });
+    const available=await api().live_package_sessions(person.id);
+    if(!box.isConnected)return;
+    const options=groupBox(box,"角色＋历史＋长期记忆");
+    if(!available.length){el("p","此角色暂无可导出的桌面会话。",options);return;}
+    const main=currentSession()?.id || person.writableSession || available[0].id;
+    const choices=new Map();
+    for(const s of available){
+      const selected=check(options,s.title||sessionDate(s.created_at),s.id===main);
+      choices.set(s.id,selected);
+    }
+    const preview=el("div",null,options);
+    for(const check of choices.values())check.addEventListener("change",()=>preview.replaceChildren());
+    button(options,"预览完整角色包",async()=>{
+      const session_ids=[...choices].filter(([,c])=>c.checked).map(([id])=>id);
+      if(!session_ids.length)throw new FormError("请选择至少一个会话。");
+      const main_session=session_ids.includes(main)?main:session_ids[0];
+      const pack=await api().live_preview_package_export(person.id,session_ids,main_session);
+      if(!box.isConnected || session_ids.some(id=>!choices.get(id).checked)
+        || [...choices.values()].filter(c=>c.checked).length!==session_ids.length)return;
+      preview.replaceChildren();
+      packageContents(preview,pack);
+      for(const dependency of pack.dependencies){
+        const label=dependency.title||sessionDate(dependency.created_at);
+        button(preview,"加选「"+label+"」，带入关联的 "+dependency.memories+" 条记忆",()=>{
+          choices.get(dependency.id).checked=true;preview.replaceChildren();
+        });
+      }
+      const omitted=Object.values(pack.omitted).reduce((a,b)=>a+b,0);
+      if(omitted)el("p",omitted+" 条记忆或摘要缺少可携带的来源或修订，将从本包省略。",preview);
+      el("small","导出的文件包含所选聊天原话和长期记忆。请核对范围后再分享。",preview);
+      button(preview,"保存完整角色包",async()=>{
+        if(await api().live_export_package(person.id,{session_ids,main_session,expected:pack.digest}))notify("完整角色包已保存。");
+      }).classList.add("primary");
+    });
   }
 
   function keyPrompt(){
@@ -2060,6 +2130,10 @@ window.pcarLive = (() => {
     el("p","续聊用途 · "+({active:"已确认",legacy:"待核对本人和原件",provider_changed:"当前模型待确认",
       withdrawn:"已撤回"}[info.usage_state] || "待确认"),box);
     el("p","长期记忆 · "+(memoryStateNames[info.memory_state] || "待核对"),box);
+    if(info.portable_package){
+      const {done,total}=info.memory_progress;
+      el("p","角色包已携带整理结果（"+done+"/"+total+" 轮）。可按需补整理其余旧回合。",box);
+    }
     showRecipients(box,info.current_providers,currentPerson()?.profile.chat_mode==="roleplay");
     if(info.usage_state==="legacy") {
       button(box,"选择原件并核对本人",async()=>{
@@ -2091,7 +2165,7 @@ window.pcarLive = (() => {
     if(info.usage_state==="provider_changed" || providerChanged("jev"))button(box,"确认当前模型用于续聊",()=>change("authorize"));
     if(info.organize && providerChanged("memory")) button(box,"确认当前记忆整理模型",()=>change("organize"));
     if(info.organize)button(box,"暂停本次整理",()=>change("pause"));
-    else button(box,"允许当前模型整理本次历史",()=>change("organize"));
+    else button(box,info.portable_package?"允许补整理尚未处理的旧回合":"允许当前模型整理本次历史",()=>change("organize"));
     button(box,"撤回历史使用",async()=>{
       const confirmBox=panel("撤回历史使用");
       el("p","撤回后仍可在本机翻看。续聊、召回和派生记忆会停止使用这段来源。",confirmBox);
@@ -2105,6 +2179,19 @@ window.pcarLive = (() => {
     el("p",[source.speaker,source.number && "#"+source.number,
       (event.timestamp?.precision==="minute" && source.raw_time?source.raw_time:event.created_at) || "时间待核",source.line && "文件第 "+source.line+" 行"].filter(Boolean).join(" · "),box);
     const body=el("p",event.text,box); body.className="import-original";
+    if(event.quote){
+      el("p","原消息引用 · "+event.quote.text,box).className="hint";
+      if(event.quote.target)button(box,"查看引用的消息",async()=>{
+        const person=currentPerson(),sid=event.quote.session_id;
+        const mark=await api().live_message_position(person.id,sid,event.quote.target);
+        if(s!==currentSession())return;
+        await select(person,false,true,sid);
+        if(currentSession()?.id===sid){
+          currentSession().restore=mark;currentSession().version=null;
+          currentSession().historyReady=false;await refresh();
+        }
+      });
+    }
     if(source.sections?.length>1 || source.sections?.length===1 && source.sections[0].kind!=="body"){
       const kinds={body:"正文",quote:"引用",forward:"转发",attachment:"附件",code:"代码",system:"系统"};
       const chars=Array.from(event.text);
@@ -2842,6 +2929,7 @@ window.pcarLive = (() => {
   }
   async function profile(){
     const person=currentPerson(),pid=person.id,box=panel(person.profile.name);
+    if(api().live_package_sessions)button(box,"导出角色包",()=>exportCharacterPackage(person));
     if(api()?.live_choose_persona_image){
       const portrait=el("span",null,box);
       portrait.className="avatar";

@@ -317,7 +317,7 @@ class HistoryService:
                 else:
                     memory=self._memory_state(db,session_id)
             preparing=must_prepare(db,session_id,meta,memory)
-            counts=self._dispositions(db,session_id) if preparing else {}
+            counts=self._dispositions(db,session_id) if preparing or meta.get('portable_package') else {}
             progress={"total":sum(counts.values()),"done":sum(counts.get(key,0) for key in
                 ("processed","no_memory","processed_with_quarantine","revoked"))}
             return dict(meta,preparing=preparing,memory_progress=progress,version=meta.get("version",1),revision=meta.get("revision",0),current_providers=models,
@@ -340,6 +340,7 @@ class HistoryService:
         if "waiting_quota" in states: return "waiting_quota"
         if states.intersection({"extracting","verifying","waiting","running","queued"}): return "processing"
         dispositions=HistoryService._dispositions(db,sid)
+        if set(dispositions).intersection({"blocked_unknown","cancelled_unknown","unknown","interrupted"}):return "unknown"
         if dispositions["input_too_long"] or "blocked_input" in states: return "blocked_input"
         if 'failed' in states or dispositions['failed']:return 'failed'
         if 'cancelled' in states or dispositions['cancelled']:return 'cancelled'

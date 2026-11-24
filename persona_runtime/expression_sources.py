@@ -4,7 +4,7 @@ import re
 
 from .archive import fingerprint, turn_scope, read_exact
 from .expression_assets import authority, ExpressionAssetError
-from .models import LOCAL_USER_ID
+from .models import LOCAL_USER_ID, RuntimeErrorBase
 from .profile import head, source_blocked
 from .turn_input import load_turn_input
 
@@ -19,10 +19,17 @@ def capture(db, turn, details):
         value = read_exact(db, selected, {'kind': 'turn', 'id': group['turn_id']})
         if value['status'] != 'found':raise ExpressionAssetError('expression_history_unavailable')
         events.update(item['id'] for item in value['members'] + value['replies'] if item.get('kind') != 'part')
+    from . import quote_context
+    quote = quote_context.read(db, turn)
+    if quote:
+        events.update(item['event_id'] for item in [quote['anchor'], *quote_context.neighborhood(quote), *quote['latest']])
     for item in load_turn_input(db, turn):
         ref = db.execute('SELECT target_json FROM input_references WHERE event_id=?', (item['id'],)).fetchone()
         if ref:
-            value = read_exact(db, selected, json.loads(ref[0]))
+            target = json.loads(ref[0])
+            if quote_context.is_quote(target):
+                continue
+            value = read_exact(db, selected, target)
             if value['status'] != 'found':raise ExpressionAssetError('expression_reference_unavailable')
             events.update(item['id'] for item in value['members'] + value['replies'] if item.get('kind') != 'part')
     memories = {}
@@ -47,6 +54,7 @@ def capture(db, turn, details):
     from .history_context import capture as capture_history
     history_proof = details.get("import_history_sources") or capture_history(db,turn,details)
     return {**({"import_history_sources":history_proof} if history_proof else {}),
+            **({'quote_reference': True} if quote else {}),
             'scope': selected, 'execution_revision': turn['execution_revision'], 'authority': authority(db, turn['persona_id']),
             'relationship': head(db, turn['persona_id'], 'relationship')['id'], 'events': hashes,
             'memories': memories, 'summary': summary, 'relationship_refs': relation_refs}
@@ -56,6 +64,13 @@ def validate(store, db, turn, context):
     proof, details = context['guard'], context['details']
     from .history_context import validate as validate_history
     validate_history(db,turn,proof.get("import_history_sources"))
+    if proof.get('quote_reference'):
+        from .quote_context import read as accepted_quote
+        try:
+            if not accepted_quote(db, turn):
+                raise ExpressionAssetError('expression_reference_unavailable')
+        except RuntimeErrorBase as error:
+            raise ExpressionAssetError('expression_reference_unavailable') from error
     if turn.get('cancelled_at') or turn['execution_revision'] != proof['execution_revision'] or turn_scope(db, turn) != proof['scope']:
         raise ExpressionAssetError('expression_request_inactive')
     if authority(db, turn['persona_id']) != proof['authority'] or head(db, turn['persona_id'], 'relationship')['id'] != proof['relationship']:

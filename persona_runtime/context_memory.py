@@ -57,11 +57,17 @@ def quote_priorities(conn,turn,window):
     if not nearby:
         return {}
     def in_readable_history(mid):
+        from .context_builders import portable_memory_sessions
+        portable = portable_memory_sessions(conn, mid)
         for ident in memory_source_ids(conn,mid):
             event=conn.execute("SELECT * FROM events WHERE id=?",(ident,)).fetchone()
             if event is None:
                 return False
             cutoff=parts.get(event["session_id"])
+            if cutoff is None and turn["session_id"] in portable and event["session_id"] in portable:
+                from .import_history import history_allowed
+                if history_allowed(conn,event["session_id"],"dialogue"):
+                    continue
             if cutoff is None or event["seq"]>cutoff//POSITION_STRIDE:
                 return False
             if event["seq"]==cutoff//POSITION_STRIDE:

@@ -356,6 +356,19 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         service = engine.service
         if not isinstance(args, dict):
             raise RuntimeErrorBase("JSON object required")
+        if action in ('character.pack.sessions', 'character.pack.preview_export', 'character.pack.export',
+                      'character.pack.preview_import', 'character.pack.import'):
+            from .character_pack import CharacterPacks
+            from .organization import local_maintenance
+            packs = CharacterPacks(store)
+            if action in ('character.pack.preview_export', 'character.pack.export'):
+                if (action == 'character.pack.export') != (args.get('expected') is not None):
+                    raise RuntimeErrorBase('invalid_character_history_package')
+                handler = packs.export
+            else:
+                handler = {'character.pack.sessions': packs.sessions, 'character.pack.preview_import': packs.preview,
+                           'character.pack.import': packs.restore}[action]
+            return web.json_response(await local_maintenance(handler, **args))
         if activation is not None and action == "desktop.activation.status":
             return web.json_response(activation.status())
         if activation is not None and action == "desktop.activation.clear":
