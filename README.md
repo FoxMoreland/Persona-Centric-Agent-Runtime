@@ -64,11 +64,15 @@ PCAR（Persona-Centric Agent Runtime）是一款开源 AI 伴侣工作台。**�
 
 **首次启动与公告。** 首次打开新版时会显示本次更新。之后可从首页「公告」回看历史更新和作者通知。1.3.0 新增会话命名和历史加载进度，也修好了长引用把输入框撑出屏幕的问题。[查看完整更新公告](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/pcar-v1.3.0)
 
+### 1.4.0 正式候选
+
+Windows 和 Android 候选已通过工程验收。完整角色包可以分享所选聊天和已整理的长期记忆，两端可在设置中接入自备 Jev。单 Key 启动默认使用 Flash 决策。当前公开下载为 1.3.0。
+
 ### 内部开发版
 
 开发版探索 Gemini 4 Hydrogen 正文选项、Jev 决策接入和 G‑Auto。原 v0.4 和相应部署说明可继续查阅。[v0.4 发行页](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/v0.4) · [部署与升级](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/blob/v0.4/AGENT_INSTALL.md)
 
-内部开发版当前为 **0.5.1**。源码与验收记录在 [development/v0.5](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/tree/development/v0.5)。
+内部开发版当前为 **0.5.2**。源码与验收记录在 [development/v0.5](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/tree/development/v0.5)。
 
 Windows 和 Android 安装包按同一套正式版规则发布。开发与验收继续在内部开发版推进。[版本、发布与公告管理规则](docs/product/release-and-announcements.md)
 
