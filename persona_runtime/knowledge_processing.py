@@ -72,10 +72,28 @@ class KnowledgeProcessing:
     def context(self,db,turn):
         from .turn_input import load_turn_input
         return {'scope':turn_scope(db,turn),'input':load_turn_input(db,turn)}
-    def _grant(self,db,turn,policy,inputs,stage=None,*,native_route=None):
+    def _grant(self,db,turn,policy,inputs,stage=None,*,native_route=None,community_search_protocol=None):
         from .knowledge_service import read,POLICY
         from .private_personas import guard_cloud_dispatch
         current=read(db,'processing.'+turn['persona_id'],self.defaults())
+        if community_search_protocol is not None:
+            from .community_lookup import AUTOMATIC, automatic_request, require_consent, require_decision
+            request = automatic_request(db, turn, self.native)
+            if community_search_protocol != AUTOMATIC or not request or current != policy:
+                raise RuntimeErrorBase("native_public_task_scope_changed")
+            decision_input, search_input = request
+            require_consent(db, self.engine.config, turn["persona_id"], turn["session_id"],
+                            search_input["community_consent"], AUTOMATIC)
+            if stage == "conversation_web_decision" and inputs == decision_input:
+                self.engine.routing.grant(turn["persona_id"], db=db)
+                return
+            decision_task = inputs.get("decision_task_id")
+            if stage == "conversation_search" and inputs == (search_input | {"decision_task_id": decision_task}):
+                require_decision(db, turn, decision_task)
+                guard_cloud_dispatch(self.store, turn["persona_id"], "knowledge_native",
+                                     self.engine.config.load()["native_web_model"], db=db)
+                return
+            raise RuntimeErrorBase("native_public_task_scope_changed")
         if "community_consent" in inputs:
             from .community_lookup import require_consent, task_for_turn
             task = task_for_turn(db, turn) or {}
@@ -114,7 +132,7 @@ class KnowledgeProcessing:
             from .tk_notice import authorize_search
             authorize_search(db,self.store,turn)
 
-    def _call(self,turn,stage,inputs):
+    def _call(self,turn,stage,inputs,*,community_search_protocol=None):
         from .knowledge_service import read
         from .knowledge_wait import check,mark
         if stage=='conversation_search_notice':
@@ -130,7 +148,10 @@ class KnowledgeProcessing:
         policy=self.policy(turn['persona_id'])
         from .knowledge_routing import binding
         decision_binding=binding(self.engine.routing.model()) if stage=='conversation_web_decision' else None
-        token=fingerprint([turn['id'],turn.get('execution_revision'),stage,inputs,policy,VERSION]+([decision_binding] if decision_binding else []))
+        identity=[turn['id'],turn.get('execution_revision'),stage,inputs,policy,VERSION]
+        if decision_binding:identity.append(decision_binding)
+        if community_search_protocol:identity.append(community_search_protocol)
+        token=fingerprint(identity)
         cache_key='processing.cache.'+token
         with self.store.connection(write=True) as db:
             # A primary retry changes its execution number, not the identity of
@@ -141,7 +162,8 @@ class KnowledgeProcessing:
             recovery = contract(db, turn) if turn['channel']=='desktop' else None
             for row in db.execute("SELECT * FROM organization_tasks WHERE persona_id=? AND json_extract(payload_json,'$.knowledge_processing.root_turn_id')=? AND json_extract(payload_json,'$.knowledge_processing.stage')=? ORDER BY rowid",(turn['persona_id'],turn['id'],stage)):
                 payload=json.loads(row['payload_json']);data=payload['knowledge_processing']
-                if ((data['input']==inputs or stage in ('conversation_native','conversation_web_decision','conversation_search_notice')) and data['pipeline']==VERSION
+                if ((data['input']==inputs or (not community_search_protocol and stage in ('conversation_native','conversation_web_decision','conversation_search_notice'))) and data['pipeline']==VERSION
+                        and data.get('community_search_protocol')==community_search_protocol
                         and (data.get('decision_binding')==decision_binding or stage=='conversation_web_decision')
                         and data['context_guard']==context_guard and payload['scope']==turn_scope(db,turn)):
                     previous.append(row)
@@ -150,7 +172,7 @@ class KnowledgeProcessing:
             from .knowledge_native_route import for_new_work
             native_route=(json.loads(previous[-1]['payload_json'])['knowledge_processing'].get('native_model_route')
                           if previous else for_new_work(db,turn,stage))
-            self._grant(db,turn,policy,inputs,stage,native_route=native_route)
+            self._grant(db,turn,policy,inputs,stage,native_route=native_route,community_search_protocol=community_search_protocol)
             resumed=None
             for row in previous:
                 if row['status']=='completed':
@@ -192,6 +214,7 @@ class KnowledgeProcessing:
                 'policy':policy,'cache_key':cache_key,'request_profile':OUTPUT_PROFILE,
                 **({'decision_binding':decision_binding} if decision_binding else {})}
             if native_route is not None:data['native_model_route']=native_route
+            if community_search_protocol:data['community_search_protocol']=community_search_protocol
             payload={'persona_id':turn['persona_id'],'channel':turn['channel'],'session_id':turn['session_id'],'mode':'both',
                 'scope':turn_scope(db,turn),'user_id':LOCAL_USER_ID,
                 'knowledge_processing':data,'fingerprint':token,'manual_quota_request':bool(not turn.get('outbound_id') and (turn.get('user_event_id') or turn.get('input_batch_id')))}
@@ -218,7 +241,8 @@ class KnowledgeProcessing:
         if data['stage'] not in STAGES:raise RuntimeErrorBase('legacy_retrieval_frozen')
         if not turn or turn['persona_id']!=task['persona_id'] or turn['cancelled_at'] or turn['status']!='queued' or turn_scope(db,dict(turn))!=payload['scope']:
             raise RuntimeErrorBase('knowledge_scope_changed')
-        self._grant(db,dict(turn),data['policy'],data['input'],data['stage'],native_route=data.get('native_model_route'))
+        self._grant(db,dict(turn),data['policy'],data['input'],data['stage'],native_route=data.get('native_model_route'),
+                    community_search_protocol=data.get('community_search_protocol'))
         if data['stage'] in ('conversation_search_notice','conversation_native'):
             check_scene = getattr(self.engine.chat, 'scene_for', None)
             if check_scene:
@@ -238,12 +262,15 @@ class KnowledgeProcessing:
             return {'state':'disabled','evidence':[]}
         from .knowledge_service import read
         from .community import enabled as community_enabled
-        from .community_lookup import task_for_turn
+        from .community_lookup import automatic_request, task_for_turn
         if community_enabled():
             with self.store.connection() as db:
                 task = task_for_turn(db, turn)
+                automatic = automatic_request(db, turn, self.native) if task is None else None
             if task is not None:
-                return self._community_search(turn, task)
+                return self._community_search(turn, {"query": task["question"], "community_consent": task["community_consent"]})
+            if automatic is not None:
+                return self._community_automatic_search(turn, *automatic)
         with self.store.connection() as db:
             retired=[row[0] for row in db.execute("SELECT id FROM organization_tasks WHERE json_extract(payload_json,'$.knowledge_processing.root_turn_id')=? AND json_extract(payload_json,'$.knowledge_processing.stage') IN ('conversation_search_plan','conversation_organize')",(turn['id'],))]
             if retired:
@@ -257,7 +284,21 @@ class KnowledgeProcessing:
                     'retrieval':copy.deepcopy(record.get('retrieval',{})),'legacy_receipt_reused':True}
         return self.native.prepare(turn)
 
-    def _community_search(self, turn, task):
+    def _community_automatic_search(self, turn, decision_input, search_input):
+        from .community_lookup import AUTOMATIC
+        try:
+            decision, task_id = self._call(turn, "conversation_web_decision", decision_input,
+                                           community_search_protocol=AUTOMATIC)
+        except RuntimeErrorBase as error:
+            if str(error) in ("knowledge_prior_execution_requires_review", "knowledge_request_inactive", "knowledge_stopped"):
+                raise
+            return {"state": "disabled", "evidence": []}
+        if decision.get("need_web") is not True:
+            return {"state": "disabled", "evidence": []}
+        return self._community_search(turn, search_input | {"decision_task_id": task_id}, protocol=AUTOMATIC)
+
+    def _community_search(self, turn, inputs, *, protocol=None):
+        from .community_lookup import PROTOCOL
         from .knowledge_native_memory import apply_states
 
         attempt = None
@@ -265,8 +306,7 @@ class KnowledgeProcessing:
         sources = []
         pid = turn["persona_id"]
         try:
-            result, attempt = self._call(turn, "conversation_search", {
-                "query": task["question"], "community_consent": task["community_consent"]})
+            result, attempt = self._call(turn, "conversation_search", inputs, community_search_protocol=protocol)
             for source in result.get("sources", []):
                 sources.append(source | {"id": fingerprint([pid, source["url"], source["content"], source["summary"]])})
         except RuntimeErrorBase as exc:
@@ -276,7 +316,7 @@ class KnowledgeProcessing:
             sources, _ = apply_states(db, pid, sources, {})
             outcome = ("unconfirmed" if error and ("unconfirmed" in error or "unknown" in error) else
                        "unavailable" if error else "completed")
-            retrieval = {"executor": "community-explicit-search-v1", "needed": True, "used_previous": False,
+            retrieval = {"executor": protocol or PROTOCOL, "needed": True, "used_previous": False,
                          "material_acquired": bool(sources), "search_outcome": outcome,
                          "task_ids": [attempt] if attempt else [], "errors": [error] if error else []}
             record = {"persona_id": pid, "session_id": turn["session_id"], "channel": turn["channel"],

@@ -142,6 +142,8 @@ def status(store, config, persona_id, session_id):
         from . import community
         if community.enabled():
             result["community_search"] = community_lookup.state(db, config, cfg, persona_id, session_id)[0]
+            result["community_auto_search"] = community_lookup.state(db, config, cfg, persona_id, session_id,
+                                                                    community_lookup.AUTOMATIC)[0]
         from . import main_reply
         if main_reply.settings(cfg)['active']==main_reply.HYDROGEN:
             result['main_reply_writer']=writer_consent(db,config,cfg,persona_id,session_id)
@@ -226,14 +228,14 @@ def _record(db, config, cfg, pid, sid, rev, enabled, destinations, op, signature
 
 def update(store, config, persona_id, session_id, enabled, revision, recipient_hash, operation_id, protocol):
     if (type(enabled) is not bool or type(revision) is not int or revision < 0
-            or protocol not in (PROTOCOL,PUBLIC_SCOPE,PUBLIC_ATTRIBUTE_SCOPE,PUBLIC_QUESTION_SCOPE,community_lookup.PROTOCOL)
+            or protocol not in (PROTOCOL,PUBLIC_SCOPE,PUBLIC_ATTRIBUTE_SCOPE,PUBLIC_QUESTION_SCOPE,*community_lookup.PROTOCOLS)
             or not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 200):
         raise RuntimeErrorBase('invalid_privacy_operation')
     with store.connection(write=True) as db:
         cfg = config.load()
-        if protocol == community_lookup.PROTOCOL:
+        if protocol in community_lookup.PROTOCOLS:
             return community_lookup.update(db, config, cfg, persona_id, session_id, enabled,
-                                           revision, recipient_hash, operation_id)
+                                           revision, recipient_hash, operation_id, protocol)
         dest = recipients(config, cfg)
         state = current(db, config, cfg, persona_id, session_id, dest)
         if protocol!=PROTOCOL:

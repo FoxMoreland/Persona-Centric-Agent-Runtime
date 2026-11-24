@@ -67,8 +67,10 @@ def validate_record(db,pid,channel,meta):
 class IndependentWebTools:
     def __init__(self,processor):self.processor=processor;self.store=processor.store;self.service=processor.service
     def check(self,db,turn,data):
-        if data["stage"] == "conversation_search" and "community_consent" in data["input"]:
-            # The processing grant validates the frozen query and session consent.
+        from .community_lookup import AUTOMATIC
+        if (data.get("community_search_protocol") == AUTOMATIC or
+                data["stage"] == "conversation_search" and "community_consent" in data["input"]):
+            # The processing grant validates the bound decision, query and consent.
             return
         from .knowledge_service import read,POLICY
         reader=read(db,'policy.'+turn['persona_id'],POLICY)['data']

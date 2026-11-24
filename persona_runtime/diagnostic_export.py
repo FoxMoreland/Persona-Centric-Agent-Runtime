@@ -116,11 +116,11 @@ def _operations(paths):
                                for at, status, error in rows]
             result["database"] = "readable"
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='knowledge_control'").fetchone():
-                from .community_lookup import outcome
+                from .community_lookup import PROTOCOLS, outcome
                 rows = db.execute("""SELECT t.updated_at, json_extract(k.value,'$.data.retrieval')
                     FROM knowledge_control k JOIN turns t ON k.key='knowledge.conversation.record.'||t.id
-                    WHERE json_extract(k.value,'$.data.retrieval.executor')='community-explicit-search-v1'
-                    ORDER BY t.rowid DESC LIMIT ?""", (_LIMIT,))
+                    WHERE json_extract(k.value,'$.data.retrieval.executor') IN (?,?)
+                    ORDER BY t.rowid DESC LIMIT ?""", (*PROTOCOLS, _LIMIT))
                 for at, raw in rows:
                     retrieval = json.loads(raw)
                     error = next(iter(retrieval.get("errors", [])), None)

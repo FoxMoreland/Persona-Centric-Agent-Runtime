@@ -86,12 +86,10 @@ def delete_rows(db, pid, instance):
         if 'id' in columns:
             ids.update(row[0] for row in db.execute(f'''SELECT c.id FROM doomed d
                 JOIN {q(table)} c ON c.rowid=d.rid WHERE d.name=? AND typeof(c.id)='text' ''',(table,)))
-    private_refs = {
-        prefix + fingerprint([instance,pid,sid])
-        for sid in sessions for prefix in ('community.search.consent.','private.lookup.consent.')
-    }
+    # Include hashed consent keys and their operation receipts.
+    ids.update(fingerprint([instance,pid,sid]) for sid in sessions)
     for (key,) in db.execute('SELECT key FROM knowledge_control').fetchall():
-        if key in private_refs or any(part in ids for part in key.split('.')):
+        if any(part in ids for part in key.split('.')):
             db.execute('DELETE FROM knowledge_control WHERE key=?',(key,))
     db.execute("""DELETE FROM knowledge_control WHERE json_valid(value) AND (
         json_extract(value,'$.persona_id')=? OR json_extract(value,'$.data.persona_id')=?
@@ -182,7 +180,7 @@ def reclaim(store, pid, sessions, config, cfg):
             safe(root,store.paths.home).rmdir()
         for sid in sessions:
             witness = _witness(config,cfg,sid)
-            for suffix in ('.json','.public.json','.community-search.json','.openrouter.json'):
+            for suffix in ('.json','.public.json','.community-search.json','.community-search.automatic.json','.openrouter.json'):
                 safe(witness.with_suffix(suffix),store.paths.home).unlink(missing_ok=True)
         _drafts(store.paths,pid)
     except (OSError,ValueError):

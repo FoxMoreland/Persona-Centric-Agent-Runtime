@@ -453,15 +453,20 @@ class CharacterPacks:
     def preview(self, handle):
         path = stage_path(self.paths, handle)
         with fmt.Rows(path.parent) as rows:
-            return fmt.preview(rows, fmt.read_pack(path, rows), path.stat().st_size)
+            manifest = fmt.read_pack(path, rows)
+            return fmt.preview(rows, manifest, path.stat().st_size) | {'card': rows.character}
 
-    def restore(self, handle, digest, operation_id):
+    def restore(self, handle, digest, operation_id, card=None):
         from .character_pack_restore import restore
         fmt.ident(operation_id)
         fmt.ident(digest)
         operation = OP_PREFIX + operation_id
+        request = digest
+        if card is not None:
+            fmt.character(card)
+            request = fingerprint([digest, card])
         with self.store.connection() as db:
-            previous = completed(db, operation, digest)
+            previous = completed(db, operation, request)
         if previous:
             return previous
         path = stage_path(self.paths, handle)
@@ -469,14 +474,16 @@ class CharacterPacks:
             manifest = fmt.read_pack(path, rows)
             if fingerprint(manifest) != digest:
                 raise RuntimeErrorBase('character_history_package_changed')
+            if card is not None:
+                rows.character = card
             with self.store.connection(write=True) as db:
-                previous = completed(db, operation, digest)
+                previous = completed(db, operation, request)
                 if previous:
                     return previous
                 result = restore(db, rows, manifest['main_session'])
                 from .models import timestamp
                 db.execute('INSERT INTO memory_operations VALUES (?,?,?,?,?,?)',
-                           (operation, result['id'], LOCAL_USER_ID, digest, encoded(result), timestamp()))
+                           (operation, result['id'], LOCAL_USER_ID, request, encoded(result), timestamp()))
         callback = getattr(self.store, 'character_committed', None)
         if callback:
             callback(result['id'])

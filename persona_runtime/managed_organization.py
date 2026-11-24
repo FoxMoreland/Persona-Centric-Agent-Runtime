@@ -371,7 +371,11 @@ class ManagedOrganization:
     def recover(self):
         with self.store.connection(write=True) as db:
             for row in db.execute('SELECT * FROM organization_tasks WHERE id NOT IN (SELECT task_id FROM organization_contracts)').fetchall():
-                task=dict(row);p=json.loads(task['payload_json'])
+                task=dict(row)
+                # Restored summaries use a terminal provenance row without a dispatch payload.
+                if task['status']=='completed' and task['mode']=='character_package':
+                    continue
+                p=json.loads(task['payload_json'])
                 if task['status']=='completed' and p.get('private_data_erased') is True:
                     continue
                 if task['mode']=='test':p.update(persona_id=task['persona_id'],user_id=LOCAL_USER_ID,channel='desktop',mode='test',fingerprint=task['fingerprint'])

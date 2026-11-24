@@ -408,11 +408,8 @@ window.pcarLive = (() => {
       if(scope)chooseImportScope(scope,openImport,home);
     });
     button(box,"导入已有角色包",async()=>{
-      const pack=await api().live_package();if(!pack)return;
-      if(pack.format==="pcar_character_v2"){reviewCharacterPackage(pack);return;}
-      const form=panel("核对并导入角色包"),read=specForm(form,pack.persona_spec),request=newId();
-      button(form,"保存为新角色",async()=>{pack.persona_spec=read();const p=await api().live_save_package(pack,request);
-        dialog.close();await reload(p.id);});
+      const pack=await api().live_package();
+      if(pack)reviewCharacterPackage(pack);
     });
     button(box,"空白创建",()=>{
       const form=panel("空白创建"), read=specForm(form,{name:"",introduction:"",core_traits:[],
@@ -452,18 +449,36 @@ window.pcarLive = (() => {
     }
   }
   function reviewCharacterPackage(pack){
-    const box=panel("核对并导入角色包"),operation=newId();
-    packageContents(box,pack);
-    el("p","保存后会打开主会话。可在「历史来源与用途」确认当前接收方，接续聊天并用上已整理的记忆。",box);
-    const save=button(box,"保存为新角色",async()=>{
-      save.disabled=true;
-      try{
-        const p=await api().live_save_package({format:pack.format,handle:pack.handle,digest:pack.digest},operation);
-        await reload(p.id,true,p.session_id);
-      }finally{save.disabled=false;}
+    const portable=pack.format==="pcar_character_v2";
+    const card=portable?pack.card:pack, operation=newId();
+    const box=panel("核对角色卡 · "+card.persona_spec.name);
+    const base=groupBox(box,"基础人设与语言风格",true);
+    const required=["name","introduction"], readSpec=specForm(base,card.persona_spec,required);
+    const readRelationship=portable
+      ? readField(field(base,"关系说明",card.relationship,false,"relationship"),card.relationship)
+      : null;
+    const readCharacter=card.character?characterForm(groupBox(box,"人物资料"),card.character):null;
+    if(portable){
+      const history=groupBox(box,"随包导入的历史和记忆");
+      packageContents(history,pack);
+      el("p","保存后打开包内主会话。可在「历史来源与用途」确认接续聊天和记忆取材。",history);
+    }
+    const actions=byId("dialog-actions");
+    button(actions,"保存为新角色",async()=>{
+      const spec=readSpec(), missing=required.filter(key=>!spec[key].trim());
+      if(missing.length){markRequiredCardFields(box,missing);return;}
+      const edited={...card,persona_spec:spec};
+      if(readRelationship) edited.relationship=readRelationship();
+      if(readCharacter) edited.character=readCharacter();
+      const request=portable?{format:pack.format,handle:pack.handle,digest:pack.digest,card:edited}:edited;
+      const person=await api().live_save_package(request,operation);
+      await reload(person.id,true,person.session_id ?? null);
+      window.pcarMobile?.chat();
+    }).classList.add("primary");
+    button(actions,"取消",async()=>{
+      if(portable) await api().live_discard_package(pack.handle);
+      dialog.close();
     });
-    save.classList.add("primary");
-    button(box,"取消",async()=>{await api().live_discard_package(pack.handle);dialog.close();});
   }
   async function exportCharacterPackage(person){
     const box=panel("导出角色包");
@@ -2651,37 +2666,10 @@ window.pcarLive = (() => {
   }
   const bufferPanel=byId("input-buffer"),bufferStatus=byId("input-buffer-status");
   const privacyButton=byId("session-privacy");
-  const communitySearch=byId("community-search");
   function communityGrant(person, sid, grant, enabled) {
     return api().live_privacy(person.id,sid,{enabled,operation_id:newId(),revision:grant.revision,
       protocol:grant.protocol,recipient_hash:grant.recipient_hash});
   }
-  communitySearch.onclick=run(async()=>{
-    const person=currentPerson(), session=currentSession(), original=message.value;
-    if(!person||!session||session.reference||session.inputBuffer?.batch) return;
-    const excerpt=original.slice(message.selectionStart,message.selectionEnd).trim()||original.trim();
-    if(!excerpt||[...excerpt].length>128)throw new FormError("请选择 1–128 个字符作为公开查找片段。");
-    const privacy=await api().live_privacy(person.id,session.id);
-    if(currentSession()!==session||currentPerson()?.id!==person.id||message.value!==original)return;
-    let grant=privacy.community_search;
-    if(!grant?.available){await privacyPanel();return;}
-    const box=panel("确认联网查找");
-    el("p","这轮仅把下面的片段发给 DeepSeek 官方搜索。",box);
-    el("p",excerpt,box).className="import-original";
-    const authorize=button(box,"允许本会话发起明确的联网查找",async()=>{
-      grant=await communityGrant(person,privacy.session_id,grant,true);
-      if(box.isConnected&&grant.enabled){authorize.hidden=true;confirm.disabled=false;}
-    });
-    authorize.hidden=grant.enabled;
-    const confirm=button(byId("dialog-actions"),"查找并发送",async()=>{
-      if(currentSession()!==session||currentPerson()?.id!==person.id||message.value!==original)
-        throw new FormError("消息或会话已变化，请重新选择查找片段。");
-      dialog.close();
-      await send(false,{question:excerpt,community_consent:{revision:grant.revision,recipient_hash:grant.recipient_hash}},privacy.session_id);
-    });
-    confirm.disabled=!grant.enabled;
-    confirm.classList.add("primary");
-  });
   const recipientLabels={main:"主回复",organization:"后台整理",selector:"选材",jev:"Jev 决策",lookup_target:"检索对象解析",native_web:"原生联网模型",search_fetch:"联网检索与抓取"};
   async function privacyPanel(){
     const person=currentPerson(),session=currentSession();
@@ -2715,6 +2703,16 @@ window.pcarLive = (() => {
       }).catch(()=>{});
     }
     const context=state.public_lookup;
+    const automaticSearch=state.community_auto_search;
+    if(automaticSearch?.available){
+      const pane=groupBox(box,"自动联网授权",true);
+      el("p","决策模型判断本轮是否需要查找。需要查找时，DeepSeek 官方搜索只接收当前消息中最多 128 个字符的查询。",pane);
+      button(pane,automaticSearch.enabled?"撤回自动联网授权":"允许本会话自动查找",async()=>{
+        if(!sameSession())return;
+        await communityGrant(person,state.session_id,automaticSearch,!automaticSearch.enabled);
+        if(box.isConnected&&sameSession())await privacyPanel();
+      });
+    }
     if(state.community_search?.enabled){
       button(box,"撤回本会话的明确联网查找授权",async()=>{
         if(!sameSession())return;
@@ -2774,8 +2772,6 @@ window.pcarLive = (() => {
   message.addEventListener("compositionend",updateManualHint);
   function renderInputBuffer(){
     const s=currentSession(), settings=s?.inputBuffer, batch=settings?.batch;
-    communitySearch.hidden=!state.community||!active||!ready()||!s||s.readOnly||currentPerson()?.profile.chat_mode==="roleplay";
-    communitySearch.disabled=Boolean(s?.reference||s?.sending||s?.bufferWorking||batch)||linkState!=="online";
     privacyButton.hidden=!active||!ready()||!s;
     bufferPanel.hidden=!active||!ready()||!settings||s.readOnly;
     if(bufferPanel.hidden){updateManualHint();return;}
@@ -2864,7 +2860,7 @@ window.pcarLive = (() => {
   bufferConfirm.onclick=run(()=>finishBuffer("confirm"));
   bufferCancel.onclick=run(()=>finishBuffer("cancel"));
   byId("long-reply-send").addEventListener("click",()=>run(()=>send(true))());
-  async function send(longRequested=false,publicSearch=false,searchSession=null){
+  async function send(longRequested=false){
     const p=currentPerson(),s=currentSession(),value=message.value;
     if(stopped||!p||!s||s.readOnly||s.historyPreparing||!value.trim()||s.sending||s.bufferWorking||selectionToken!==null||pendingDraft(s)||linkState!=="online")return;
     if(!state.connected){connection();return;}
@@ -2876,7 +2872,7 @@ window.pcarLive = (() => {
     try{
       const policy=s.inputBuffer?{version:s.inputBuffer.version}:null;
       const choice=ref?(s.reference.kind==="desktop_message"?messageTarget(ref,s.reference.index):{kind:"event",id:ref}):null;
-      const args=[p.id,searchSession||s.id,value,request,choice,revision,publicSearch,policy];
+      const args=[p.id,s.id,value,request,choice,revision,false,policy];
       if(longRequested)args.push(true);
       const accepted=await api().live_submit(...args);
       if(accepted.state==="rejected")throw new FormError(bufferErrors[accepted.reason]);
@@ -3287,6 +3283,7 @@ window.pcarLive = (() => {
       delay=Math.min(8000,Math.max(1000,delay*2));
       setStatus(reason.includes("desktop_port_occupied")?"本机服务端口由其他程序使用，PCAR 正在等待端口释放。":
                 linkState==="wrong_instance"?"正在等待原工作台实例。":linkState==="draining"?"本机服务正在结束本次运行。":
+                reason.includes("本机服务启动失败")?"本机服务启动失败，正在自动重试。":
                 "正在连接本机服务，已发送的消息会自动核对。");
     }finally{checking=false;arm(delay);}
   }

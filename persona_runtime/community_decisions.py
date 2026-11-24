@@ -20,6 +20,9 @@ def freeze(db, config, tid, pid, sid):
         return
     state = {'requested': 'flash', 'provider': 'flash', 'pending': None, 'jev_sent': False,
              'unknown': False, 'binding': None, 'fallback': None, 'last': None}
+    from .community_lookup import automatic_consent
+    if consent := automatic_consent(db, config, pid, sid):
+        state['search_consent'] = consent
     try:
         value = community_jev.settings(config)
     except RuntimeErrorBase:

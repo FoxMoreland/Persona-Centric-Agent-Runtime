@@ -2,6 +2,23 @@
   "schema": 1,
   "entries": [
     {
+      "id": "release-1.4.2",
+      "kind": "release",
+      "version": "1.4.2",
+      "date": "2026-11-24",
+      "platforms": [
+        "windows",
+        "android"
+      ],
+      "title": "PCAR 正式版 1.4.2",
+      "items": [
+        "导入角色包时，可先编辑基础人设、人物资料和关系说明。保存后打开主会话，包内历史、摘要和长期记忆一并恢复。",
+        "修复 Android 清理后台后本机服务无法重新连接的问题。导入的历史摘要可在重开后读回。",
+        "Android 的「运行与诊断」支持在本机服务启动失败时导出日志。",
+        "移除聊天输入区的手动联网按钮。在「会话授权」允许自动查找后，默认的 DeepSeek Flash 或会话已授权的 Jev 会判断何时联网。"
+      ]
+    },
+    {
       "id": "release-1.4.1",
       "kind": "release",
       "version": "1.4.1",
