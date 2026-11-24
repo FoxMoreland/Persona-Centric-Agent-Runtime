@@ -1,3 +1,3 @@
 """Persona-centric companion runtime and Windows workbench."""
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"

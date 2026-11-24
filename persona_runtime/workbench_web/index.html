@@ -232,7 +232,10 @@
     .message-menu { flex: none; min-width: 28px; min-height: 28px; padding: 2px; border: 0; border-radius: 6px;
       background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
     .message-menu:hover, .message-menu:focus-visible { color: var(--text); background: var(--neutral-bubble); }
-    @media (pointer: coarse) { .message-menu { min-width: 44px; min-height: 44px; } }
+    @media (pointer: coarse) {
+      .message-menu { min-width: 44px; min-height: 44px; }
+      .hold-actions { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+    }
     .history-reference { display: flex; align-items: center; gap: .7rem; color: var(--muted); margin-bottom: 6px; }
     .history-reference span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
     #history-reference > button { flex: none; }
@@ -575,6 +578,7 @@
       for (const person of state.people) {
         const row=listButton(person.profile.name, person.id === state.current, () => selectPerson(person), true);
         window.pcarLive?.avatar?.(row.querySelector(".avatar"),person.id);
+        window.pcarLive?.bindPersonaDelete?.(row,person);
         container.append(row);
       }
     }

@@ -1,8 +1,8 @@
 """Bounded, transaction-consistent projections of canonical ordinary archives."""
-import json
-
 from .archive import encoded, fingerprint, project_turn
 from .archive_query import MAX_DOCUMENTS, MAX_SOURCE_CHARS, SearchFailure
+from .import_history import group as imported_group
+from .import_memory_scope import imported
 from .models import LOCAL_USER_ID, timestamp
 
 
@@ -23,7 +23,7 @@ def capture_connection(conn,spec,budget,*,before_order=None,prefer_session=None,
         raise SearchFailure('unavailable')
     args = [selected['persona_id'], selected['channel'], selected['bot'], selected['peer']]
     sql = """SELECT t.rowid AS creation_order,t.id,t.input_batch_id,t.persona_id,t.session_id,
-        t.channel,t.user_event_id,t.reply_event_id,t.status,t.created_at,t.origin_json FROM turns t
+        t.channel,t.user_event_id,t.reply_event_id,t.status,t.created_at,t.origin_json,t.source_key FROM turns t
         LEFT JOIN input_batches b ON b.id=t.input_batch_id
         WHERE t.persona_id=? AND t.channel=? AND t.status='completed'
         AND (t.source_key NOT LIKE 'imported.%' OR t.user_event_id IS NOT NULL OR t.reply_event_id IS NOT NULL)
@@ -87,13 +87,14 @@ def capture_connection(conn,spec,budget,*,before_order=None,prefer_session=None,
         for turn in batch:
             budget.check()
             tid = turn['id']
-            mem = members.get(tid,[]) if turn['input_batch_id'] else ([events[turn['user_event_id']]] if turn['user_event_id'] else [])
             semantic = events.get(turn['reply_event_id'])
-            group = project_turn(turn,selected,{'kind':'turn','id':tid},mem,parts.get(tid,[]),raws.get(tid,[]),
-                                 {k:semantic[k] for k in ('id','text')} if semantic else None,False,notice=notices.get(tid))
-            if 'import_document' in (json.loads(turn['origin_json'] or '{}') or {}):
-                from .import_history import group as imported_group
+            if imported(turn):
+                # Role packages and legacy transcripts use the same canonical turn identity.
                 group=imported_group(conn,turn,selected,{'kind':'turn','id':tid})
+            else:
+                mem = members.get(tid,[]) if turn['input_batch_id'] else ([events[turn['user_event_id']]] if turn['user_event_id'] else [])
+                group = project_turn(turn,selected,{'kind':'turn','id':tid},mem,parts.get(tid,[]),raws.get(tid,[]),
+                                     {k:semantic[k] for k in ('id','text')} if semantic else None,False,notice=notices.get(tid))
             if group['status']!='found':
                 continue
             groups.append(group)

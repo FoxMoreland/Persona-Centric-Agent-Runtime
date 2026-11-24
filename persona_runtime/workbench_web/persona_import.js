@@ -2249,17 +2249,62 @@ window.pcarLive = (() => {
       now.restore=mark;now.version=null;now.historyReady=false;await refresh();
     }
   }
-  function messageActions(node,target,text){
+  function bindHold(node,open) {
+    node.classList.add("hold-actions");
+    let pressed=false,timer=null,start=null;
+    function cancelPress(){clearTimeout(timer);timer=null;start=null;}
+    node.addEventListener("contextmenu",e=>{e.preventDefault();cancelPress();if(!pressed)open();});
+    node.addEventListener("pointerdown",e=>{
+      if(e.button!==0)return;
+      cancelPress();pressed=false;start={x:e.clientX,y:e.clientY};
+      timer=setTimeout(()=>{cancelPress();pressed=true;open();},500);
+    });
+    node.addEventListener("pointermove",e=>{if(start&&Math.hypot(e.clientX-start.x,e.clientY-start.y)>12)cancelPress();});
+    for(const name of ["pointerup","pointercancel","pointerleave"])node.addEventListener(name,cancelPress);
+    node.addEventListener("click",e=>{if(pressed){pressed=false;e.preventDefault();e.stopImmediatePropagation();}},true);
+  }
+  function bindPersonaDelete(node,person){
+    if(!active||!api().live_delete_persona)return;
+    bindHold(node,run(async()=>{
+      const preview=await api().live_delete_persona(person.id);
+      const box=panel("删除人物");
+      el("strong",preview.name,box);
+      if(preview.private_original){
+        el("p","此人物为受保护的原件。",box);
+        return;
+      }
+      el("p","永久删除此人物、会话、记忆和专属本地资料。独立保留的原始导入文件及备份仍可查看。",box);
+      const operation_id=newId();
+      const remove=button(box,"永久删除",async()=>{
+        remove.disabled=true;
+        try {
+          const result=await api().live_delete_persona(person.id,{
+            expected_revision:preview.revision,expected_selected:preview.current_persona_id,operation_id});
+          if(dialog.open)dialog.close();
+          await reload(result.current_persona_id);
+          notify(result.storage_reclaimed?"人物及其专属资料已删除。":"人物已删除，部分存储暂未回收。");
+        } catch(error) {
+          const detail=String(error?.message||error);
+          if(detail.includes("persona_has_pending_work"))throw new FormError("此人物还有待处理任务，请先处理或取消后再删。");
+          throw error;
+        } finally { remove.disabled=false; }
+      });
+    }));
+  }
+  function messageActions(node,target,text,referenceable=true){
     const parent=node.parentNode,s=currentSession(),person=currentPerson();
     if(!active||!s?.id||!person||!target.id)return;
     const row=document.createElement("div");
     row.className="message-with-menu"+(node.classList.contains("own")?" own-message":"");
     parent.replaceChild(row,node);row.append(node);
-    let pressed=false,timer=null,start=null;
-    function cancelPress(){clearTimeout(timer);timer=null;start=null;}
     function open(){
       if(currentSession()!==s||currentPerson()?.id!==person.id)return;
       const box=panel("消息操作");
+      if(!referenceable){
+        if(!s.branch)button(box,"核对历史用途后引用",()=>historySettings(s));
+        else el("p","这条历史消息当前不可引用。",box);
+        return;
+      }
       if(!s.readOnly)button(box,"引用这条消息",()=>quoteMessage(s,target,text));
       const operation=newId();
       button(box,"从这里开启分支",async()=>{
@@ -2273,15 +2318,7 @@ window.pcarLive = (() => {
     menu.className="message-menu";
     menu.setAttribute("aria-label","消息操作");menu.title="消息操作";
     menu.dataset.messageMenu="";
-    node.addEventListener("contextmenu",e=>{e.preventDefault();cancelPress();if(!pressed)open();});
-    node.addEventListener("pointerdown",e=>{
-      if(e.pointerType!=="touch" && e.pointerType!=="pen")return;
-      pressed=false;start={x:e.clientX,y:e.clientY};
-      timer=setTimeout(()=>{cancelPress();pressed=true;open();},500);
-    });
-    node.addEventListener("pointermove",e=>{if(start&&Math.hypot(e.clientX-start.x,e.clientY-start.y)>12)cancelPress();});
-    for(const name of ["pointerup","pointercancel","pointerleave"])node.addEventListener(name,cancelPress);
-    node.addEventListener("click",e=>{if(pressed){pressed=false;e.preventDefault();e.stopImmediatePropagation();}},true);
+    bindHold(node,open);
   }
   function turnNode(t){
     const group=document.createElement("div");group.style.display="contents";
@@ -2557,7 +2594,7 @@ window.pcarLive = (() => {
       node.className=event.role==="note"?"button ghost history-actions":"bubble "+(event.role==="user"?"own":"reply");
       markTime(node,event.timestamp);
       node.title="查看来源与引用 · "+node.title;
-      if(event.role!=="note" && event.referenceable)messageActions(node,event.message_target||messageTarget(event.id),event.text);
+      if(event.role!=="note")messageActions(node,event.message_target||messageTarget(event.id),event.text,event.referenceable);
     }
     if(s.older)button(thread,"查看更早的对话",()=>nativePage(s,true));
     for(const t of s.turns){
@@ -3288,7 +3325,7 @@ window.pcarLive = (() => {
   if(window.pywebview?.api)run(connect)();
   return {nameSession:run(nameSession),get active(){return active;},get offline(){return linkState!=="online";},get composing(){return composing;},
     get selecting(){return selectionToken!==null;},get pendingDraft(){return Boolean(pendingDraft(currentSession()));},
-    home:run(home),select:run(select),draw,capture,restore:restoreReading,reviseDraft,renderInputBuffer,manualEnter,
+    home:run(home),select:run(select),draw,capture,restore:restoreReading,reviseDraft,renderInputBuffer,manualEnter,bindPersonaDelete,
     avatar,appearance,send:run(send),profile:run(profile),importHistory:run(importHistory),
     diagnostics,connection,stop,resume,wake,repairStatus,exitStatus};
 })();

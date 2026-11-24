@@ -266,6 +266,16 @@ class WorkbenchData:
     def live_network_wake(self):
         return self._client.manage('desktop.network.wake')
 
+    def live_delete_persona(self, pid, receipt=None):
+        self._require_open()
+        if receipt is None:
+            return self._client.manage('persona.inspect',persona_id=pid)
+        require(isinstance(receipt,dict) and set(receipt)=={'expected_revision','expected_selected','operation_id'},
+                "删除人物确认无效。")
+        with self._selection_lock:
+            return self._client.call('POST','/v1/manage',{'action':'persona.purge',
+                'args':{'persona_id':pid,**receipt}},timeout=120)
+
     def live_people(self):
         config=self._config.public()["model"]
         return {"people":self._client.manage("persona.list"),"connected":bool(config.get("has_key") and config.get("base_url")),
