@@ -440,9 +440,11 @@ window.pcarLive = (() => {
 
   function packageContents(box,pack){
     const total=pack.sessions.reduce((sum,s)=>sum+s.messages,0);
-    el("p",pack.name+" · "+total+" 条历史消息 · "+new Intl.NumberFormat("zh-CN",{maximumFractionDigits:2}).format(pack.bytes/1048576)+" MiB",box);
+    const unit=pack.bytes<1048576?1024:1048576;
+    const size=new Intl.NumberFormat("zh-CN",{maximumFractionDigits:2}).format(pack.bytes/unit)+(unit===1024?" KiB":" MiB");
+    el("p",pack.name+" · "+total+" 条历史消息 · "+size,box);
     for(const s of pack.sessions){
-      const item=groupBox(box,(s.title||sessionDate(s.created_at))+(s.id===pack.main_session?" · 主会话":""));
+      const item=groupBox(box,(s.title||sessionDate(s.created_at))+(s.id===pack.main_session?" · 主会话":""),true);
       if(s.first)el("small",sessionDate(s.first)+" 至 "+sessionDate(s.last),item);
       el("p",s.messages+" 条历史 · "+s.memories+" 条长期记忆 · "+s.remaining+" 轮尚未整理",item);
     }
@@ -468,7 +470,7 @@ window.pcarLive = (() => {
     });
     const available=await api().live_package_sessions(person.id);
     if(!box.isConnected)return;
-    const options=groupBox(box,"角色＋历史＋长期记忆");
+    const options=groupBox(box,"角色＋历史＋长期记忆",true);
     if(!available.length){el("p","此角色暂无可导出的桌面会话。",options);return;}
     const main=currentSession()?.id || person.writableSession || available[0].id;
     const choices=new Map();
@@ -2722,7 +2724,7 @@ window.pcarLive = (() => {
     if(state.community_search && currentPerson()?.profile.chat_mode!=="roleplay" && api().live_jev){
       api().live_jev("status",{persona_id:person.id,session_id:state.session_id}).then(value=>{
         if(!box.isConnected || !sameSession() || !value.enabled)return;
-        const pane=groupBox(box,"Jev 决策授权");
+        const pane=groupBox(box,"Jev 决策授权",true);
         const grant=value.session;
         el("p",[value.name,value.base_url+"/systemone"].join(" · "),pane);
         el("p",grant.authorized?"本会话已授权 Jev 决策。":"本会话当前使用 DeepSeek Flash 决策。",pane);
@@ -3144,7 +3146,7 @@ window.pcarLive = (() => {
   }
   async function decisionSettings(){
     const value=await api().live_jev("status"),box=panel("决策模型设置");
-    const target=groupBox(box,value.enabled?"自定义 Jev 已启用":"当前使用 DeepSeek Flash 决策");
+    const target=groupBox(box,value.enabled?"自定义 Jev 已启用":"当前使用 DeepSeek Flash 决策",true);
     el("small","启用 Jev 后，在聊天页确认本会话授权。若本轮 Jev 在请求派发前无法连接，PCAR 可沿用本会话已有的 Flash 权限。",target);
     const url=inputField(target,"Jev HTTPS URL","url",value.base_url);
     const name=inputField(target,"模型名","text",value.name);
