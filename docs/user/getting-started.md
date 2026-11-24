@@ -1,5 +1,7 @@
 # 第一次使用 PCAR
 
+想直接安装，可以下载 [Windows 社区版 1.1.1](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/community-v1.1.1)，再按[社区版使用指南](社区版.md)连接 DeepSeek。
+
 本指南适用于 **v0.4 Windows 桌面包（程序 0.4.0，数据库结构 36）**。部署命令与旧数据升级步骤见[同版本部署手册](../../AGENT_INSTALL.md)。
 
 从 v0.4 桌面包使用新版 Windows 工作台时，可以[从私聊记录创建角色](双人聊天生成角色卡.md)或[接续历史聊天](历史聊天接续.md)。

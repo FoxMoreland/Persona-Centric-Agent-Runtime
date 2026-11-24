@@ -4,9 +4,9 @@
 
 PCAR（Persona-Centric Agent Runtime）是一款开源桌面 AI 伴侣工作台。**导入微信或 DeepSeek 的聊天记录，就能把熟悉的人设、说话习惯和旧对话带进 PCAR。**
 
-**社区版 1.0 支持 Windows 11 x64 一键安装。** 打开工作台，填入一把 DeepSeek 官方 API Key，即可开始聊天或从记录建卡。
+**社区版 1.1.1 支持 Windows 11 x64 和 Android 一键安装。** 打开工作台，填入一把 DeepSeek 官方 API Key，即可开始聊天或从记录建卡。
 
-[下载安卓 APK](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/community-android-v1.1.1/PCAR.apk) · [下载 Windows 社区版 1.0](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/community-v1.0.0) · [从聊天记录自动建卡](#从聊天记录自动建卡) · [社区版使用指南](docs/user/社区版.md) · [下载与开始](#下载与开始)
+[下载安卓 APK](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/community-android-v1.1.1/PCAR.apk) · [下载 Windows 社区版](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/download/community-v1.1.1/PCAR-Community-v1.1.1-Windows-x64-Setup.exe) · [从聊天记录自动建卡](#从聊天记录自动建卡) · [社区版使用指南](docs/user/社区版.md) · [下载与开始](#下载与开始)
 
 ## 从聊天记录自动建卡
 
@@ -52,17 +52,21 @@ PCAR（Persona-Centric Agent Runtime）是一款开源桌面 AI 伴侣工作台�
 
 可以导入微信或 DeepSeek 聊天记录，在预览中核对人设后保存角色并开聊。建卡只需名称和人物介绍，空白选填项和待核对的冲突字段会从提示词中省略。在线聊天、自动建卡和联网查询使用你的 DeepSeek 账户额度。
 
-### Windows 社区版 1.0
+### Windows 社区版 1.1.1
 
-1. 在[社区版 1.0 发行页](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/community-v1.0.0)下载 Windows 11 x64 安装程序，双击安装。Python 和本地检索模型随包提供。
+1. 在[Windows 社区版 1.1.1](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/community-v1.1.1)下载 Windows 11 x64 安装程序，双击安装。Python 和本地检索模型随包提供。
 2. 打开 PCAR 社区版，在「DeepSeek 官方连接」保存自己的官方 API Key。
 3. 新建角色，或导入聊天记录生成角色卡。在线聊天、建卡、记忆整理和联网查找会使用你的 DeepSeek 账户额度。
 
 社区版正文使用 DeepSeek V4 Pro，决策、建卡、后台整理和联网取材使用 DeepSeek V4.1 Flash。[社区版使用指南](docs/user/社区版.md)
 
-### 主版本 v0.4
+Windows 社区版 1.1.1 使用 0.5.0 内核，支持引用旧消息、从任意消息开启分支，以及先预览人设、再保存角色。
+
+### 主版本与开发进度
 
 主版本提供 Gemini 4 Hydrogen 正文选项和 Jev 决策接入，沿用 Agent 辅助部署，可从 v0.3 原机升级。[v0.4 发行页](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/releases/tag/v0.4) · [部署与升级](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/blob/v0.4/AGENT_INSTALL.md)
+
+最新的主开发版源码与验收记录在 [development/v0.5](https://github.com/FoxMoreland/Persona-Centric-Agent-Runtime/tree/development/v0.5)。
 
 社区版与主版本并行发行，分别提供安装入口和数据目录。
 
