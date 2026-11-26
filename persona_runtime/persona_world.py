@@ -47,12 +47,24 @@ def _grant(db, instance, pid, sid, revision, recipients):
 
 def active(db, turn, base):
     pid = turn['persona_id']
-    if not enabled(db, base['instance'], pid):
+    if base.get('knowledge_disabled') or not enabled(db, base['instance'], pid):
         return False
     row = db.execute("""SELECT s.source_json FROM private_reply_source_sets s
         JOIN private_reply_turns p ON p.turn_id=s.turn_id JOIN turns t ON t.id=p.turn_id
-        WHERE p.turn_id=? AND p.instance_id=? AND t.persona_id=? AND t.session_id=? AND t.channel='desktop'""",
-        (turn['id'], base['instance'], pid, turn['session_id'])).fetchone()
+        WHERE p.turn_id=? AND p.instance_id=? AND t.persona_id=? AND t.session_id=? AND t.channel=?""",
+        (turn['id'], base['instance'], pid, turn['session_id'],turn['channel'])).fetchone()
+    if turn['channel'] == 'qq':
+        live = _live_privacy(db,base['instance'])
+        if not live:
+            return False
+        from .qq_native_reply import assert_bound
+        try:
+            if assert_bound(db,live[0].paths,live[1],turn) != base.get('qq_origin'):
+                return False
+        except RuntimeErrorBase:
+            return False
+    elif turn['channel'] != 'desktop':
+        return False
     return bool(row and json.loads(row[0]).get('persona_world_version') == VERSION and
                 base['consent']['enabled'] and _grant(db, base['instance'], pid, turn['session_id'],
                     base['consent']['revision'], base['consent']['recipient_hash']))

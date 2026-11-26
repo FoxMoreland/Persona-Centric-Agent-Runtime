@@ -13,12 +13,19 @@ from .context_policy import DEFAULT_CONTEXT, values as context_values, snapshot 
 PARAMS={'schema_version':1,'quiet_ms':5000,'max_wait_ms':15000,'max_messages':20,'max_chars':12000,'max_batches':10,'max_pending_chars':120000}
 ROLLING_PARAMS={**PARAMS,'schema_version':2,'max_wait_ms':None}
 CUSTOM_PARAMS={**ROLLING_PARAMS,'schema_version':3,'manual_confirmation':False}
+FIXED_PARAMS={**PARAMS,'schema_version':4}
 MAX_QUIET_MS=3_600_000
 MANUAL_WAIT='manual_confirmation_required'
 
 def buffer_policy(policy):
     data=json.loads(policy['data_json']) if 'data_json' in policy else policy
     version=data.get('schema_version',1)
+    if version==4:
+        milliseconds=data.get('fixed_window_ms')
+        if (type(milliseconds) is not int or not 1000<=milliseconds<=60000
+                or data.get('quiet_ms')!=milliseconds or data.get('max_wait_ms')!=milliseconds):
+            raise RuntimeErrorBase('buffer_policy_invalid')
+        return {**FIXED_PARAMS,'quiet_ms':milliseconds,'max_wait_ms':milliseconds,'fixed_window_ms':milliseconds}
     if version==3:
         result={k:data.get(k,v) for k,v in CUSTOM_PARAMS.items()}
         if (type(result['quiet_ms']) is not int or not 1000<=result['quiet_ms']<=MAX_QUIET_MS
@@ -490,6 +497,40 @@ class IngressService:
                     policy[MARKER] = accepted_writer
                 from .desktop_turn_retry import admission_scope
                 policy["desktop_retry_contract"] = admission_scope(conn,self.config,pid,sid)
+            elif channel == 'qq':
+                from .qq_native_reply import configured,fixed_window,full_local_ready,full_local_required,pro_test
+                full_local=full_local_required(self.store.paths)
+                if full_local and not full_local_ready(self.store.paths,cfg,pid,sid):
+                    raise RuntimeErrorBase('qq_full_local_route_not_ready')
+                if configured(self.store.paths,cfg,pid):
+                    if roleplay or 'reference' in value:
+                        raise RuntimeErrorBase('qq_native_reply_not_ready')
+                    if full_local:
+                        from . import session_privacy
+                        from .private_reply_entry import RESEARCH, selected
+                        if (selected(conn,cfg['instance_id'],pid)!=RESEARCH
+                                or not getattr(self.engine.private_reply.ordinary.providers,'research',False)):
+                            raise RuntimeErrorBase('qq_full_local_route_not_ready')
+                        grant=session_privacy.current(conn,self.config,cfg,pid,sid,session_privacy.recipients(self.config,cfg))
+                        if not grant['enabled']:
+                            raise RuntimeErrorBase('private_cloud_provider_not_authorized')
+                        policy.update(private_reply_instance=cfg['instance_id'],private_reply_route=RESEARCH)
+                        policy['context']['qq_full_local']=True
+                    elif pro_test(self.store.paths,cfg,pid,sid):
+                        from . import session_privacy
+                        grant = session_privacy.current(conn,self.config,cfg,pid,sid,session_privacy.recipients(self.config,cfg))
+                        if not grant['enabled']:
+                            raise RuntimeErrorBase('private_cloud_provider_not_authorized')
+                        policy['context']['qq_pro_test'] = True
+                    else:
+                        from .private_reply_entry import ORDINARY, PRIVATE_ROUTES, selected
+                        if (selected(conn,cfg['instance_id'],pid) not in PRIVATE_ROUTES
+                                or not self.engine.private_reply.ordinary.providers):
+                            raise RuntimeErrorBase('qq_native_reply_not_ready')
+                        policy.update(private_reply_instance=cfg['instance_id'], private_reply_route=ORDINARY)
+                    if (milliseconds := fixed_window(conn,sid)) is not None:
+                        policy.update(mode='natural_batch',schema_version=4,quiet_ms=milliseconds,max_wait_ms=milliseconds,
+                                      fixed_window_ms=milliseconds)
             if roleplay:
                 policy.update(mode="legacy_per_message", reply_mode="legacy_full", context=dict(TURN_MODE),
                               expression=expression_snapshot("legacy_full", pol["id"], version=1))
@@ -527,8 +568,12 @@ class IngressService:
             elif batch:
                 count,chars=conn.execute('SELECT count(*),coalesce(sum(length(e.text)),0) FROM input_batch_members m JOIN events e ON e.id=m.event_id WHERE m.batch_id=?',(batch['id'],)).fetchone()
                 deadline=self.clocks.get(batch['id'])
-                if (deadline and mono>=deadline[2]) or count>=20 or chars+len(text)>12000:
-                    self._seal(conn,batch,'deadline' if deadline and mono>=deadline[2] else 'capacity');batch=None
+                expired = deadline and mono>=deadline[2]
+                full = count>=policy['max_messages'] or chars+len(text)>policy['max_chars']
+                if full and not expired and policy.get('fixed_window_ms'):
+                    raise RuntimeErrorBase('buffer_full')
+                if expired or full:
+                    self._seal(conn,batch,'deadline' if expired else 'capacity');batch=None
             active=conn.execute("SELECT b.id FROM input_batches b LEFT JOIN turns t ON t.input_batch_id=b.id WHERE b.persona_id=? AND b.channel=? AND b.bot=? AND b.peer=? AND b.state!='cancelled' AND coalesce(b.seal_reason,'')!='recovery_unverified' AND (t.id IS NULL OR t.status IN ('queued','running'))",(pid,channel,bot,peer)).fetchall()
             active_ids=[r[0] for r in active]
             chars=0
@@ -636,14 +681,16 @@ class IngressService:
             if policy.get('context') is not None:
                 conn.execute('UPDATE turns SET context_policy_snapshot=?,selector_model_snapshot=?,execution_revision=1 WHERE id=?',(encoded(policy['context']),b['selector_model_snapshot'],tid))
                 conn.execute('UPDATE turns SET observation_model_snapshot=? WHERE id=?',(b.get('observation_model_snapshot'),tid))
-            if b['channel']=='qq':conn.execute("INSERT INTO deliveries VALUES (?,'pending',?)",(tid,timestamp()))
+            if b['channel']=='qq' and not policy.get('private_reply_instance'):
+                conn.execute("INSERT INTO deliveries VALUES (?,'pending',?)",(tid,timestamp()))
             record(conn,tid,'accepted');record(conn,tid,'queued')
+            if policy.get('private_reply_instance'):
+                from .private_reply_entry import bind, ROUTE
+                bind(conn,tid,policy['private_reply_instance'],policy.get('private_reply_route',ROUTE))
             if b['channel']=='desktop':
-                if policy.get('private_reply_instance'):
-                    from .private_reply_entry import bind, ROUTE
-                    bind(conn,tid,policy['private_reply_instance'],policy.get('private_reply_route',ROUTE))
                 if policy.get('desktop_retry_contract'):
                     conn.execute('INSERT INTO desktop_turn_checkpoints VALUES(?,?)',(tid,policy['desktop_retry_contract']))
+            if b['channel']=='desktop' or policy.get('private_reply_instance'):
                 from .desktop_recovery import register
                 register(conn,tid,self.config.load())
             conn.execute("UPDATE input_batches SET state='linked',revision=revision+1,updated_at=? WHERE id=?",(timestamp(),b['id']))

@@ -1,5 +1,6 @@
 """Local navigation and artificial QQ identities; never contact a platform."""
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -101,6 +102,47 @@ class QQIsolationTests(unittest.IsolatedAsyncioTestCase):
             self.policy.enter(self.pid)
         self.assertEqual(self.cfg.load()['owner_qq'],'11111')
 
+    async def test_mixed_bridge_events_write_only_the_authorized_message_once(self):
+        from persona_runtime.qq_bridge import QQBridge
+        bridge = QQBridge(self.paths)
+        self.addAsyncCleanup(bridge.close)
+
+        def event(**changes):
+            raw = {'post_type': 'message', 'message_type': 'private', 'sub_type': 'friend',
+                   'self_id': '33333', 'user_id': '11111', 'message_id': '9001',
+                   'message': [{'type': 'text', 'data': {'text': 'ffi-9001'}}]}
+            raw.update(changes)
+            return SimpleNamespace(platform_meta=SimpleNamespace(name='aiocqhttp', id='persona-onebot'),
+                                   message_obj=SimpleNamespace(raw_message=raw, message_id=raw['message_id']),
+                                   is_private_chat=lambda: raw['message_type'] == 'private',
+                                   get_self_id=lambda: raw['self_id'], get_sender_id=lambda: raw['user_id'])
+
+        async def local_request(method, path, value=None):
+            if path == '/v1/health':
+                return {'capabilities': ['durable_ingress_v2']}
+            if path == '/v2/ingress':
+                return self.ingress.accept(value)
+            raise AssertionError(path)
+
+        send = AsyncMock()
+        with (patch.dict(os.environ, {'PCAR_QQ_PERSONA_ID': self.pid}),
+              patch.object(self.engine, '_schedule'),
+              patch.object(bridge, '_follow_submission', new_callable=AsyncMock),
+              patch.object(bridge, 'request', side_effect=local_request)):
+            self.assertFalse(await bridge.handle(event(message_type='group'), send, background=True))
+            self.assertTrue(await bridge.handle(event(), send, background=True))
+            self.assertFalse(await bridge.handle(event(user_id='44444'), send, background=True))
+            self.assertFalse(await bridge.handle(event(post_type='message_sent'), send, background=True))
+            self.assertTrue(await bridge.handle(event(), send, background=True))
+        with self.store.connection() as db:
+            rows = db.execute('SELECT e.persona_id,r.channel,r.bot,r.peer,r.platform_message_id '
+                              'FROM events e JOIN raw_events r ON r.event_id=e.id').fetchall()
+            self.assertEqual([tuple(row) for row in rows], [(self.pid, 'qq', '33333', '11111', '9001')])
+            self.assertEqual(db.execute('SELECT count(*) FROM events').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT count(*) FROM memories').fetchone()[0], 0)
+        send.assert_not_called()
+        self.fake.complete.assert_not_called()
+
     async def test_bridge_suppresses_forbidden_peer_and_delivery(self):
         from persona_runtime.qq_bridge import QQBridge
         bridge=QQBridge(self.paths);self.acceptance();send=AsyncMock()
@@ -109,6 +151,51 @@ class QQIsolationTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeErrorBase,'qq_test_account_not_ready'):await bridge.deliver({},send)
             with self.assertRaisesRegex(RuntimeErrorBase,'qq_test_account_not_ready'):await bridge.deliver_stream({},send)
             request.assert_not_called();send.assert_not_called()
+
+    async def test_snowluma_bridge_token_cannot_change_the_bound_persona(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        from persona_runtime.server import create_app
+
+        other = self.service.create_persona(generic_persona())['id']
+        self.cfg.update({'qq_backend': 'snowluma'})
+        local = self.cfg.load()
+        local['runtime']['qq_persona_id'] = self.pid
+        atomic_json(self.cfg.file, local)
+        headers = {'Authorization': 'Bearer ' + self.cfg.token('bridge')}
+        async with TestClient(TestServer(create_app(self.paths, client=self.fake, foreground_only=True))) as client:
+            data = {'channel': 'qq', 'bot': '33333', 'sender': '11111',
+                    'request_id': 'qq-fixture', 'text': 'ffi-9001',
+                    'persona_id': other, 'platform_message_id': '9001'}
+            response = await client.post('/v2/ingress', json=data, headers=headers)
+            self.assertEqual(response.status, 403)
+            response = await client.get('/v2/delivery/streams', params={'persona_id': other}, headers=headers)
+            self.assertEqual(response.status, 403)
+            response = await client.get('/v2/delivery/streams', headers=headers)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.json(), [])
+        with self.store.connection() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM events').fetchone()[0], 0)
+        self.fake.complete.assert_not_called()
+
+    async def test_session_privacy_respects_the_bound_snowluma_peer(self):
+        from persona_runtime import session_privacy, sessions
+
+        self.cfg.update({'qq_backend': 'snowluma'})
+        cfg = self.cfg.load()
+        cfg['runtime']['qq_persona_id'] = self.pid
+        atomic_json(self.cfg.file, cfg)
+        with self.store.connection(write=True) as db:
+            allowed = sessions.select(db, self.pid, 'qq', origin={'bot': '33333', 'sender': '11111'})
+            other = sessions.select(db, self.pid, 'qq', origin={'bot': '33333', 'sender': '22222'})
+            desktop = sessions.select(db, self.pid, 'desktop')
+        with self.store.connection() as db:
+            self.assertFalse(session_privacy.current(db, self.cfg, cfg, self.pid, allowed, {})['enabled'])
+            self.assertFalse(session_privacy.current(db, self.cfg, cfg, self.pid, desktop, {})['enabled'])
+            with self.assertRaises(RuntimeErrorBase):
+                session_privacy.current(db, self.cfg, cfg, self.pid, other, {})
+            cfg['owner_qq'] = '22222'
+            with self.assertRaises(RuntimeErrorBase):
+                session_privacy.current(db, self.cfg, cfg, self.pid, allowed, {})
 
     async def test_v2_designates_separate_bot_with_same_sender_and_restores(self):
         other=self.service.create_persona(generic_persona())['id']

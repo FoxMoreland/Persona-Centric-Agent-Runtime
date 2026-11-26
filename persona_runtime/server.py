@@ -99,6 +99,7 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
             or request.path.startswith(("/v1/requests/", "/v1/submissions/"))
             or (request.method=="GET" and request.path.startswith(("/v2/submissions/","/v2/batches/","/v2/delivery/streams/","/v2/replies/")))
             or (request.method=="POST" and request.path.startswith(("/v2/replies/")))
+            or (request.method=='POST' and request.path in ('/v2/qq-native/next','/v2/qq-native/result','/v2/qq-native/recall'))
             or request.path=="/v2/ingress"):
             return web.json_response({"error": "forbidden"}, status=403)
         try:
@@ -148,11 +149,23 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         request['pcar_body']=value
         return value
 
+    def bridge_persona(request, supplied=None):
+        if request['role'] != 'bridge':
+            return supplied
+        cfg = config.load()
+        if cfg.get('qq_backend') != 'snowluma':
+            return supplied
+        bound = cfg['runtime']['qq_persona_id']
+        if not bound or supplied not in (None, bound):
+            raise web.HTTPForbidden()
+        return bound
+
     def bridge_turn(request, turn):
         if request["role"] == "bridge":
             cfg = config.load()
             if turn["channel"] != "qq" or turn["origin"] != {"sender": cfg["owner_qq"], "bot": cfg["bot_qq"]}:
                 raise web.HTTPForbidden()
+            bridge_persona(request, turn['persona_id'])
 
     async def health(request):
         if request.query.get("view")=="desktop" and request["role"]=="admin":
@@ -179,19 +192,22 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
             raise RuntimeErrorBase("Desktop clients must use desktop channel")
         origin = {"sender": value["sender"], "bot": value["bot"]} if request["role"] == "bridge" else None
         options={k:value[k] for k in ('lookup_span','long_requested') if k in value}
-        result = await engine.submit(value.get("channel", "desktop"), value["text"], value["request_id"], value.get("session_id"), origin=origin, persona_id=value.get("persona_id"),public_task=value.get('public_task'),**options)
+        result = await engine.submit(value.get("channel", "desktop"), value["text"], value["request_id"], value.get("session_id"), origin=origin, persona_id=bridge_persona(request,value.get('persona_id')),public_task=value.get('public_task'),**options)
         return web.json_response(result)
 
     def bridge_batch(request,value):
         if request['role']=='bridge':
             cfg=config.load()
             if value['channel']!='qq' or value['origin']!={'sender':cfg['owner_qq'],'bot':cfg['bot_qq']}:raise web.HTTPForbidden()
+            bridge_persona(request,value['persona_id'])
 
     async def ingress_accept(request):
         value=await body(request)
         if request['role']=='bridge':
             cfg=config.load()
             if value.get('channel')!='qq' or not cfg['owner_qq'] or value.get('sender')!=cfg['owner_qq'] or value.get('bot')!=cfg['bot_qq']:raise web.HTTPForbidden()
+            bound=bridge_persona(request,value.get('persona_id'))
+            if bound is not None:value['persona_id']=bound
         elif value.get('channel','desktop')!='desktop':raise web.HTTPForbidden()
         return web.json_response(ingress.accept(value,desktop_ticket=value.pop("desktop_ticket",None)))
 
@@ -272,13 +288,15 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
 
     async def qq_pending(request):
         cfg = config.load()
+        persona_id = bridge_persona(request)
         rows = []
         with store.connection() as conn:
             for row in conn.execute("SELECT t.id FROM turns t JOIN deliveries d ON d.turn_id=t.id "
                                     "WHERE t.status='completed' AND d.state='pending' "
                                     "AND NOT EXISTS (SELECT 1 FROM reply_delivery_parts p WHERE p.turn_id=t.id) AND NOT EXISTS(SELECT 1 FROM legacy_delivery_dispositions x WHERE x.turn_id=t.id) ORDER BY t.rowid LIMIT 100"):
                 turn = engine._view(conn, row[0])
-                if turn["origin"] == {"sender": cfg["owner_qq"], "bot": cfg["bot_qq"]}:
+                if (turn["origin"] == {"sender": cfg["owner_qq"], "bot": cfg["bot_qq"]}
+                        and (persona_id is None or turn['persona_id'] == persona_id)):
                     rows.append(turn)
         return web.json_response(rows)
 
@@ -289,10 +307,26 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         return {"sender":cfg["owner_qq"],"bot":cfg["bot_qq"]}
 
     async def delivery_streams(request):
-        return web.json_response(delivery_service.pending(origin=delivery_origin(request),persona_id=request.query.get("persona_id")))
+        return web.json_response(delivery_service.pending(origin=delivery_origin(request),persona_id=bridge_persona(request,request.query.get('persona_id'))))
 
     async def delivery_stream(request):
-        return web.json_response(delivery_service.get(request.match_info["stream_id"],origin=delivery_origin(request)))
+        return web.json_response(delivery_service.get(request.match_info["stream_id"],origin=delivery_origin(request),persona_id=bridge_persona(request)))
+
+    async def qq_native_delivery(request):
+        if request['role'] != 'bridge':
+            raise web.HTTPForbidden()
+        bridge_persona(request)
+        from .qq_native_reply import QQNativeDelivery
+        from .expression_utterance_publication import SpeechPublication
+        queue = QQNativeDelivery(store,config,SpeechPublication(engine.expression.outlet))
+        value = await body(request)
+        operation = request.match_info['operation']
+        if operation == 'recall':
+            from .qq_recall_notice import apply
+            return web.json_response(apply(store,config,value))
+        if operation == 'next':
+            return web.json_response(queue.next(value['presenter']))
+        return web.json_response(queue.result(value))
 
     async def reply_parts(request):
         value=delivery_service.by_batch(request.match_info["reply_batch_id"])
@@ -300,6 +334,7 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         if request["role"]=="bridge":
             cfg=config.load()
             if value["channel"]!="qq" or value["origin"]!={"sender":cfg["owner_qq"],"bot":cfg["bot_qq"]}:raise web.HTTPForbidden()
+            bridge_persona(request,value['persona_id'])
         value["parts"]=[part for part in value["parts"] if part["reply_batch_id"]==request.match_info["reply_batch_id"]]
         return web.json_response(value)
 
@@ -310,7 +345,7 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         if request.match_info["part_id"] not in {part["id"] for part in batch["parts"] if part["reply_batch_id"]==request.match_info["reply_batch_id"]}:raise web.HTTPNotFound()
         origin=delivery_origin(request)
         return web.json_response(delivery_service.claim(stream_id,request.match_info["part_id"],value["expected_revision"],
-            value["operation_id"],persona_id=value.get("persona_id"),origin=origin,actor=request["role"],capabilities=value.get("capabilities"),sender=value.get('sender')))
+            value["operation_id"],persona_id=bridge_persona(request,value.get('persona_id')),origin=origin,actor=request["role"],capabilities=value.get("capabilities"),sender=value.get('sender')))
 
     async def delivery_result(request):
         value=await body(request);origin=delivery_origin(request);batch=delivery_service.by_batch(request.match_info["reply_batch_id"])
@@ -319,7 +354,7 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         stream_id=batch["id"]
         return web.json_response(delivery_service.result(stream_id,request.match_info["part_id"],
             value["claim_token"],value["state"],value["expected_revision"],value["operation_id"],
-            platform_message_id=value.get("platform_message_id"),error=value.get("error"),persona_id=value.get("persona_id"),
+            platform_message_id=value.get("platform_message_id"),error=value.get("error"),persona_id=bridge_persona(request,value.get('persona_id')),
             origin=origin,actor=request["role"],transport_done=value.get('transport_done',False)))
 
     async def delivery_resolve(request):
@@ -356,6 +391,15 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
         service = engine.service
         if not isinstance(args, dict):
             raise RuntimeErrorBase("JSON object required")
+        if action == 'qq.native.memory_share':
+            from .qq_shared_memory import update
+            return web.json_response(update(store,config,**args))
+        if action == 'qq.native.context_recent':
+            from .qq_context_journal import configured_journal
+            journal = configured_journal(paths,config.load())
+            if not journal:
+                raise RuntimeErrorBase('qq_context_scope_invalid')
+            return web.json_response(journal.recent(**args))
         if action in ('character.pack.sessions', 'character.pack.preview_export', 'character.pack.export',
                       'character.pack.preview_import', 'character.pack.import'):
             from .character_pack import CharacterPacks
@@ -781,6 +825,7 @@ def create_app(paths, client=None, *, assist_admission=None, live_admission=None
     app.router.add_post("/v2/batches/{id}/{action:seal|resume|cancel|confirm}",batch_action)
     app.router.add_get("/v2/delivery/streams",delivery_streams)
     app.router.add_get("/v2/delivery/streams/{stream_id}",delivery_stream)
+    app.router.add_post('/v2/qq-native/{operation:next|result|recall}',qq_native_delivery)
     app.router.add_get("/v2/replies/{reply_batch_id}/parts",reply_parts)
     app.router.add_post("/v2/replies/{reply_batch_id}/parts/{part_id}/claim",delivery_claim)
     app.router.add_post("/v2/replies/{reply_batch_id}/parts/{part_id}/result",delivery_result)

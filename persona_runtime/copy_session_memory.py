@@ -105,8 +105,13 @@ def check_task(store, db, task, payload, model):
     batch=db.execute('SELECT * FROM memory_batches WHERE id=? AND persona_id=? AND session_id=?',
                      (meta.get('batch_id'),pid,sid)).fetchone()
     stage=meta.get('stage')
+    channel_ok=task['channel']=='desktop'
+    if full and task['channel']=='qq':
+        from .config import ConfigStore
+        from .qq_native_reply import full_local_ready
+        channel_ok=full_local_ready(store.paths,ConfigStore(store.paths).load(),pid,sid)
     if (not batch or stage not in ('extract','verify') or task['id']!=batch[stage+'_task_id']
-            or task['channel']!='desktop' or payload['session_id']!=sid or payload['persona_id']!=pid):
+            or not channel_ok or payload['session_id']!=sid or payload['persona_id']!=pid):
         raise RuntimeErrorBase('private_session_mismatch')
     previous=meta.get('previous_fragment')
     if previous and not db.execute("SELECT 1 FROM memory_fragments WHERE id=? AND persona_id=? AND session_id=?",
@@ -114,8 +119,8 @@ def check_task(store, db, task, payload, model):
         raise RuntimeErrorBase('private_session_mismatch')
     events=[]
     for ref in payload['bindings']:
-        turn=db.execute("SELECT rowid AS ordinal,* FROM turns WHERE id=? AND persona_id=? AND session_id=? AND channel='desktop'",
-                        (ref['turn_id'],pid,sid)).fetchone()
+        turn=db.execute("SELECT rowid AS ordinal,* FROM turns WHERE id=? AND persona_id=? AND session_id=? AND channel=?",
+                        (ref['turn_id'],pid,sid,task['channel'])).fetchone()
         if not turn or imported(turn) and not full:raise RuntimeErrorBase('private_session_mismatch')
         actual=source_group(db,payload['scope'],dict(turn),model=model)
         if actual['status']!='found':raise RuntimeErrorBase('source_expired')

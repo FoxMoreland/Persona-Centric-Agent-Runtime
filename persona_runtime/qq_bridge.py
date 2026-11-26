@@ -3,11 +3,12 @@ import asyncio
 import hashlib
 import os
 import json
+from collections import Counter
 from urllib.parse import quote
 
 import aiohttp
 
-from .config import ConfigStore
+from .config import ConfigStore, atomic_json
 from .models import identifier, RuntimeErrorBase
 from .submissions import SubmissionJournal
 from .qq_text import plain_qq_text
@@ -20,6 +21,26 @@ class BridgeAPIError(RuntimeError):
         self.status = status
 
 
+def event_type(event, cfg):
+    """Classify by envelope only, before reading any message content."""
+    raw = getattr(getattr(event, 'message_obj', None), 'raw_message', None)
+    return raw_event_type(raw,cfg)
+
+
+def raw_event_type(raw, cfg):
+    if not isinstance(raw, dict) or str(raw.get('self_id', '')) != cfg['bot_qq']:
+        return 'foreign_or_invalid_envelope'
+    if raw.get('post_type') == 'message_sent' or str(raw.get('user_id', '')) == cfg['bot_qq']:
+        return 'self_or_echo'
+    if raw.get('post_type', 'message') != 'message':
+        return 'non_message'
+    if raw.get('message_type') == 'group':
+        return 'group'
+    if raw.get('message_type') != 'private' or raw.get('sub_type') != 'friend':
+        return 'other_message_type'
+    return 'authorized_private' if str(raw.get('user_id', '')) == cfg['owner_qq'] else 'other_private'
+
+
 def allowed_message(event, cfg):
     if not cfg["owner_qq"] or not cfg["bot_qq"]:
         return None
@@ -28,11 +49,9 @@ def allowed_message(event, cfg):
         return None
     if not event.is_private_chat() or str(event.get_self_id()) != cfg["bot_qq"] or str(event.get_sender_id()) != cfg["owner_qq"]:
         return None
-    raw = getattr(event.message_obj, "raw_message", None)
-    if not isinstance(raw, dict) or raw.get("message_type") != "private" or raw.get("sub_type") != "friend":
+    if event_type(event, cfg) != 'authorized_private':
         return None
-    if str(raw.get("user_id", "")) != cfg["owner_qq"] or str(raw.get("self_id", "")) != cfg["bot_qq"]:
-        return None
+    raw = event.message_obj.raw_message
     message_id = str(getattr(event.message_obj, "message_id", "") or "")
     if not message_id or str(raw.get("message_id", "")) != message_id:
         return None
@@ -67,6 +86,13 @@ class QQBridge:
         self.config = ConfigStore(paths)
         self.journal = SubmissionJournal(paths, "qq")
         self.receipts=paths.home/'runtime/platform-receipts'
+        self.ingress_counts = Counter()
+        self.ingress_counts_path = paths.home/'runtime/qq-ingress-counts.json'
+        noise = paths.home/'private/qq-ingress-observation.json'
+        self.observed_noise = json.loads(noise.read_text(encoding='utf-8')) if noise.is_file() else {}
+        self.delivery_halt_path = paths.home/'runtime/qq-delivery-halt.json'
+        self.native_ack_path = paths.home/'runtime/qq-native-ack.json'
+        self.delivery_halt_pending = False
         self.active_sends=set()
         self.unpersisted={}
         self.pending_platform={}
@@ -77,8 +103,84 @@ class QQBridge:
         self.sender={'instance_id':self.config.load()['instance_id'],'process':current_process_identity(),
             'console_token':lease.get('token'),'generation':identifier()}
 
+    def note_ingress(self, category, event=None):
+        self.ingress_counts[category] += 1
+        field = {'group': 'group_id', 'other_private': 'user_id'}.get(category)
+        expected = self.observed_noise.get(category)
+        if field and expected and event is not None:
+            raw = event.message_obj.raw_message
+            if str(raw.get(field, '')) == expected:
+                self.ingress_counts['observed_' + category] += 1
+
+    def publish_ingress_counts(self):
+        atomic_json(self.ingress_counts_path, dict(self.ingress_counts))
+
+    def delivery_halted(self):
+        return self.delivery_halt_pending or self.delivery_halt_path.exists()
+
+    async def send_if_open(self, send, text):
+        if self.delivery_halted():
+            raise RuntimeErrorBase('qq_delivery_halted')
+        return await send(text)
+
+    def halt_delivery(self, part_id, state, error):
+        self.delivery_halt_pending = True
+        atomic_json(self.delivery_halt_path, {'part_id': part_id, 'state': state, 'error': error}, durable=True)
+
+    async def flush_native_ack(self):
+        if self.native_ack_path.is_file():
+            receipt = json.loads(self.native_ack_path.read_text(encoding='utf-8'))
+            await self.request('POST','/v2/qq-native/result',receipt)
+            self.native_ack_path.unlink()
+
+    async def deliver_native(self, send, cfg):
+        """The server gives out fragment text only on the first, durable offer."""
+        await self.flush_native_ack()
+        if self.delivery_halted():
+            return False
+        presenter = self.sender['generation']
+        item = await self.request('POST','/v2/qq-native/next',{'presenter': presenter})
+        if item['state'] == 'unsettled':
+            self.halt_delivery(None,'uncertain','qq_offer_unsettled')
+            return False
+        if item['state'] != 'offered':
+            return False
+        receipt = {key: item[key] for key in ('utterance_id','id','lease_id','body_hash')}
+        receipt.update(presenter=presenter, state='unknown')
+        cancelled = False
+        reason = 'qq_platform_receipt_missing'
+        try:
+            from .qq_native_reply import configured
+            current = self.config.load()
+            if (item['origin'] != {'bot':cfg['bot_qq'],'sender':cfg['owner_qq']}
+                    or item['persona_id'] != cfg['runtime']['qq_persona_id']
+                    or item['origin'] != {'bot':current['bot_qq'],'sender':current['owner_qq']}
+                    or not configured(self.config.paths,current,item['persona_id'])
+                    or hashlib.sha256(item['body'].encode('utf-8')).hexdigest() != item['body_hash']):
+                raise RuntimeErrorBase('qq_native_offer_mismatch')
+            assert_transport(item['body'], 'chat', ())
+            result = await asyncio.wait_for(self.send_if_open(send,item['body']), self.send_timeout)
+            if isinstance(result,dict):
+                data = result.get('data')
+                mid = result.get('message_id') or (data.get('message_id') if isinstance(data,dict) else None)
+                if result.get('status','ok') != 'ok' or result.get('retcode',0) != 0:
+                    reason = 'qq_platform_send_failed'
+                elif type(mid) in (str,int) and mid and str(mid).strip() and len(str(mid)) <= 200:
+                    receipt.update(state='presented',platform_message_id=str(mid))
+        except asyncio.CancelledError:
+            cancelled = True
+            reason = 'qq_platform_send_cancelled'
+        except Exception as exc:
+            reason = type(exc).__name__
+        atomic_json(self.native_ack_path,receipt,durable=True)
+        if receipt['state'] == 'unknown':
+            self.halt_delivery(item['id'],'uncertain',reason)
+        if cancelled:
+            raise asyncio.CancelledError
+        await self.flush_native_ack()
+        return receipt['state'] == 'presented'
+
     def save_receipt(self,path,entry):
-        from .config import atomic_json
         try:atomic_json(path,entry)
         except OSError:
             from .maintenance import mark_write_fault
@@ -89,7 +191,6 @@ class QQBridge:
 
     async def flush_receipts(self):
         from .instance import process_identity_alive
-        from .config import atomic_json
         if not self.receipts.exists():return
         for target,entry in list(self.unpersisted.items()):self.save_receipt(__import__('pathlib').Path(target),entry)
         for path in self.receipts.glob('*.json'):
@@ -108,6 +209,10 @@ class QQBridge:
             if entry['body']['claim_token'] in self.active_sends:continue
             owner=entry.get('sender',{})
             if entry.get('phase')=='inflight' and owner.get('generation')!=self.sender['generation'] and process_identity_alive(owner.get('process')):continue
+            outcome = entry['body']
+            if (cfg.get('qq_backend') == 'snowluma' and not self.delivery_halted()
+                    and outcome['state'] in ('failed', 'uncertain')):
+                self.halt_delivery(path.stem, outcome['state'], outcome.get('error'))
             await self.request('POST',entry['path'],entry['body'])
             path.unlink()
 
@@ -193,18 +298,20 @@ class QQBridge:
         persona_id=os.environ.get('PCAR_QQ_PERSONA_ID') or self.config.load()['runtime']['qq_persona_id']
         if not persona_id:raise RuntimeErrorBase('qq_persona_binding_required')
         payload['persona_id']=persona_id
+        from .qq_native_reply import configured
+        native = configured(self.config.paths,self.config.load(),persona_id)
         # The SDK handler stops the normal LLM path before this first await.
         payload = self.journal.remember(payload)
         try:
             health=await self.request('GET','/v1/health')
             if ('durable_ingress_v2' not in health.get('capabilities',[]) or (payload.get('reference') and 'input_reference_v1' not in health.get('capabilities',[]))):
                 self.journal.state(payload['request_id'],'not_accepted')
-                await send('【服务提示】人格服务版本不兼容，请升级服务；本次消息未自动降级提交。')
+                if not native:await send('【服务提示】人格服务版本不兼容，请升级服务；本次消息未自动降级提交。')
                 return False
             turn = await self.request("POST", "/v2/ingress", payload)
         except BridgeAPIError as error:
             self.journal.state(payload["request_id"], "not_accepted")
-            if str(error) in ("queue_full", "buffer_full", "service_draining"):
+            if not native and str(error) in ("queue_full", "buffer_full", "service_draining"):
                 await send("【服务提示】消息未受理：当前队列已满或服务正在停止，请稍后再试。")
             return False
         except (aiohttp.ClientError, OSError, TimeoutError):
@@ -214,9 +321,11 @@ class QQBridge:
             except (BridgeAPIError, aiohttp.ClientError, OSError, TimeoutError):
                 turn = None
             if not turn:
-                await send("【服务提示】暂时无法确认是否受理；已保留本机接收记录，请先在工作台找回，避免重复发送。")
+                if not native:await send("【服务提示】暂时无法确认是否受理；已保留本机接收记录，请先在工作台找回，避免重复发送。")
                 return False
         self.journal.forget(payload["request_id"])
+        if native:
+            return True
         if background:
             # Receipt is durable before returning to the SDK; no reply wait can
             # serialize subsequent input on an adapter's event dispatch lane.
@@ -295,9 +404,12 @@ class QQBridge:
 
     async def deliver_stream(self, stream, send):
         from .qq_testing import QQTesting
-        QQTesting(self.config.paths).check_runtime(self.config.load()['owner_qq'])
+        config = self.config.load()
+        QQTesting(self.config.paths).check_runtime(config['owner_qq'])
         view = stream
         await self.flush_receipts()
+        if self.delivery_halted():
+            return False
         delivered = False
         for part in view["parts"]:
             if part["state"] in ("sent", "skipped", "resolved"):
@@ -358,6 +470,8 @@ class QQBridge:
             finally:self.active_sends.discard(claim['claim_token'])
             entry['phase']='received'
             entry['body'].update(state=state,platform_message_id=str(message_id) if message_id is not None else None,error=error)
+            if state != 'sent' and config.get('qq_backend') == 'snowluma':
+                self.halt_delivery(part['id'], state, error)
             self.save_receipt(receipt_path,entry)
             try:
                 recorded=await self.request('POST',entry['path'],entry['body'])

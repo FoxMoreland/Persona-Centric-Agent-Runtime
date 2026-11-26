@@ -19,6 +19,7 @@ from persona_runtime.lifecycle import ServiceController
 from persona_runtime.models import RuntimeErrorBase
 from persona_runtime.paths import RuntimePaths
 from persona_runtime.qq_client import probe_client, require_snowluma, send_private_text
+from persona_runtime.qq_bridge import QQBridge, allowed_message, event_type
 
 
 class ConnectionTests(unittest.TestCase):
@@ -33,6 +34,134 @@ class ConnectionTests(unittest.TestCase):
         self.config.update({'qq_backend': 'snowluma', 'bot_qq': '456', 'owner_qq': '123'})
         self.cfg = self.config.load()
         self.controller = ServiceController(self.paths)
+
+    def test_scoped_source_and_self_messages_are_local_context_without_sdk_dispatch(self):
+        from persona_runtime.qq_context_journal import configured_journal
+        from persona_runtime.sdk_reference_guard import install_context_capture
+        profile = {'context_sources': {'groups': ['777'], 'private': ['789','987'],
+                                      'incoming_private': ['987']}}
+        atomic_json(self.paths.home/'private/qq-ingress-observation.json',profile)
+        journal = configured_journal(self.paths,self.cfg)
+
+        class Adapter:
+            def __init__(self):
+                self.downstream = []
+
+            async def _handle_event(self, payload):
+                self.downstream.append(payload.get('message_id'))
+
+        install_context_capture(journal,Adapter)
+        adapter = Adapter()
+        base = {'self_id':456,'user_id':456,'post_type':'message_sent','message_type':'group',
+                'group_id':777,'message_id':11,'time':12345,
+                'message':[{'type':'text','data':{'text':'fixture-59126'}}]}
+        for value in (base, base, base|{'group_id':888,'message_id':12},
+                      base|{'message_type':'private','sub_type':'friend','target_id':789,'message_id':13},
+                      base|{'message_type':'private','sub_type':'friend','target_id':123,'message_id':14},
+                      base|{'message_type':'private','sub_type':'friend','post_type':'message','user_id':987,'message_id':15},
+                      base|{'message_type':'group','post_type':'message','user_id':987,'message_id':16}):
+            asyncio.run(adapter._handle_event(value))
+        self.assertEqual(adapter.downstream,[16])
+        group, = journal.recent('group','777')
+        self.assertEqual((group['author'],group['direction'],group['text']),('456','account_self','fixture-59126'))
+        self.assertEqual(journal.recent('private','789')[0]['direction'],'account_self')
+        peer, = journal.recent('private','987')
+        self.assertEqual((peer['author'],peer['direction']),('987','incoming'))
+        self.assertNotIn(b'fixture-59126',journal.path.read_bytes())
+        with self.assertRaisesRegex(RuntimeErrorBase,'qq_context_scope_invalid'):
+            journal.recent('private','123')
+
+    def test_startup_quota_ignores_offline_messages_and_resets_without_duplication(self):
+        from persona_runtime.qq_context_journal import QQContextJournal
+
+        def open_journal(floor):
+            return QQContextJournal(self.paths,'456',['777'],['789'],[],core=['123'],
+                                    startup_limit=50,timestamp_floor=floor)
+
+        journal = open_journal(100)
+        raw = {'post_type':'message','self_id':456,'user_id':998,'message_type':'group',
+               'group_id':777,'time':100,'message':[{'type':'text','data':{'text':'0901'}}]}
+        self.assertEqual(journal.capture(raw|{'message_id':1,'time':99}),'offline_ignored')
+        self.assertEqual(journal.capture(raw|{'message_id':2}),'incoming')
+        self.assertEqual(journal.capture(raw|{'message_id':2}),'duplicate')
+        for mid in range(3,52):
+            self.assertEqual(journal.capture(raw|{'message_id':mid}),'incoming')
+        self.assertEqual(journal.capture(raw|{'message_id':52}),'startup_limit')
+        own = raw|{'user_id':456,'post_type':'message_sent','message_type':'private',
+                   'sub_type':'friend','target_id':789,'message_id':52}
+        self.assertEqual(journal.capture(own),'account_self')
+        core = own|{'post_type':'message','user_id':123,'time':90}
+        for mid in range(60,112):
+            self.assertEqual(journal.capture(core|{'message_id':mid}),'incoming')
+        self.assertEqual(len(journal.recent('private','123',limit=100)),52)
+        restarted = open_journal(500)
+        self.assertEqual(restarted.capture(raw|{'message_id':53,'time':400}),'offline_ignored')
+        self.assertEqual(restarted.capture(raw|{'message_id':54,'time':500}),'incoming')
+        self.assertEqual(len(restarted.recent('group','777',limit=100)),51)
+
+    def test_core_history_has_no_50_message_cap_and_resumes_at_previous_watermark(self):
+        from persona_runtime.qq_context_journal import QQContextJournal
+        from persona_runtime.qq_core_sync import synchronize
+        journal = QQContextJournal(self.paths,'456',[],[],[],core=['123'])
+        rows = [{'message_id':n,'time':n,'user_id':123,
+                 'message':[{'type':'text','data':{'text':'0901'}}]} for n in range(90,0,-1)]
+        calls = []
+
+        async def fetch(peer, anchor, count):
+            calls.append((peer,anchor))
+            return [r for r in rows if not anchor or r['message_id'] <= anchor][:count]
+
+        self.assertEqual(asyncio.run(synchronize(journal,'123',fetch)),90)
+        self.assertEqual(calls,[('123',0),('123',41)])
+        self.assertEqual(journal.watermark('123'),'90')
+        rows.insert(0,rows[0]|{'message_id':91,'time':91})
+        self.assertEqual(asyncio.run(synchronize(journal,'123',fetch)),1)
+        self.assertEqual(journal.watermark('123'),'91')
+        self.assertEqual(len(journal.recent('private','123',limit=100)),91)
+
+    def test_core_sync_does_not_treat_an_empty_initial_page_as_a_checkpoint(self):
+        from persona_runtime.qq_context_journal import QQContextJournal
+        from persona_runtime.qq_core_sync import synchronize
+        journal = QQContextJournal(self.paths,'456',[],[],[],core=['123'])
+
+        async def empty(peer, anchor, count):
+            return []
+
+        with self.assertRaisesRegex(RuntimeErrorBase,'qq_history_empty_unverified'):
+            asyncio.run(synchronize(journal,'123',empty))
+        self.assertIsNone(journal.watermark('123'))
+
+    def test_mixed_qq_events_are_filtered_before_content_and_counted_without_payloads(self):
+        def event(**changes):
+            raw = {'post_type': 'message', 'message_type': 'private', 'sub_type': 'friend',
+                   'self_id': '456', 'user_id': '123', 'message_id': '11',
+                   'message': [{'type': 'text', 'data': {'text': 'synthetic-local-fixture'}}]}
+            raw.update(changes)
+            return SimpleNamespace(platform_meta=SimpleNamespace(id='persona-onebot', name='aiocqhttp'),
+                                   message_obj=SimpleNamespace(raw_message=raw, message_id='11'),
+                                   is_private_chat=lambda: raw['message_type'] == 'private',
+                                   get_self_id=lambda: raw['self_id'], get_sender_id=lambda: raw['user_id'])
+
+        atomic_json(self.paths.home/'private/qq-ingress-observation.json', {'group': '777', 'other_private': '789'})
+        bridge = QQBridge(self.paths)
+        valid = allowed_message(event(), self.cfg)
+        self.assertEqual(valid['request_id'], allowed_message(event(), self.cfg)['request_id'])
+        for item, category in ((event(message_type='group', group_id='777', message=None), 'group'),
+                               (event(message_type='group', group_id='888', message=None), 'group'),
+                               (event(user_id='789', message=None), 'other_private'),
+                               (event(post_type='message_sent'), 'self_or_echo'),
+                               (event(user_id='456'), 'self_or_echo'),
+                               (event(self_id='111'), 'foreign_or_invalid_envelope'),
+                               (event(post_type='notice'), 'non_message')):
+            with self.subTest(category=category):
+                self.assertEqual(event_type(item, self.cfg), category)
+                self.assertIsNone(allowed_message(item, self.cfg))
+                bridge.note_ingress(category, item)
+        bridge.publish_ingress_counts()
+        data = json.loads(bridge.ingress_counts_path.read_text())
+        self.assertEqual(data, {'group': 2, 'observed_group': 1, 'other_private': 1,
+                                'observed_other_private': 1, 'self_or_echo': 2,
+                                'foreign_or_invalid_envelope': 1, 'non_message': 1})
 
     def test_old_config_defaults_to_napcat_without_rewriting_it(self):
         raw = self.config.load()

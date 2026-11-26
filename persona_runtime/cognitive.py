@@ -155,7 +155,9 @@ class CognitiveService:
         elif recall is not None:
             with self.store.connection() as conn:evidence=self.dialogue.basic_evidence(conn,turn)
         else:evidence=self.dialogue.evidence(turn)
-        knowledge={'state':'disabled','evidence':[]} if quoted else self.engine.knowledge.prepare_turn(turn)
+        pro_test = json.loads(turn.get('context_policy_snapshot') or '{}').get('qq_pro_test')
+        from .qq_native_reply import full_local_required
+        knowledge={'state':'disabled','evidence':[]} if quoted or pro_test or full_local_required(self.store.paths) else self.engine.knowledge.prepare_turn(turn)
         self.engine.scene.ensure(turn)
         with self.store.connection() as conn:
             if evidence is not None:

@@ -130,7 +130,7 @@ MATERIAL_ROWS="""SELECT f.id,f.document_id,f.spec_json,d.scope,d.session_id,d.sh
 
 def materials(db, turn, base, question, *, ids=None, now=None):
     pid,sid=turn['persona_id'],turn['session_id']
-    if not library.enabled(db,pid) or ids==[]:
+    if base.get('knowledge_disabled') or not library.enabled(db,pid) or ids==[]:
         return []
     consent=base['consent']
     revision=consent['revision'] if consent['enabled'] else 0

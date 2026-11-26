@@ -103,8 +103,30 @@ def _witness(config, cfg, sid):
     return config.paths.home / 'private/session-privacy' / (fingerprint([cfg['instance_id'],sid])+'.json')
 
 
+def _owned_session(db, cfg, pid, sid):
+    row = db.execute('SELECT channel FROM session_lifecycle WHERE session_id=?', (sid,)).fetchone()
+    if not row or row['channel'] != 'qq':
+        return owned(db, sid, scope(pid, 'desktop'))
+    if (cfg.get('qq_backend') != 'snowluma' or cfg['runtime']['qq_persona_id'] != pid
+            or not cfg['bot_qq'] or not cfg['owner_qq']):
+        raise RuntimeErrorBase('qq_session_privacy_binding_required')
+    return owned(db, sid, scope(pid, 'qq', cfg['bot_qq'], cfg['owner_qq']))
+
+
+def _destinations_for_session(config, cfg, pid, session, destinations):
+    from .qq_native_reply import full_local_required
+    if full_local_required(config.paths):
+        return {role:target for role,target in destinations.items() if role in ('main','jev','organization')}
+    if session['channel']=='qq':
+        from .qq_native_reply import pro_test
+        if pro_test(config.paths,cfg,pid,session['session_id']):
+            return {'main':destination(config,cfg['model'])}
+    return destinations
+
+
 def current(db, config, cfg, pid, sid, destinations):
-    owned(db, sid, scope(pid, 'desktop'))
+    session = _owned_session(db, cfg, pid, sid)
+    destinations = _destinations_for_session(config,cfg,pid,session,destinations)
     event = _latest(db, cfg, sid)
     path = _witness(config, cfg, sid)
     witness = json.loads(path.read_bytes()) if path.exists() else {}
@@ -188,6 +210,9 @@ def public_scope(db, config, instance, pid, sid, full, *, protocol=None, histori
 
 
 def _update_public(db, config, cfg, pid, sid, full, enabled, revision, scope_hash, op, protocol):
+    from .qq_native_reply import full_local_required
+    if enabled and full_local_required(config.paths):
+        raise RuntimeErrorBase('qq_full_local_knowledge_disabled')
     instance = cfg['instance_id']
     key = _public_key(instance,pid,sid)
     state = public_scope(db,config,instance,pid,sid,full,protocol=protocol)
@@ -227,7 +252,8 @@ def update(store, config, persona_id, session_id, enabled, revision, recipient_h
         raise RuntimeErrorBase('invalid_privacy_operation')
     with store.connection(write=True) as db:
         cfg = config.load()
-        dest = recipients(config, cfg)
+        session = _owned_session(db,cfg,persona_id,session_id)
+        dest = _destinations_for_session(config,cfg,persona_id,session,recipients(config,cfg))
         state = current(db, config, cfg, persona_id, session_id, dest)
         if protocol!=PROTOCOL:
             return _update_public(db,config,cfg,persona_id,session_id,state,enabled,revision,recipient_hash,operation_id,protocol)

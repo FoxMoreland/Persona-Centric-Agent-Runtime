@@ -44,9 +44,19 @@ def project_notice(db,unit,body,complete):
 class SpeechPublication:
     def __init__(self,outlet):self.outlet,self.store=outlet,outlet.store
 
-    def _owner(self,db,persona_id,session_id,utterance_id):
+    def _owner(self,db,persona_id,session_id,utterance_id,qq_origin=None):
         unit=self.outlet.unit(db,utterance_id)
         if (unit['persona_id'],unit['session_id'])!=(persona_id,session_id):raise ExpressionAssetError('speech_presentation_scope_mismatch')
+        turn = dict(db.execute('SELECT * FROM turns WHERE id=?', (unit['turn_id'],)).fetchone())
+        if turn['channel'] == 'qq':
+            if qq_origin is None:
+                raise ExpressionAssetError('speech_presentation_scope_mismatch')
+            from .config import ConfigStore
+            from .qq_native_reply import assert_bound
+            if assert_bound(db, self.store.paths, ConfigStore(self.store.paths).load(), turn) != qq_origin:
+                raise ExpressionAssetError('speech_presentation_scope_mismatch')
+        elif qq_origin is not None:
+            raise ExpressionAssetError('speech_presentation_scope_mismatch')
         return unit
 
     def _legacy(self):
@@ -150,9 +160,9 @@ class SpeechPublication:
                 return dict(pub)|{'items':items}
         return self._legacy().plan(persona_id,session_id,unit['turn_id'])
 
-    def offer(self,persona_id,session_id,utterance_id,publication_id,revision,ordinal,presenter_id):
+    def offer(self,persona_id,session_id,utterance_id,publication_id,revision,ordinal,presenter_id,*,qq_origin=None):
         text(presenter_id,'presenter_id',200)
-        with self.store.connection() as db:unit=self._owner(db,persona_id,session_id,utterance_id)
+        with self.store.connection() as db:unit=self._owner(db,persona_id,session_id,utterance_id,qq_origin)
         if unit['source_kind']=='main_receipt':return self._legacy().offer(persona_id,session_id,unit['turn_id'],publication_id,revision,ordinal,presenter_id)
         with ExitStack() as stack:
             if unit['source_kind']=='dialogue_reply':
@@ -161,7 +171,7 @@ class SpeechPublication:
                     self.cancel(utterance_id,'source_or_permission_changed')
                     return {'state':'stopped','reason':str(error),'new_offer':False}
             db=stack.enter_context(self.store.connection(write=True))
-            unit=self._owner(db,persona_id,session_id,utterance_id)
+            unit=self._owner(db,persona_id,session_id,utterance_id,qq_origin)
             if self.store.current(db)!=persona_id:raise ExpressionAssetError('speech_persona_not_selected')
             from .private_lookup import waiting_for_notice_display
             if (unit['phase']=='main' and unit['source_kind']=='maibot_private_reply'
@@ -207,15 +217,27 @@ class SpeechPublication:
                     'kind':item['kind'],'required':bool(item['required']),'delay_ms':item['delay_ms']}
 
     def acknowledge(self,persona_id,session_id,utterance_id,fragment_id,lease_id,presenter_id,receipt_id,body_hash,state='presented',
-                    *,webview=False,publication_id=None,revision=None,ordinal=None,reason=None):
+                    *,webview=False,publication_id=None,revision=None,ordinal=None,reason=None,
+                    qq_origin=None,platform_message_id=None):
         text(receipt_id,'receipt_id',200)
         if state not in ('presented','not_presented','unknown'):raise ExpressionAssetError('speech_receipt_state_invalid')
         if webview and presenter_id!="webview-v2."+receipt_id:
             raise ExpressionAssetError('speech_receipt_identity_mismatch')
-        with self.store.connection() as db:unit=self._owner(db,persona_id,session_id,utterance_id)
+        if qq_origin is not None:
+            if webview or state not in ('presented', 'unknown'):
+                raise ExpressionAssetError('qq_delivery_receipt_invalid')
+            if state == 'presented':
+                text(platform_message_id,'platform_message_id',200)
+            elif platform_message_id is not None:
+                raise ExpressionAssetError('qq_delivery_receipt_invalid')
+        elif platform_message_id is not None:
+            raise ExpressionAssetError('qq_delivery_receipt_invalid')
+        with self.store.connection() as db:unit=self._owner(db,persona_id,session_id,utterance_id,qq_origin)
         if unit['source_kind']=='main_receipt':return self._legacy().acknowledge(persona_id,session_id,unit['turn_id'],fragment_id,lease_id,presenter_id,receipt_id,body_hash,state,
                 webview=webview,publication_id=publication_id,revision=revision,ordinal=ordinal,reason=reason)
         with self.store.connection(write=True) as db:
+            unit = self._owner(db,persona_id,session_id,utterance_id,qq_origin)
+            platform_key = 'qq.platform.speech.' + receipt_id
             previous=db.execute('SELECT * FROM expression_speech_receipts WHERE id=?',(receipt_id,)).fetchone()
             if previous:
                 belongs=db.execute('''SELECT i.publication_id,i.revision,i.ordinal FROM expression_speech_items i JOIN expression_speech_publications p
@@ -223,14 +245,20 @@ class SpeechPublication:
                 if not belongs or webview and tuple(belongs)!=(publication_id,revision,ordinal):
                     raise ExpressionAssetError('speech_receipt_identity_mismatch')
                 if tuple(previous)[1:6]!=(fragment_id,lease_id,presenter_id,body_hash,state):raise ExpressionAssetError('speech_receipt_conflict')
+                if qq_origin is not None:
+                    saved = db.execute('SELECT value FROM knowledge_control WHERE key=?', (platform_key,)).fetchone()
+                    if not saved or json.loads(saved[0]) != platform_message_id:
+                        raise ExpressionAssetError('speech_receipt_conflict')
                 return {'state':state,'already_applied':True}
+            if qq_origin is not None and db.execute('SELECT 1 FROM knowledge_control WHERE key=?',
+                    ('qq.native.recalled.'+unit['turn_id'],)).fetchone():
+                raise ExpressionAssetError('qq_delivery_already_recalled')
             item=db.execute('''SELECT i.* FROM expression_speech_items i JOIN expression_speech_publications p ON p.id=i.publication_id
                 WHERE i.id=? AND p.utterance_id=?''',(fragment_id,utterance_id)).fetchone()
             if not item or (item['lease_id'],item['presenter_id'],item['body_hash'])!=(lease_id,presenter_id,body_hash):raise ExpressionAssetError('speech_receipt_identity_mismatch')
             pub=db.execute('SELECT * FROM expression_speech_publications WHERE id=?',(item['publication_id'],)).fetchone()
             if webview and (publication_id,revision,ordinal)!=(pub['id'],pub['revision'],item['ordinal']):
                 raise ExpressionAssetError('speech_receipt_identity_mismatch')
-            unit = self._owner(db,persona_id,session_id,utterance_id)
             if webview and state=="presented" and pub["state"] not in ("closed","complete"):
                 try:
                     if unit["phase"]=="search_notice" and unit['source_kind']!='maibot_private_reply':
@@ -245,8 +273,11 @@ class SpeechPublication:
                     return {"state":"closed","already_applied":False}
             if pub['state'] in ('closed','complete'):raise ExpressionAssetError('speech_publication_closed')
             if item['state'] not in ('offered','unknown'):raise ExpressionAssetError('speech_receipt_conflict')
-            from .desktop_presentation import record_paint
-            record_paint(db,receipt_id,fragment_id,state,reason)
+            if qq_origin is None:
+                from .desktop_presentation import record_paint
+                record_paint(db,receipt_id,fragment_id,state,reason)
+            else:
+                db.execute('INSERT INTO knowledge_control VALUES (?,?)', (platform_key, encoded(platform_message_id)))
             now=timestamp()
             db.execute('INSERT INTO expression_speech_receipts VALUES(?,?,?,?,?,?,?)',(receipt_id,fragment_id,lease_id,presenter_id,body_hash,state,now))
             db.execute('UPDATE expression_speech_items SET state=?,receipt_id=? WHERE id=?',(state,receipt_id,fragment_id))
@@ -260,7 +291,10 @@ class SpeechPublication:
                     from .progress import record
                     record(db,unit['turn_id'],'first_output' if item['ordinal']==0 else 'scene_bubble_presented')
             remaining=db.execute("SELECT state FROM expression_speech_items WHERE publication_id=? AND revision=? AND state IN ('pending','offered','unknown')",(pub['id'],pub['revision'])).fetchall()
-            if webview and state=='not_presented' and not unit['cancelled_at']:
+            if qq_origin is not None and state == 'unknown':
+                self._stop(db,unit,pub,'qq_delivery_unknown')
+                self._close(db,unit,pub,'qq_delivery_unknown')
+            elif webview and state=='not_presented' and not unit['cancelled_at']:
                 db.execute("""UPDATE expression_speech_items SET state='pending',lease_id=NULL,presenter_id=NULL,
                               receipt_id=NULL,offered_at=NULL WHERE id=?""",(fragment_id,))
                 db.execute("UPDATE expression_speech_publications SET state=? WHERE id=?",

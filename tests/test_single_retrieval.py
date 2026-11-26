@@ -89,6 +89,53 @@ class SingleRetrieval(unittest.IsolatedAsyncioTestCase):
         rows=self.providers.bodies[-1][1]['research']['retrieval']['items']
         self.assertTrue(all(i['tool']=='not_dispatched' and i['result']=='complete' for i in rows))
 
+    async def test_bound_qq_can_read_the_desktop_acquired_world_passages_locally(self):
+        from persona_runtime import session_privacy
+        from persona_runtime.archive import encoded
+        from persona_runtime.ingress import IngressService
+        from persona_runtime.models import identifier
+        from persona_runtime.sessions import select
+
+        self.answers = {'701':'701 711','702':'702 712'}
+        desktop_turn = await self.cold()
+        calls = len(self.tools)
+        self.config.update({'qq_backend':'snowluma','bot_qq':'456','owner_qq':'123'})
+        cfg = self.config.load()
+        cfg['runtime']['qq_persona_id'] = self.pid
+        atomic_json(self.config.file,cfg)
+        atomic_json(self.config.paths.home/'private/qq-native-reply.json',
+                    {'instance':cfg['instance_id'],'persona':self.pid,'bot':'456','peer':'123'})
+        with self.store.connection(write=True) as db:
+            sid = select(db,self.pid,'qq',origin={'bot':'456','sender':'123'})
+        destinations = session_privacy.recipients(self.config,cfg)
+        with self.store.connection() as db:
+            current = session_privacy.current(db,self.config,cfg,self.pid,sid,destinations)
+        consent = session_privacy.update(self.store,self.config,self.pid,sid,True,current['revision'],
+                                        current['recipient_hash'],identifier(),session_privacy.PROTOCOL)
+        clock = [1000.0]
+        ingress = IngressService(self.chat,monotonic=lambda:clock[0])
+        rid = 'qq-'+identifier()
+        with patch.object(self.chat,'_schedule'):
+            ingress.accept({'channel':'qq','text':'701','request_id':rid,'persona_id':self.pid,
+                            'bot':'456','sender':'123','session_id':sid,'platform_message_id':'901'})
+            clock[0] += 6
+            ingress.tick()
+        tid = ingress.lookup('qq',rid)['turn_id']
+        base = {'instance':cfg['instance_id'],'consent':consent,'qq_origin':{'bot':'456','sender':'123'}}
+        with self.store.connection(write=True) as db:
+            turn = dict(db.execute('SELECT * FROM turns WHERE id=?',(tid,)).fetchone())
+            db.execute('INSERT INTO private_reply_source_sets VALUES (?,?,?)',
+                       (tid,encoded({'persona_world_version':persona_world.VERSION}),'fixture'))
+            self.assertEqual(len(persona_world.inspect_turn(db,cfg['instance_id'],self.pid,desktop_turn)),2)
+            facts = semantic_knowledge.materials(db,turn,base,'701')
+            self.assertTrue(any(row['title']=='701' for row in facts))
+            self.assertEqual(semantic_knowledge.materials(db,turn,base|{'qq_origin':{'bot':'456','sender':'456'}},'701'),[])
+        session_privacy.update(self.store,self.config,self.pid,sid,False,consent['revision'],
+                               consent['recipient_hash'],identifier(),session_privacy.PROTOCOL)
+        with self.store.connection() as db:
+            self.assertEqual(semantic_knowledge.materials(db,turn,base,'701'),[])
+        self.assertEqual(len(self.tools),calls)
+
     def test_citation_must_belong_to_received_public_sources(self):
         one='https://example.org/701'
         def cite(url):

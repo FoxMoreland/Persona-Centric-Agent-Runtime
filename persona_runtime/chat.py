@@ -457,6 +457,10 @@ class ChatEngine:
         if channel=='qq':
             from .qq_testing import QQTesting
             QQTesting(self.store.paths).check_runtime((origin or {}).get('sender',self.config.load()['owner_qq']))
+            if (self.store.paths.home/'private/qq-full-local-required.json').is_file():
+                raise RuntimeErrorBase('qq_full_local_route_not_ready')
+            if (self.store.paths.home / 'private/qq-native-reply.json').is_file():
+                raise RuntimeErrorBase('qq_native_ingress_v2_required')
         source_key = channel + ":" + request_id
         with self.store.connection(write=True) as conn:
             if conn.execute("SELECT 1 FROM ingress_receipts WHERE channel=? AND request_id=?",(channel,request_id)).fetchone():
@@ -863,6 +867,7 @@ class ChatEngine:
                     raise ModelError("roleplay_snapshot_invalid")
                 from .companion import read as companion_read
                 companion=companion_read(accepted_turn)
+                pro_test = json.loads(accepted_turn.get('context_policy_snapshot') or '{}').get('qq_pro_test')
                 from .scene_policy import frozen as scene_frozen
                 from .import_style import frozen as import_frozen, validate as validate_import
                 scene_on = bool(scene_frozen(accepted_turn) or import_frozen(accepted_turn))
@@ -894,7 +899,7 @@ class ChatEngine:
                         prepared=prepare_story(self,conn,accepted_turn)
                 elif self.dialogue_pipeline is not None:
                     prepared=await self.dialogue_pipeline.prepare(self,turn_id)
-                elif quoted or companion and companion['mode']=='minimal':
+                elif pro_test or quoted or companion and companion['mode']=='minimal':
                     prepared=await self._prepare_context(turn_id)
                 else:
                     selection=await self.selector.prepare(turn_id)
@@ -1005,6 +1010,16 @@ class ChatEngine:
                                 raise ModelError("desktop_owner_changed")
                         from .private_personas import guard_cloud_dispatch
                         guard_cloud_dispatch(self.store,turn['persona_id'],'main',model)
+                        if pro_test:
+                            from .qq_native_reply import pro_test as check_pro_scope
+                            from . import session_privacy
+                            cfg = self.config.load()
+                            if (not check_pro_scope(self.store.paths,cfg,turn['persona_id'],turn['session_id'])
+                                    or model != cfg['model'] and any(model.get(k)!=cfg['model'].get(k)
+                                         for k in ('base_url','name','encrypted_key'))
+                                    or not session_privacy.current(conn,self.config,cfg,turn['persona_id'],turn['session_id'],
+                                                                  session_privacy.recipients(self.config,cfg))['enabled']):
+                                raise ModelError('qq_pro_test_scope_changed')
                         if scene_on:
                             if state['attempts'] or state['prior_failures']:
                                 raise ModelError('scene_first_attempt_only')

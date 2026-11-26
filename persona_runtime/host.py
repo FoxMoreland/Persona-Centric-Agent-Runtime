@@ -50,10 +50,23 @@ async def run_astrbot(paths, stop):
     os.chdir(bot)
     sys.path.insert(0, str(bot))
     os.environ.update(ASTRBOT_ROOT=str(bot), ASTRBOT_CLI="1")
-    from .sdk_reference_guard import install
-    install()  # Before SDK accepts events; fail closed on incompatible conversion.
+    from .qq_context_journal import configured_journal
+    from .qq_core_sync import http_worker
+    from .sdk_reference_guard import install,install_context_capture,observe_ingress
+    cfg = ConfigStore(paths).load()
+    install(admit_event=observe_ingress(paths,cfg))
+    journal = configured_journal(paths,cfg)
+    install_context_capture(journal)
     from astrbot.cli.commands.cmd_run import run_astrbot as run
     secure_astrbot_logging(paths)
+    sync = None
+    endpoint = paths.home/'private/qq-core-history.json'
+    if journal and journal.core and endpoint.is_file():
+        history = json.loads(endpoint.read_text(encoding='utf-8'))
+        port = history['port']
+        if type(port) is not int or not 1 <= port <= 65535 or not Path(history['config_file']).is_absolute():
+            raise RuntimeErrorBase('qq_history_endpoint_unavailable')
+        sync = asyncio.create_task(http_worker(paths,journal,history['config_file'],port))
     task = asyncio.create_task(run(bot))
     try:
         while not task.done() and not stop.exists():
@@ -64,6 +77,9 @@ async def run_astrbot(paths, stop):
     except asyncio.CancelledError:
         pass
     finally:
+        if sync:
+            sync.cancel()
+            await asyncio.gather(sync,return_exceptions=True)
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

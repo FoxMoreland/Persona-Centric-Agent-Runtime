@@ -8,7 +8,7 @@ from .config import atomic_json
 
 
 async def heartbeat_loop(paths, config, platforms, *, publish=atomic_json, sleep=asyncio.sleep,
-                         diagnose=record):
+                         diagnose=record, client_for=None):
     def failure(stage, error):
         # Third-party adapters may remove Python root log handlers. This small
         # metadata-only operation log remains independent of those handlers.
@@ -32,7 +32,7 @@ async def heartbeat_loop(paths, config, platforms, *, publish=atomic_json, sleep
                 if meta.name != 'aiocqhttp' or meta.id != 'persona-onebot':
                     continue
                 stage = 'probe'
-                client = platform.get_client()
+                client = client_for(platform,cfg) if client_for else platform.get_client()
                 from .qq_client import probe_client
                 detail = await probe_client(client, cfg)
                 verified, online, connected = (detail[key] for key in ('verified', 'online', 'connected'))

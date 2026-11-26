@@ -1,5 +1,5 @@
 """Bounded, transaction-consistent projections of canonical ordinary archives."""
-from .archive import encoded, fingerprint, project_turn
+from .archive import encoded, fingerprint, native_qq_parts, project_turn
 from .archive_query import MAX_DOCUMENTS, MAX_SOURCE_CHARS, SearchFailure
 from .import_history import group as imported_group
 from .import_memory_scope import imported
@@ -79,6 +79,9 @@ def capture_connection(conn,spec,budget,*,before_order=None,prefer_session=None,
         parts = {}
         for row in conn.execute(f'SELECT id,turn_id,text,state,platform_message_id,part_index,sent_at,created_at FROM reply_delivery_parts WHERE turn_id IN ({marks}) ORDER BY part_index',turn_ids):
             parts.setdefault(row['turn_id'],[]).append(dict(row))
+        if selected['channel'] == 'qq':
+            for row in native_qq_parts(conn,turn_ids):
+                parts.setdefault(row['turn_id'],[]).append(dict(row))
         raws = {}
         for row in conn.execute(f'''SELECT t.id AS tid,r.id,r.event_id,r.platform_message_id,r.platform_time,r.received_at,r.representation
             FROM turns t JOIN input_batch_members m ON m.batch_id=t.input_batch_id

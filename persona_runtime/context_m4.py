@@ -153,6 +153,12 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
                  if shared_materials is None else json.loads(shared_materials))
     turns, frozen, spec, relation_blocked, relation, state, state_active, text, reference_block, reference_manifest, memories, summary, summary_items, original_summary_items, history, history_rows, history_items, initial_removed, covered = (materials[k] for k in ('turns', 'frozen', 'spec', 'relation_blocked', 'relation', 'state', 'state_active', 'text', 'reference_block', 'reference_manifest', 'memories', 'summary', 'summary_items', 'original_summary_items', 'history', 'history_rows', 'history_items', 'initial_removed', 'covered'))
     covered = set(covered)
+    opening_history = []
+    if json.loads(turn.get('context_policy_snapshot') or '{}').get('qq_pro_test') and len(history)<4:
+        from .qq_opening_archive import opening_material
+        opening = opening_material(conn,turn)
+        if opening:
+            opening_history.append({'role':'assistant','content':opening['text']})
     from .recall_runtime import selection as recall_selection,render as render_recall,accepted as recall_accepted,QUERY_VERSION
     from . import quote_context
     quote = quote_context.read(conn, turn) if reference_manifest.get('quote_window') else None
@@ -309,7 +315,7 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
             stamp = time_block(history_items, bindings)
             if stamp:
                 blocks.append(stamp)
-        result,assembly=assemble(blocks,[event for pair in history for event in pair],{'role':'user','content':text})
+        result,assembly=assemble(blocks,opening_history+[event for pair in history for event in pair],{'role':'user','content':text})
         assembly.update(expression_renderer=expression_renderer,format_renderer=format_renderer)
         if sum(len(m['content']) for m in result) <= limit:
             break
@@ -370,7 +376,7 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
             protocol=chat_contract()
             format_renderer=CHAT_RENDERER
         blocks=[PromptBlock(b.name,protocol,'reply_batch+companion_contract',format_renderer) if b.name=='reply_protocol' else b for b in blocks]
-        result,assembly=assemble(blocks,[event for pair in history for event in pair],{'role':'user','content':text})
+        result,assembly=assemble(blocks,opening_history+[event for pair in history for event in pair],{'role':'user','content':text})
         assembly.update(expression_renderer=expression_renderer,format_renderer=format_renderer)
     if is_minimal and read_companion(turn)['version']==PERSONA_VERSION:
         from .companion_persona import render as render_persona, INSTRUCTION, INSTRUCTION_VERSION, VERSION as PERSONA_RENDERER
@@ -383,7 +389,7 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
                 if b.name=='persona_expression' else
                 PromptBlock(b.name,'','companion_persona',PERSONA_RENDERER) if b.name=='character' else b
                 for b in blocks]
-        result,assembly=assemble(blocks,[event for pair in history for event in pair],{'role':'user','content':text})
+        result,assembly=assemble(blocks,opening_history+[event for pair in history for event in pair],{'role':'user','content':text})
         if sum(len(m['content']) for m in result)>limit:
             raise ModelError('companion_persona_input_limit_exceeded')
         assembly.update(expression_renderer=INSTRUCTION_VERSION,format_renderer=format_renderer,
@@ -395,7 +401,7 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
         character_body=('\n人物补充资料：\n'+'\n'.join(p['text'] for p in character_parts)) if character_parts else ''
         blocks=[PromptBlock(b.name,character_body,'companion_consumption',CONSUMER_VERSION)
                 if b.name=='character' else b for b in blocks]
-        result,assembly=assemble(blocks,[event for pair in history for event in pair],{'role':'user','content':text})
+        result,assembly=assemble(blocks,opening_history+[event for pair in history for event in pair],{'role':'user','content':text})
         consumption['final_input_hash']=assembly['input_snapshot_hash']
         assembly.update(expression_renderer=expression_renderer,format_renderer=format_renderer,
                         character_consumption=consumption)
@@ -414,7 +420,7 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
             if delegated_for_turn(conn,turn):
                 blocks,INSTRUCTION_VERSION=delegate_blocks(blocks,read_companion(turn)['version'])
                 punctuation_delegated=True
-        result,assembly=assemble(blocks,[event for pair in history for event in pair],{'role':'user','content':text})
+        result,assembly=assemble(blocks,opening_history+[event for pair in history for event in pair],{'role':'user','content':text})
         if sum(len(m['content']) for m in result)>limit:
             raise ModelError('companion_light_input_limit_exceeded')
         expression_renderer,format_renderer=INSTRUCTION_VERSION,FORMAT_RENDERER
@@ -447,7 +453,7 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
                           'character_version':study['character_version'],'field_projected':projected,
                           'omitted_history':excluded}
         blocks,character_body=render_native(blocks,character_parts)
-        result,assembly=assemble(blocks,[event for pair in history for event in pair],{'role':'user','content':text})
+        result,assembly=assemble(blocks,opening_history+[event for pair in history for event in pair],{'role':'user','content':text})
         if sum(len(m['content']) for m in result)>limit:
             raise ModelError('companion_native_input_limit_exceeded')
         consumption['final_input_hash']=assembly['input_snapshot_hash']
@@ -471,7 +477,7 @@ def build_context(engine, conn, turn, evidence=None, character=None, capsule=Non
         blocks = [b for b in blocks if b.name!="history_recorded_at"]
         blocks.append(PromptBlock('reply_protocol',SEARCH_NOTICE,'knowledge_translation',NOTICE_VERSION))
         blocks.extend(time_blocks)
-        result,assembly=assemble(blocks,[event for pair in history for event in pair],{'role':'user','content':search_notice_input(text)})
+        result,assembly=assemble(blocks,opening_history+[event for pair in history for event in pair],{'role':'user','content':search_notice_input(text)})
         if sum(len(message['content']) for message in result)>limit:
             raise ModelError('context_limit_exceeded')
         format_renderer=NOTICE_VERSION

@@ -297,6 +297,10 @@ class ManagedOrganization:
                 # This physical call is complete. Only its local publication uses
                 # the renewed grant, and the original attempt keeps its provider.
                 model=current_model
+        if payload.get('knowledge_processing') or payload.get('external_knowledge'):
+            from .qq_native_reply import full_local_required
+            if full_local_required(self.store.paths):
+                raise RuntimeErrorBase('qq_full_local_knowledge_disabled')
         if payload.get('knowledge_processing'):
             selected=self.scope(db,payload)
             if selected!=contract['scope'] or selected['channel'] not in p['channels']:

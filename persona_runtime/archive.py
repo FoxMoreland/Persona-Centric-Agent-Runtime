@@ -56,11 +56,30 @@ def find_turn(conn, kind, ident):
         row = conn.execute('SELECT * FROM turns WHERE id=?', (ident,)).fetchone()
     elif kind == 'part':
         row = conn.execute('SELECT t.* FROM turns t JOIN reply_delivery_parts p ON p.turn_id=t.id WHERE p.id=?', (ident,)).fetchone()
+        if not row and ':' in ident:
+            row = conn.execute('''SELECT t.* FROM turns t JOIN expression_speech_units u ON u.turn_id=t.id
+                JOIN expression_speech_publications p ON p.utterance_id=u.id
+                JOIN expression_speech_items i ON i.publication_id=p.id
+                WHERE t.channel='qq' AND i.id=?''', (ident,)).fetchone()
     else:
         row = conn.execute('SELECT t.* FROM turns t WHERE t.user_event_id=? OR t.reply_event_id=? OR t.input_batch_id IN (SELECT batch_id FROM input_batch_members WHERE event_id=?) ORDER BY t.rowid LIMIT 1', (ident, ident, ident)).fetchone()
     if not row and kind=='event':
         row=conn.execute("SELECT t.* FROM turns t JOIN knowledge_control c ON c.key='knowledge.search_notice.turn.'||t.id WHERE json_extract(c.value,'$.data.event_id')=? LIMIT 1",(ident,)).fetchone()
     return dict(row) if row else None
+
+
+def native_qq_parts(conn, turn_ids):
+    marks = ','.join('?' for _ in turn_ids)
+    return conn.execute(f'''SELECT i.id,i.text,u.turn_id,'sent' AS state,
+            json_extract(k.value,'$') AS platform_message_id,i.ordinal+1 AS part_index,
+            r.observed_at AS sent_at,r.observed_at AS created_at
+        FROM expression_speech_units u JOIN expression_speech_publications p ON p.utterance_id=u.id
+        JOIN expression_speech_items i ON i.publication_id=p.id AND i.revision=p.revision
+        JOIN expression_speech_receipts r ON r.id=i.receipt_id AND r.state='presented'
+        JOIN knowledge_control k ON k.key='qq.platform.speech.'||r.id
+        WHERE u.turn_id IN ({marks}) AND u.phase='main' AND i.state='presented'
+          AND NOT EXISTS(SELECT 1 FROM knowledge_control x WHERE x.key='qq.native.recalled.'||u.turn_id)
+        ORDER BY i.ordinal''', turn_ids)
 
 
 def read_exact(conn, selected_scope, target, audit=False):
@@ -106,6 +125,8 @@ def read_exact(conn, selected_scope, target, audit=False):
     from .knowledge_service import turn_usable
     blocked = blocked or not turn_usable(conn, turn['id'])
     parts = [dict(r) for r in conn.execute('SELECT id,text,state,platform_message_id,part_index,sent_at FROM reply_delivery_parts WHERE turn_id=? ORDER BY part_index', (turn['id'],))]
+    if turn['channel'] == 'qq':
+        parts.extend(dict(row) for row in native_qq_parts(conn, (turn['id'],)))
     raw = [dict(r) for r in conn.execute('SELECT id,event_id,platform_message_id,platform_time,received_at,representation FROM raw_events WHERE event_id IN (SELECT event_id FROM input_batch_members WHERE batch_id=?) ORDER BY rowid', (turn['input_batch_id'],))] if turn['input_batch_id'] else []
     r = conn.execute('SELECT id,text FROM events WHERE id=?',(turn['reply_event_id'],)).fetchone() if turn['reply_event_id'] else None
     from .knowledge_search_notice import read as read_search_notice
@@ -154,6 +175,15 @@ def resolve(conn, selected_scope, target, audit=False):
             continue
         t = dict(conn.execute('SELECT * FROM turns WHERE id=?',(row['turn_id'],)).fetchone())
         if turn_scope(conn,t) == selected_scope: candidates.append({'kind':'part','id':row[0]})
+    if selected_scope['channel'] == 'qq':
+        for row in conn.execute('''SELECT i.id,u.turn_id FROM expression_speech_items i
+            JOIN expression_speech_publications p ON p.id=i.publication_id AND p.revision=i.revision
+            JOIN expression_speech_units u ON u.id=p.utterance_id AND u.persona_id=?
+            JOIN knowledge_control k ON k.key='qq.platform.speech.'||i.receipt_id AND k.value=?
+            WHERE i.state='presented' AND u.phase='main' ''', (selected_scope['persona_id'],encoded(target['message_id']))):
+            turn = find_turn(conn,'turn',row['turn_id'])
+            if turn and turn_scope(conn,turn) == selected_scope:
+                candidates.append({'kind':'part','id':row['id']})
     if len(candidates) != 1: return {'status':'ambiguous' if candidates else 'not_found'}
     return read_exact(conn, selected_scope, candidates[0], audit)
 

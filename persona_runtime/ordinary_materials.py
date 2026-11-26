@@ -91,7 +91,7 @@ def _dialogue(db, turn, tid, jev, full):
     for event in chronological(result):
         role=event.get('role','assistant')
         if role != 'user' and not imported:
-            if not _confirmed(db,tid,event):
+            if not (turn['channel']=='qq' and event.get('kind')=='part' and event.get('state')=='sent') and not _confirmed(db,tid,event):
                 continue
         rows.append({'id':event['id'],'role':role,'text':event['text'],
                      'time':event.get('created_at') or source['created_at']})
@@ -139,9 +139,17 @@ def collect(entry, db, turn, contract, frozen=None):
     quote = None
     with history_access(db,sid,full):
         quote = quote_context.read(db, turn)
-        history = frozen['history'] if frozen else [] if quote else [r[0] for r in db.execute("""SELECT id FROM turns WHERE session_id=? AND persona_id=? AND channel='desktop'
+        history = frozen['history'] if frozen else [] if quote else [r[0] for r in db.execute("""SELECT id FROM turns WHERE session_id=? AND persona_id=? AND channel=?
             AND status='completed' AND rowid<(SELECT rowid FROM turns WHERE id=?) ORDER BY rowid DESC LIMIT 4""",
-            (sid,pid,turn['id']))]
+            (sid,pid,turn['channel'],turn['id']))]
+        if turn['channel']=='qq' and not quote and len(history)<4:
+            from .qq_opening_archive import opening_material
+            opening = opening_material(db,turn)
+            if opening and (not frozen or opening['id'] in frozen['admitted_ids']):
+                catalog[opening['id']] = opening
+                recent_ids.append(opening['id'])
+                if not history:
+                    previous_exchange.append(opening['id'])
         for previous in reversed(history):
             for item in _dialogue(db,turn,previous,jev,full):
                 catalog[item['id']] = item
@@ -184,11 +192,12 @@ def collect(entry, db, turn, contract, frozen=None):
         frozen_order={mid:i for i,mid in enumerate(frozen['memories'])} if frozen else {}
         memories = []
         selection = (" AND m.id IN (SELECT value FROM json_each(?))" if frozen else "")
-        parameters = (pid,sid,sid,json.dumps(frozen['memories'])) if frozen else (pid,sid,sid)
+        parameters = (pid,sid,sid,sid,json.dumps(frozen['memories'])) if frozen else (pid,sid,sid,sid)
         memory_query="""SELECT m.* FROM memories m JOIN events e ON e.id=m.source_event_id
                 LEFT JOIN memory_facts f ON f.memory_id=m.id
                 WHERE m.persona_id=? AND (e.session_id=? OR EXISTS(
-                  SELECT 1 FROM json_each(f.data_json,'$.portable_sessions') WHERE value=?))
+                  SELECT 1 FROM json_each(f.data_json,'$.portable_sessions') WHERE value=?) OR EXISTS(
+                  SELECT 1 FROM knowledge_control k WHERE k.key='qq.native.memory.'||?||'.'||m.id))
                 AND m.status='active'""" + selection
         if pinned:
             memory_query+=" ORDER BY (m.id IN (SELECT value FROM json_each(?))) DESC,m.rowid DESC LIMIT 128"
@@ -197,12 +206,14 @@ def collect(entry, db, turn, contract, frozen=None):
             memory_query+=" ORDER BY m.rowid DESC LIMIT 128"
         for row in db.execute(memory_query,parameters):
             item = dict(row)
-            if not portable_memory_sessions(db,item['id']) and not memory_in_session(db,item['id'],pid,sid):
-                continue
-            if not memory_usable(db,turn,item):
-                continue
-            if not full and not memory_usable(db,turn,item,purpose='jev',providers=jev):
-                continue
+            from .qq_shared_memory import readable
+            if not (full and readable(db,entry,turn,item)):
+                if not portable_memory_sessions(db,item['id']) and not memory_in_session(db,item['id'],pid,sid):
+                    continue
+                if not memory_usable(db,turn,item):
+                    continue
+                if not full and not memory_usable(db,turn,item,purpose='jev',providers=jev):
+                    continue
             if not quote or item["id"] in pinned:
                 score=len(query & terms(item['text']))
                 memories.append(((*quote_order(pinned,item['id']),score,recency(db,item,now)),item))

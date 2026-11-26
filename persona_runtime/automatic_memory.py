@@ -181,7 +181,10 @@ class AutomaticMemory:
 
     def payload(self,db,pid,sid,selected,turns,purpose='extract',previous=None):
         from .ordinary_materials import full_revision,history_access
-        full=full_revision(self.store,db,pid,sid,self.engine.model(),'organization') if selected['channel']=='desktop' else None
+        from .qq_native_reply import full_local_ready
+        full_route=(selected['channel']=='desktop' or selected['channel']=='qq' and
+                    full_local_ready(self.store.paths,self.engine.config.load(),pid,sid))
+        full=full_revision(self.store,db,pid,sid,self.engine.model(),'organization') if full_route else None
         with history_access(db,sid,full is not None):
             return self._session_payload(db,pid,sid,selected,turns,purpose,previous,full)
 
@@ -191,7 +194,7 @@ class AutomaticMemory:
         from .private_reply_entry import PRIVATE_ROUTES,selected as route
         from .models import ROLEPLAY, persona_chat_mode
         roleplay = persona_chat_mode(db, pid) == ROLEPLAY
-        ordinary = not roleplay and selected['channel']=='desktop' and route(db,self.engine.config.load()['instance_id']) in PRIVATE_ROUTES
+        ordinary = not roleplay and (selected['channel']=='desktop' or bool(full)) and route(db,self.engine.config.load()['instance_id']) in PRIVATE_ROUTES
         revision=None if full else grant(self.store,db,pid,sid,model)
         p={'persona_id':pid,'user_id':LOCAL_USER_ID,'session_id':sid,'channel':selected['channel'],'scope':selected,
            'mode':'both','source_format':3,'rows':[],'events':[],'bindings':[],'previous':None,

@@ -95,8 +95,21 @@ class PrivateReplyEntry:
         if retired(db,cfg['instance_id']):
             raise RuntimeErrorBase('private_reply_candidate_retired')
         turn = dict(db.execute("SELECT * FROM turns WHERE id=?", (turn_id,)).fetchone())
-        if turn['channel']!='desktop' or turn['cancelled_at'] or turn['status']=='completed':
+        if turn['channel'] not in ('desktop','qq') or turn['cancelled_at'] or turn['status']=='completed':
             raise RuntimeErrorBase('private_reply_turn_inactive')
+        origin = None
+        from .qq_native_reply import full_local_ready,full_local_required
+        knowledge_disabled = full_local_required(self.store.paths)
+        if turn['channel'] == 'qq':
+            from .qq_native_reply import assert_bound
+            full_local = full_local_ready(self.store.paths,cfg,turn['persona_id'],turn['session_id'])
+            if (phase != 'main' or route['route'] != (RESEARCH if full_local else ORDINARY)
+                    or full_local != bool(json.loads(turn['context_policy_snapshot'] or '{}').get('qq_full_local'))
+                    or knowledge_disabled and not full_local):
+                raise RuntimeErrorBase('qq_native_reply_not_ready')
+            origin = assert_bound(db,self.store.paths,cfg,turn)
+        if knowledge_disabled and phase != 'main':
+            raise RuntimeErrorBase('qq_full_local_knowledge_disabled')
         desktop_recovery.validate_turn(db, turn)
         pid, sid = turn['persona_id'], turn['session_id']
         if (self.store.current(db,required=False)!=pid or json.loads(turn['character_snapshot'])['id']!=character_head(db,pid)['id']
@@ -107,6 +120,8 @@ class PrivateReplyEntry:
         if (model['name'],model['base_url']) != (live['name'],live['base_url']) or not same_credential(model.get('encrypted_key'),live.get('encrypted_key')):
             raise RuntimeErrorBase('private_reply_model_changed')
         grant = session_privacy.current(db,self.config,cfg,pid,sid,session_privacy.recipients(self.config,cfg))
+        if origin is not None and not grant['enabled']:
+            raise RuntimeErrorBase('private_cloud_provider_not_authorized')
         from . import main_reply
         accepted_writer = model.get(main_reply.MARKER)
         writer_grant = None
@@ -131,6 +146,10 @@ class PrivateReplyEntry:
                     'model':fingerprint(turn['model_snapshot']), 'consent':grant}
         if writer_grant:
             contract['writer_consent'] = writer_grant
+        if origin is not None:
+            contract['qq_origin'] = origin
+        if knowledge_disabled:
+            contract['knowledge_disabled'] = True
         return turn, contract
 
     def contract(self, turn_id, phase='main'):

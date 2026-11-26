@@ -28,6 +28,7 @@ def protected_request(method,path,action=None):
     if method!='POST' or path.startswith('/v1/control/'):return False
     if path=='/v1/manage':return action not in READ_OR_RECEIPT
     if path.startswith('/v2/replies/') and path.endswith('/result'):return False
+    if path=='/v2/qq-native/result':return False
     if path.startswith('/v1/requests/') and path.endswith('/delivery'):return False
     return True
 

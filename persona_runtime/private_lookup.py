@@ -979,6 +979,8 @@ def normalized_sources(turn,sources,*,by_id):
 
 
 async def prepare(flow,turn,base,material):
+    if base.get('knowledge_disabled'):
+        raise RuntimeErrorBase('qq_full_local_knowledge_disabled')
     from . import research_contract,single_retrieval
     from .semantic_knowledge import active
     tid=turn['id']

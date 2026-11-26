@@ -209,7 +209,7 @@ class OrdinaryReply:
                                 selection['public_link_scope']=True
                     if getattr(self.providers,'research_contract_version',None):
                         selection['research_contract']=self.providers.research_contract_version
-                    if getattr(self.providers,'semantic_lookup',True):
+                    if not base.get('knowledge_disabled') and getattr(self.providers,'semantic_lookup',True):
                         from . import persona_world
                         if persona_world.enabled(db,base['instance'],turn['persona_id']):
                             selection['persona_world_version']=persona_world.VERSION
@@ -576,7 +576,7 @@ class OrdinaryReply:
                     AND status IN ('queued','running') AND cancelled_at IS NULL""",(turn['session_id'],tid)).fetchone():
                 return
         research=None
-        if base['route']==RESEARCH and not material.get('quote_window'):
+        if base['route']==RESEARCH and not base.get('knowledge_disabled') and not material.get('quote_window'):
             if not getattr(self.providers,'research',False) or not callable(getattr(self.providers,'retrieve',None)):
                 raise RuntimeErrorBase('private_reply_transport_unavailable')
             if getattr(self.providers,'study_enabled',False) and not callable(getattr(self.providers,'organize',None)):

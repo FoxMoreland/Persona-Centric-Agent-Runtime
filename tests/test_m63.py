@@ -122,6 +122,38 @@ class M63Tests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await bridge.deliver_stream(stream,send))
         self.assertEqual(sent,[])
 
+    async def test_snowluma_failure_halts_future_delivery_after_restart(self):
+        import json
+        from persona_runtime.config import ConfigStore
+        ConfigStore(self.paths).update({'qq_backend': 'snowluma'})
+        bridge = QQBridge(self.paths)
+        part = self.stream['parts'][0]
+        posted = []
+
+        async def request(method, path, value=None):
+            if path.endswith('/claim'):
+                return {'claimed': True, 'claim_token': 'fixture-claim', 'part_revision': 2}
+            if path.endswith('/result'):
+                posted.append(value)
+                return {'revision': 3}
+            raise AssertionError(path)
+
+        bridge.request = request
+        sends = []
+
+        async def send(text):
+            sends.append(text)
+            return False
+
+        self.assertFalse(await bridge.deliver_stream(self.stream, send))
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(posted[0]['state'], 'failed')
+        self.assertEqual(json.loads(bridge.delivery_halt_path.read_text())['part_id'], part['id'])
+        restarted = QQBridge(self.paths)
+        restarted.request = request
+        self.assertFalse(await restarted.deliver_stream(self.stream, send))
+        self.assertEqual(len(sends), 1)
+
     async def test_same_target_turns_share_ordered_stream(self):
         second=await self.engine.submit("qq","second question",identifier(),origin={"sender":"123","bot":"456"})
         await self.engine.wait();second=self.engine.get(second["id"])
